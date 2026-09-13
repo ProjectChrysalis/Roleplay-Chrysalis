@@ -2093,6 +2093,21 @@ describe("rp studio: scoped regex + extended samplers + v3 cards", () => {
   }, 30_000);
 });
 
+describe("rp studio: backup import stays inside its collections", () => {
+  it("an entry id cannot move the write outside the collection its entry names", async () => {
+    fs.mkdirSync(path.join(root, "tools"), { recursive: true });
+    // zip-slip is caught on entry names by the engine; this rides an entry
+    // the importer accepts and hides the traversal in the id it writes into
+    // the path
+    const entries = { "groups/innocent.json": JSON.stringify({ id: "../tools/pwned", name: "normal group", memberIds: [] }) };
+    const m = mockHost();
+    (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => 1 };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(fs.existsSync(path.join(root, "tools", "pwned.json")), `wrote outside groups/: ${JSON.stringify(r.json)}`).toBe(false);
+    expect(fs.existsSync(path.join(root, "groups", "tools-pwned.json"))).toBe(true);
+  }, 30_000);
+});
+
 describe("rp studio: export → import zip round-trip", () => {
   it("the exported backup re-imports through /import/zip (text entries)", async () => {
     const m = mockHost();
