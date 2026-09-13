@@ -55,7 +55,7 @@ builds it into your copy while you watch.
 3. Add a model connection in **Settings > API connections** and start chatting.
 
 To install a specific copy, use **Import app** in the launcher with
-`https://github.com/ProjectChrysalis/Roleplay`.
+`https://github.com/ProjectChrysalis/Roleplay-Chrysalis`.
 
 ## Updates
 
