@@ -14,6 +14,7 @@ import type {
 import { uid } from './tokens'
 import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT } from './seed'
 import { DEFAULT_AVATAR, storedMediaUrl } from './utils'
+import { saveFile } from './export'
 
 // frame URL is /app/<user>/<app>/ (cookieless sandboxed origin)
 export const APP_ID = decodeURIComponent(location.pathname.split('/').filter(Boolean)[2] ?? 'roleplay')
@@ -1342,12 +1343,7 @@ export function downloadBlob(base64: string, filename: string, mime = 'applicati
   const bin = atob(base64)
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  const url = URL.createObjectURL(new Blob([bytes], { type: mime }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 4000)
+  saveFile(new Blob([bytes], { type: mime }), filename)
 }
 
 // ---------- PNG character-card extraction (browser side, own parser) ----------

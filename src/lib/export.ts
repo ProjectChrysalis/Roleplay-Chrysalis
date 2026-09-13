@@ -1,16 +1,23 @@
 import type { Chat, Character } from './types'
 
-/** Trigger a client-side file download for generated text content. */
-export function downloadTextFile(filename: string, content: string, mime = 'text/plain') {
-  const blob = new Blob([content], { type: `${mime};charset=utf-8` })
+/** Save a file through the browser. The object URL outlives the click:
+ *  revoking it in the same tick cancels the download on browsers that fetch
+ *  the blob after the click returns. */
+export function saveFile(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  a.rel = 'noopener'
   document.body.appendChild(a)
   a.click()
   a.remove()
-  URL.revokeObjectURL(url)
+  setTimeout(() => URL.revokeObjectURL(url), 40_000)
+}
+
+/** Trigger a client-side file download for generated text content. */
+export function downloadTextFile(filename: string, content: string, mime = 'text/plain') {
+  saveFile(new Blob([content], { type: `${mime};charset=utf-8` }), filename)
 }
 
 function speakerName(chat: Chat, characters: Character[], characterId: string | null, role: string) {

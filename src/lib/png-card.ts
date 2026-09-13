@@ -1,4 +1,5 @@
 import type { EngineCard } from './engine'
+import { saveFile } from './export'
 
 // PNG character-card EXPORT — the mirror of the tEXt 'chara' importer in
 // engine.ts. Re-encodes the character's avatar as a PNG on a canvas, then
@@ -75,10 +76,5 @@ export async function buildCardPng(imageDataUrl: string, card: EngineCard): Prom
 }
 
 export function downloadCardPng(bytes: Uint8Array, name: string): void {
-  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/png' }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${name.replace(/[^a-z0-9-]+/gi, '_').slice(0, 60) || 'character'}.card.png`
-  a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 4000)
+  saveFile(new Blob([bytes as BlobPart], { type: 'image/png' }), `${name.replace(/[^a-z0-9-]+/gi, '_').slice(0, 60) || 'character'}.card.png`)
 }

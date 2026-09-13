@@ -12,18 +12,13 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { useApp } from "@/lib/store"
+import { saveFile } from "@/lib/export"
 import { fileToRawBase64, j } from "@/lib/engine"
 import type { Chat, ID } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 function downloadText(text: string, filename: string, mime = "text/plain") {
-  const blob = new Blob([text], { type: mime })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement("a")
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  saveFile(new Blob([text], { type: mime }), filename)
 }
 
 const safeName = (name: string) => name.replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "") || "chat"
