@@ -170,6 +170,6 @@ export function defaultSettings(): AppSettings {
       mode: 'auto', interval: 40, keepRecent: 6, targetLength: 300, prompt: DEFAULT_SUMMARY_PROMPT,
       template: '[Story so far: {{summary}}]', position: 'after-system', depth: 2, role: 'system',
     },
-    memory: { enabled: true, auto: false, interval: 20 },
+    memory: { enabled: true, auto: false, interval: 20, model: '' },
   }
 }

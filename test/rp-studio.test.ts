@@ -1697,6 +1697,26 @@ describe("rp studio import", () => {
     expect(newKeys).not.toContain("memory");
   }, 30_000);
 
+  it("summaries and facts use the memory model when one is set, the chat's model otherwise", async () => {
+    const settingsWith = (memory: Record<string, unknown>) =>
+      fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ model: null, personaId: "you", ui: { memory } }));
+    settingsWith({ enabled: true, auto: true, interval: 2, model: "cheap/summarizer" });
+    const m = mockHost({ text: '[{"text": "The traveler carries a brass compass.", "importance": 3}]' });
+    const chat = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (chat.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello", model: "big/storyteller" } }, m);
+    const byKey = (key: string) => m.requests.filter((r) => r.key === key).at(-1)!.req as { model?: string };
+    expect(byKey("reply").model).toBe("big/storyteller");
+    expect(byKey("memory").model).toBe("cheap/summarizer");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "more", model: "big/storyteller" } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 2, model: "big/storyteller" } }, m);
+    expect(byKey("summary").model).toBe("cheap/summarizer");
+
+    settingsWith({ enabled: true, auto: false, interval: 20, model: "" });
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/memories/extract`, body: { model: "big/storyteller" } }, m);
+    expect(byKey("memory").model).toBe("big/storyteller");
+  }, 30_000);
+
   it("normalizes legacy world positions and skips empty entries", async () => {
     const m = mockHost();
     const r = await drive(stUrl, {

@@ -556,7 +556,7 @@ export const useApp = create<AppState>()(
           // memory vault config: older builds shipped a chunking stub that
           // never ran — replace it wholesale with the vault defaults
           if (typeof get().settings.memory?.enabled !== 'boolean') {
-            set({ settings: { ...get().settings, memory: { enabled: true, auto: false, interval: 20 } } })
+            set({ settings: { ...get().settings, memory: { enabled: true, auto: false, interval: 20, model: '' } } })
           }
           // summary config normalization. Older builds kept an ordered prompt
           // list; its instruction text carries over as the single prompt when

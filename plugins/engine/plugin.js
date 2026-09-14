@@ -2516,6 +2516,12 @@ export function handleRoute(req, host) {
     const members = chatMembers(fsx, meta);
     const group = meta.groupId ? readJson("groups/" + meta.groupId + ".json", null) : null;
     const modelOf = () => (body().model != null ? body().model : meta.model);
+    // summaries and facts can run on a model of their own (Settings, Memory),
+    // usually a cheaper one than the storyteller
+    const memoryModelOf = () => {
+      const chosen = String(((readJson("settings.json", {}).ui || {}).memory || {}).model || "").trim();
+      return chosen || modelOf();
+    };
     // stored-text regex for a message about to be saved in this chat
     const onSave = (text, placement, speaker) => regexOnSave(fsx, meta, members, text, placement, saveMacros(fsx, meta, chat.msgs, speaker));
     // PASS A of a generation writes no transcript — but a page reload inside
@@ -2730,7 +2736,7 @@ const toolX = (r) => ({
           if (transcript) {
             host.llm.request("memory", {
               messages: [{ role: "user", content: memoryExtractPrompt(transcript) }],
-              ...(modelOf() ? { model: modelOf() } : {}),
+              ...(memoryModelOf() ? { model: memoryModelOf() } : {}),
             });
           }
         }
@@ -3128,7 +3134,7 @@ const toolX = (r) => ({
         if (!transcript) return err(400, "nothing to extract from yet");
         host.llm.request("memory", {
           messages: [{ role: "user", content: memoryExtractPrompt(transcript) }],
-          ...(modelOf() ? { model: modelOf() } : {}),
+          ...(memoryModelOf() ? { model: memoryModelOf() } : {}),
         });
         return pendingOut(meta);
       }
@@ -3232,7 +3238,7 @@ const toolX = (r) => ({
             { role: "system", content: instructions },
             { role: "user", content: (base.trim() ? "Summary so far:\n" + base.trim() + "\n\n" : "") + "Messages to fold in:\n\n" + transcript },
           ],
-          ...(modelOf() ? { model: modelOf() } : {}),
+          ...(memoryModelOf() ? { model: memoryModelOf() } : {}),
         });
         return pendingOut(meta, redo ? undefined : { compact: { from: (chat.msgs[fromIdx] || {}).id || null, to: chat.msgs[toIdx].id } });
       }

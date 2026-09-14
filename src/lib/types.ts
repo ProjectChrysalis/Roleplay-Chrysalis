@@ -694,8 +694,9 @@ export interface AppSettings {
     depth: number
     role: 'system' | 'user' | 'assistant'
   }
-  /** long-term memory vault: per-chat durable facts, recalled into the prompt */
-  memory: { enabled: boolean; auto: boolean; interval: number }
+  /** long-term memory vault: per-chat durable facts, recalled into the prompt.
+   *  `model` makes summaries and facts (blank = the chat's own model). */
+  memory: { enabled: boolean; auto: boolean; interval: number; model?: string }
 }
 
 

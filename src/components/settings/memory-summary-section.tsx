@@ -20,14 +20,37 @@ export function MemorySummarySection() {
   const summary = useApp((s) => s.settings.summary)
   const memory = useApp((s) => s.settings.memory)
   const updateSettings = useApp((s) => s.updateSettings)
+  const models = useApp((s) => s.models)
   const set = (patch: Partial<typeof summary>) => updateSettings({ summary: { ...summary, ...patch } })
   const setMemory = (patch: Partial<typeof memory>) => updateSettings({ memory: { ...memory, ...patch } })
   const [embed, setEmbed] = useState<{ ok: boolean; via: string | null } | null>(null)
   const [embedModel, setEmbedModel] = useState('text-embedding-3-small')
   useEffect(() => { void embedStatus().then(setEmbed); void embedConfig().then((c) => setEmbedModel(c.model)) }, [])
 
+  // a chosen model whose connection is gone still shows, rather than the
+  // picker silently reading "the chat's model"
+  const memoryModel = memory.model ?? ''
+  const modelRefs = models.map((m) => m.ref)
+  if (memoryModel && !modelRefs.includes(memoryModel)) modelRefs.unshift(memoryModel)
+
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-5">
+      <div className="flex flex-col gap-3 rounded-md border border-border p-3">
+        <div className="flex flex-col gap-0.5">
+          <p className="text-sm font-medium">Memory model</p>
+          <p className="text-xs text-muted-foreground">Writes summaries and finds facts. A cheaper one saves money.</p>
+        </div>
+        <Select value={memoryModel || 'chat'} onValueChange={(v) => v && setMemory({ model: v === 'chat' ? '' : v })}>
+          <SelectTrigger aria-label="Memory model"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="chat">The chat's model</SelectItem>
+            {modelRefs.map((ref) => (
+              <SelectItem key={ref} value={ref}>{ref}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
       <div className="flex flex-col gap-4 rounded-md border border-border p-3">
         <p className="text-sm font-medium">Summary</p>
         <Field orientation="horizontal">

@@ -62,6 +62,9 @@ to it on every change. Messages are a FLAT list with swipes.
   but leave the prompt. Auto mode compacts when a send reports `trimmed`
   (history fell out of the context) or every `interval` turns. The per-chat
   facts vault (/memories) is unchanged, shown under Memory → Facts.
+  Summaries and fact extraction (manual and automatic) run on
+  ui.memory.model when set (memoryModelOf in the engine plugin), otherwise on
+  the chat's model.
 - Pictures: /chats/:id/image-prompt has the chat model describe the scene
   (modes scene/character/face/user/background); the engine's /v1/images
   draws it into the asset store (/v1/assets/<sha>); POST /chats/:id/messages
