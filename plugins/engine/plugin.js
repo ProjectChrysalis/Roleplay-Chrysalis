@@ -1059,6 +1059,20 @@ function chatMembers(fsx, meta) {
  * msgs = messages BEFORE the reply being generated (already includes any
  * pending user message the caller staged). speaker = the member replying.
  */
+/** The preset the user marked as default; the stock file when none is. */
+function defaultPresetId(fsx) {
+  try {
+    for (const f of fsx.list("presets")) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const cand = JSON.parse(fsx.read("presets/" + f));
+        if (cand && cand.studio && cand.studio.isDefault === true) return f.slice(0, -5);
+      } catch {}
+    }
+  } catch {}
+  return "default";
+}
+
 function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   const members = chatMembers(fsx, meta);
   const speakerCard = (speaker && speaker.card) || (members[0] && members[0].card) || null;
@@ -1081,16 +1095,7 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
     // dead binding — the pinned preset was deleted (e.g. an import that
     // didn't survive): assemble with the user's DEFAULT preset instead of
     // silently degrading to the bare fallback layout
-    try {
-      for (const f of fsx.list("presets")) {
-        if (!f.endsWith(".json")) continue;
-        try {
-          const cand = JSON.parse(fsx.read("presets/" + f));
-          if (cand && cand.studio && cand.studio.isDefault === true) { preset = cand; break; }
-        } catch {}
-      }
-    } catch {}
-    if (!preset) { try { preset = JSON.parse(fsx.read("presets/default.json")); } catch {} }
+    try { preset = JSON.parse(fsx.read("presets/" + defaultPresetId(fsx) + ".json")); } catch {}
   }
   // studio bag: the full app preset rides the engine preset file
   const S = preset && preset.studio && typeof preset.studio.samplers === "object" ? preset.studio.samplers : null;
@@ -2645,7 +2650,8 @@ export function handleRoute(req, host) {
         title: b.title || "New chat",
         characterId: b.characterId || null,
         groupId: b.groupId || null,
-        presetId: b.presetId || "default",
+        // a new chat starts on the user's default preset, not the stock one
+        presetId: b.presetId || defaultPresetId(fsx),
         personaId: persona ? personaId : null,
         model: b.model || null,
         userName,

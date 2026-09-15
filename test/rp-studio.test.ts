@@ -240,6 +240,20 @@ describe("rp studio engine: chats + swipes", () => {
     expect(msgs[0]!.swipes).toHaveLength(3); // first_mes + 2 alternates
   }, 30_000);
 
+  it("starts a new chat on the preset the user made default", async () => {
+    const m = mockHost();
+    const stock = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    expect((stock.json.meta as Record<string, unknown>).presetId).toBe("default");
+    fs.writeFileSync(
+      path.join(root, "presets", "mine.json"),
+      JSON.stringify({ id: "mine", name: "Mine", prompts: [], prompt_order: [], temperature: 1.1, studio: { isDefault: true } }),
+    );
+    const r = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    expect((r.json.meta as Record<string, unknown>).presetId).toBe("mine");
+    const picked = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", presetId: "default" } }, m);
+    expect((picked.json.meta as Record<string, unknown>).presetId).toBe("default");
+  }, 30_000);
+
   it("swipes the pristine greeting WITHOUT calling the model (wraps)", async () => {
     const m = mockHost();
     await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
