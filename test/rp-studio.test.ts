@@ -2389,3 +2389,350 @@ describe("rp studio engine: pictures, personas, card regex", () => {
   }, 30_000);
 });
 
+
+// ── the bugs that made a move to a second device lossy ──────────────────────
+
+describe("rp studio: a chat with no persona to resolve", () => {
+  // chatPersona used to fall back through chatUserName, which is chatPersona's
+  // own accessor: every chat that could not resolve a persona recursed until
+  // the sandbox stack gave out. A restored backup is exactly that state —
+  // fresh persona ids, nothing marked default in settings.json.
+  const strand = () => {
+    fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ model: null }));
+    fs.rmSync(path.join(root, "personas", "you.json"));
+  };
+
+  it("generates instead of blowing the stack", async () => {
+    strand();
+    const m = mockHost();
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    const r = await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello", model: "mock/model" } }, m);
+    expect(r.status).toBe(200);
+    expect((r.json.reply as { text: string }).text).toBe("MOCK-REPLY");
+  }, 30_000);
+
+  it("peeks the prompt instead of blowing the stack", async () => {
+    strand();
+    const m = mockHost();
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    const r = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(r.status).toBe(200);
+    expect(r.json.presetName).toBe("Default");
+  }, 30_000);
+
+  it("falls back to the name the chat stored, then to User", async () => {
+    strand();
+    // a prompt that says {{user}}, so the assembled text shows who we are
+    fs.writeFileSync(path.join(root, "presets", "default.json"), JSON.stringify({
+      id: "default", name: "Default",
+      prompts: [{ identifier: "main", name: "Main", role: "system", content: "Speaking with {{user}}." }],
+      prompt_order: [{ character_id: 100000, order: [{ identifier: "main", enabled: true }] }],
+    }));
+    const m = mockHost();
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    const bare = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(JSON.stringify(bare.json.messages) + String(bare.json.systemPrompt)).toContain("Speaking with User.");
+
+    const metaPath = path.join(root, "chats", `${id}.meta.json`);
+    fs.writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(metaPath, "utf8")), userName: "Robin" }));
+    const r = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(JSON.stringify(r.json.messages) + String(r.json.systemPrompt)).toContain("Speaking with Robin.");
+  }, 30_000);
+});
+
+describe("rp studio: backup zips survive the trip", () => {
+  const exportEntries = async (m: ReturnType<typeof mockHost>) => {
+    const exp = await drive(engineUrl, { method: "GET", path: "/export/backup" }, m);
+    const files = unzipSync(Buffer.from(exp.json.base64 as string, "base64")) as Record<string, Uint8Array>;
+    const entries: Record<string, string> = {};
+    for (const [name, data] of Object.entries(files)) entries[name] = new TextDecoder().decode(data);
+    return entries;
+  };
+
+  it("writes UTF-8, not latin1 with every other character punched out", async () => {
+    // curly quotes, an em dash, an accent and an emoji — ordinary prose
+    const prose = "“Café” — naïve 🦋 日本語";
+    fs.writeFileSync(
+      path.join(root, "characters", "aria", "card.json"),
+      JSON.stringify({ spec: "chara_card_v2", name: "Aria", description: prose, personality: "", scenario: "", first_mes: "hi", mes_example: "" }),
+    );
+    const entries = await exportEntries(mockHost());
+    const card = JSON.parse(entries["characters/aria.json"]!) as { description: string };
+    expect(card.description).toBe(prose);
+    expect(card.description).not.toContain("?");
+  }, 30_000);
+
+  it("carries the chat's preset, persona, model and notes, not just its lines", async () => {
+    const m = mockHost();
+    fs.writeFileSync(path.join(root, "presets", "mine.json"), JSON.stringify({ id: "mine", name: "My Preset", prompts: [], prompt_order: [], temperature: 0.4 }));
+    fs.writeFileSync(path.join(root, "personas", "robin.json"), JSON.stringify({ id: "robin", name: "Robin", description: "a detective", title: "PI", pronouns: "they/them", avatar: "data:image/png;base64,AAA", isDefault: true }));
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi", model: "mock/model" } }, m);
+    await drive(engineUrl, {
+      method: "PATCH", path: `/chats/${id}`,
+      body: { presetId: "mine", personaId: "robin", title: "Crossroads at Dusk", summary: "they met", chatTags: ["noir"] },
+    }, m);
+
+    const entries = await exportEntries(m);
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    expect(r.json.errors).toEqual([]);
+
+    const chatId = (r.json.chats as string[])[0]!;
+    const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", `${chatId}.meta.json`), "utf8")) as Record<string, unknown>;
+    // the title is the real one, not the filename slug title-cased back
+    expect(meta.title).toBe("Crossroads at Dusk");
+    expect(meta.summary).toBe("they met");
+    expect(meta.chatTags).toEqual(["noir"]);
+    // and it still rides the preset and persona it was pinned to
+    const preset = JSON.parse(fs.readFileSync(path.join(root, "presets", `${meta.presetId}.json`), "utf8")) as { name: string };
+    expect(preset.name).toBe("My Preset");
+    const persona = JSON.parse(fs.readFileSync(path.join(root, "personas", `${meta.personaId}.json`), "utf8")) as Record<string, unknown>;
+    expect(persona.name).toBe("Robin");
+    // …with the persona whole, not just its name and description
+    expect(persona.title).toBe("PI");
+    expect(persona.pronouns).toBe("they/them");
+    expect(persona.avatar).toBe("data:image/png;base64,AAA");
+    expect(persona.isDefault).toBe(true);
+  }, 30_000);
+
+  it("keeps hidden turns, bookmarks and the model stamp on each message", async () => {
+    const m = mockHost();
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi", model: "mock/model" } }, m);
+    const lines = fs.readFileSync(path.join(root, "chats", `${id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    lines[0]!.hidden = true;
+    lines[0]!.bookmark = "opening";
+    fs.writeFileSync(path.join(root, "chats", `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+    const entries = await exportEntries(m);
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    const chatId = (r.json.chats as string[])[0]!;
+    const back = fs.readFileSync(path.join(root, "chats", `${chatId}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(back[0]!.hidden).toBe(true);
+    expect(back[0]!.bookmark).toBe("opening");
+    // the reply keeps which model wrote it
+    const reply = back.find((x) => x.role === "char" && (x.extra as { model?: string } | undefined)?.model);
+    expect((reply!.extra as { model: string }).model).toBe("mock/model");
+  }, 30_000);
+
+  it("brings app settings and the local collections back", async () => {
+    const m = mockHost();
+    await drive(engineUrl, { method: "PUT", path: "/settings", body: { ui: { theme: "midnight", proseFont: "noto" } } }, m);
+    await drive(engineUrl, { method: "PUT", path: "/library", body: { themes: [{ id: "t1", name: "Midnight" }], tags: ["noir"] } }, m);
+    const entries = await exportEntries(m);
+    // wipe what we are about to restore, so the assertions can only pass if
+    // the zip actually carried it
+    fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ model: null, personaId: "you" }));
+    fs.rmSync(path.join(root, "library.json"), { force: true });
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    const settings = JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")) as { ui: { theme: string } };
+    expect(settings.ui.theme).toBe("midnight");
+    const lib = JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")) as { tags: string[] };
+    expect(lib.tags).toEqual(["noir"]);
+  }, 30_000);
+
+  it("keeps a lorebook's own settings and its link to a card", async () => {
+    const m = mockHost();
+    fs.writeFileSync(path.join(root, "lorebooks", "b1.json"), JSON.stringify({
+      id: "b1", name: "City Lore", globalActive: true, linkedCharacterIds: ["aria"],
+      settings: { scanDepth: 9, contextPercent: 40, recursiveScan: false },
+      entries: [{ uid: 0, title: "Docks", memo: "Docks", keys: ["docks"], content: "Cold water.", enabled: true, order: 100, position: "after_char" }],
+    }));
+    const entries = await exportEntries(m);
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    const bookId = (r.json.lorebooks as string[])[0]!;
+    const book = JSON.parse(fs.readFileSync(path.join(root, "lorebooks", `${bookId}.json`), "utf8")) as Record<string, unknown>;
+    expect(book.globalActive).toBe(true);
+    expect((book.settings as { scanDepth: number }).scanDepth).toBe(9);
+    // linked by NAME across the trip: it lands on whichever id this workspace
+    // minted for Aria, not the id the other machine used
+    const linked = (book.linkedCharacterIds as string[])[0]!;
+    expect(JSON.parse(fs.readFileSync(path.join(root, "characters", linked, "card.json"), "utf8")).name).toBe("Aria");
+  }, 30_000);
+});
+
+describe("rp studio: foreign backup layouts", () => {
+  const card = {
+    spec: "chara_card_v2",
+    data: { name: "Nadia", description: "A locksmith.", personality: "wry", scenario: "", first_mes: "Hey.", mes_example: "" },
+  };
+
+  // The three ways people actually hand us one of these zips. Only the first
+  // was ever recognised, and only at one exact nesting depth.
+  for (const [label, prefix] of [
+    ["the tool's own backup", "default-user/"],
+    ["the data folder", "data/default-user/"],
+    ["the whole install directory", "MyTool-1.13.4/data/default-user/"],
+    ["just the folders they wanted", ""],
+  ] as const) {
+    it(`imports ${label}`, async () => {
+      const entries: Record<string, unknown> = {
+        [`${prefix}characters/nadia.json`]: JSON.stringify(card),
+        [`${prefix}worlds/City.json`]: JSON.stringify({ name: "City", entries: { 0: { uid: 0, key: ["docks"], content: "Cold water.", comment: "Docks" } } }),
+        [`${prefix}OpenAI Settings/Night Shift.json`]: JSON.stringify({ temperature: 0.7, openai_max_tokens: 900, prompts: [], prompt_order: [] }),
+        [`${prefix}settings.json`]: JSON.stringify({
+          personas: { "robin.png": "Robin" },
+          persona_descriptions: { "robin.png": { description: "a detective" } },
+        }),
+      };
+      const m = mockHost();
+      (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+      const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+      expect(r.json.characters).toHaveLength(1);
+      expect(r.json.lorebooks).toHaveLength(1);
+      expect(r.json.presets).toHaveLength(1);
+      expect(r.json.personas).toHaveLength(1);
+      const preset = JSON.parse(fs.readFileSync(path.join(root, "presets", `${(r.json.presets as string[])[0]}.json`), "utf8")) as { name: string };
+      expect(preset.name).toBe("Night Shift");
+      const persona = JSON.parse(fs.readFileSync(path.join(root, "personas", `${(r.json.personas as string[])[0]}.json`), "utf8")) as { name: string; description: string };
+      expect(persona.name).toBe("Robin");
+      expect(persona.description).toBe("a detective");
+    }, 30_000);
+  }
+
+  it("imports PNG cards out of a backup zip", async () => {
+    // a minimal PNG with a tEXt "chara" chunk — the shape a card file has
+    const payload = Buffer.from(JSON.stringify(card)).toString("base64");
+    const chunk = (type: string, body: Buffer) => {
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(body.length);
+      const crc = Buffer.alloc(4); // the reader never checks it
+      return Buffer.concat([len, Buffer.from(type, "latin1"), body, crc]);
+    };
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      chunk("tEXt", Buffer.concat([Buffer.from("chara", "latin1"), Buffer.from([0]), Buffer.from(payload, "latin1")])),
+      chunk("IEND", Buffer.alloc(0)),
+    ]);
+    // the kernel's zip service tags a binary entry __b64__; the importer read
+    // __b64, so every PNG card in every backup was reported as unreadable
+    const entries: Record<string, unknown> = {
+      "data/default-user/characters/Nadia.png": { __b64__: true, base64: png.toString("base64"), size: png.length },
+    };
+    const m = mockHost();
+    (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => 1 };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(r.json.errors).toEqual([]);
+    expect(r.json.characters).toHaveLength(1);
+    const written = JSON.parse(fs.readFileSync(path.join(root, "characters", (r.json.characters as string[])[0]!, "card.json"), "utf8")) as { name: string };
+    expect(written.name).toBe("Nadia");
+  }, 30_000);
+});
+
+describe("rp studio: personas stay where you put them", () => {
+  const seedPersonas = () => {
+    fs.writeFileSync(path.join(root, "personas", "robin.json"), JSON.stringify({ id: "robin", name: "Robin", description: "a detective" }));
+    fs.writeFileSync(path.join(root, "personas", "sam.json"), JSON.stringify({ id: "sam", name: "Sam", description: "a courier" }));
+    fs.writeFileSync(path.join(root, "presets", "default.json"), JSON.stringify({
+      id: "default", name: "Default",
+      prompts: [{ identifier: "main", name: "Main", role: "system", content: "Speaking with {{user}}." }],
+      prompt_order: [{ character_id: 100000, order: [{ identifier: "main", enabled: true }] }],
+    }));
+  };
+  const spoken = (r: { json: Record<string, unknown> }) =>
+    JSON.stringify(r.json.messages) + String(r.json.systemPrompt);
+
+  it("switches mid-chat without rewriting the turns already sent", async () => {
+    seedPersonas();
+    const m = mockHost();
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", personaId: "robin" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi", model: "mock/model" } }, m);
+
+    const patched = await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { personaId: "sam" } }, m);
+    expect((patched.json as { personaId: string }).personaId).toBe("sam");
+    // new turns speak as Sam…
+    const peek = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(spoken(peek)).toContain("Speaking with Sam.");
+    // …and the turn already sent keeps the name it was sent under
+    const lines = fs.readFileSync(path.join(root, "chats", `${id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as { role: string; name: string });
+    expect(lines.find((l) => l.role === "user")!.name).toBe("Robin");
+  }, 30_000);
+
+  it("leaves the other chats alone", async () => {
+    seedPersonas();
+    const m = mockHost();
+    const a = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", personaId: "robin" } }, m);
+    const b = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", personaId: "robin" } }, m);
+    const aId = (a.json.meta as { id: string }).id;
+    const bId = (b.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${aId}`, body: { personaId: "sam" } }, m);
+    const other = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: bId } }, m);
+    expect(spoken(other)).toContain("Speaking with Robin.");
+  }, 30_000);
+
+  it("a chat that pinned a persona ignores a change of the default", async () => {
+    seedPersonas();
+    const m = mockHost();
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", personaId: "robin" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    // the app-wide default moves; the pinned chat must not follow
+    await drive(engineUrl, { method: "PUT", path: "/settings", body: { personaId: "sam" } }, m);
+    const peek = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(spoken(peek)).toContain("Speaking with Robin.");
+  }, 30_000);
+});
+
+describe("rp studio: backups from older versions still import", () => {
+  // The shape a pre-4.17.1 export produced: no chat meta sidecar, no memories,
+  // no full persona records, a three-field settings stamp and no library.
+  // Everything the newer importer reads is optional, so an old backup must
+  // still land — nobody should have to re-export before restoring.
+  it("imports a v1 backup with no sidecars", async () => {
+    const entries: Record<string, string> = {
+      "characters/nadia.json": JSON.stringify({ spec: "chara_card_v2", name: "Nadia", description: "A locksmith.", personality: "", scenario: "", first_mes: "Hey.", mes_example: "" }),
+      "User Settings/personas.json": JSON.stringify({ Robin: "a detective" }),
+      "User Settings/openai_settings.json": JSON.stringify({ "Night Shift": { temperature: 0.7, prompts: [], prompt_order: [] } }),
+      "worlds/city.json": JSON.stringify({ name: "City", entries: { 0: { uid: 0, key: ["docks"], content: "Cold water.", comment: "Docks" } } }),
+      "chats/nadia/a-quiet-word-cabc123.jsonl": [
+        JSON.stringify({ name: "Nadia", is_user: false, is_system: false, send_date: new Date(0).toISOString(), mes: "Hey.", swipes: ["Hey."], swipe_id: 0, extra: {} }),
+        JSON.stringify({ name: "Robin", is_user: true, is_system: false, send_date: new Date(0).toISOString(), mes: "Evening.", swipes: ["Evening."], swipe_id: 0, extra: {} }),
+      ].join("\n") + "\n",
+      "settings.json": JSON.stringify({ app: "studio", exportedAt: "2026-01-01T00:00:00.000Z", version: 1 }),
+    };
+    const m = mockHost();
+    (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(r.json.errors).toEqual([]);
+    expect(r.json.characters).toHaveLength(1);
+    expect(r.json.personas).toHaveLength(1);
+    expect(r.json.presets).toHaveLength(1);
+    expect(r.json.lorebooks).toHaveLength(1);
+    expect(r.json.chats).toHaveLength(1);
+    // no sidecar: the chat falls back to the old behaviour (default preset,
+    // title recovered from the filename) rather than failing
+    const chatId = (r.json.chats as string[])[0]!;
+    const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", `${chatId}.meta.json`), "utf8")) as Record<string, unknown>;
+    expect(meta.presetId).toBe("default");
+    expect(String(meta.title)).toContain("A Quiet Word");
+    // a v1 settings stamp carries no `settings` key — it must not wipe ours
+    const settings = JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")) as { personaId: string };
+    expect(settings.personaId).toBe("you");
+  }, 30_000);
+
+  it("leaves an existing library alone when the backup has none", async () => {
+    fs.writeFileSync(path.join(root, "library.json"), JSON.stringify({ tags: ["keep-me"] }));
+    const entries: Record<string, string> = {
+      "characters/nadia.json": JSON.stringify({ spec: "chara_card_v2", name: "Nadia", description: "x", personality: "", scenario: "", first_mes: "hi", mes_example: "" }),
+      "settings.json": JSON.stringify({ app: "studio", version: 1 }),
+    };
+    const m = mockHost();
+    (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    const lib = JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")) as { tags: string[] };
+    expect(lib.tags).toEqual(["keep-me"]);
+  }, 30_000);
+});

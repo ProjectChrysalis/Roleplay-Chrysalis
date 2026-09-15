@@ -4,6 +4,36 @@ You are operating on the official Roleplay app's files. First-party but
 unprivileged: everything here is plain files you may read, edit, and commit —
 same as any user-made app. Keep this file current when you change the app.
 
+## Where a change goes — decide this first
+
+Pick the lightest place that can carry the request. All three are supported and
+all three survive an update (a three-way merge against the version the app was
+installed from; only an edit overlapping the same lines conflicts, and then
+nothing is written until the user settles it). `data/` is never part of an
+update at all.
+
+1. **`data/`** — content and configuration. A great deal of this app's
+   behavior is already data-driven, and reaching for `src/` for something a
+   data file already controls is the one wrong answer here. Before writing any
+   code, check whether what was asked for is one of these:
+   `data/settings.json` `ui` (the WHOLE AppSettings object: theme, fonts,
+   hotkeys, TTS, translation, memory, chat behavior), presets (prompt order,
+   samplers, utility prompts, world-info budget, prompt format),
+   lorebooks (what fires and when), regex scripts (rewrite text in or out),
+   personas, quick replies in `data/library.json` (which have real automation
+   hooks: onStartup/onChatChange/onUser/onAi), and character cards including
+   their variants and versions. Edits here need no rebuild and open clients
+   pick them up in about a second.
+2. **`plugins/<your-id>/`** — new backend behavior: routes, model tools,
+   scheduled work. Prefer a NEW plugin folder over editing `plugins/engine/`
+   or `plugins/studio-import/`: a file only you added has no upstream version
+   to disagree with, so it can never conflict on an update. A plugin can also
+   patch a sibling's model request (`llmRequest`), which is how you change what
+   the model receives without touching the assembly code.
+3. **`src/`** — the UI. Editing it is normal and expected; it is how the app
+   changes shape. It rebuilds in the user's browser (call `app_check`
+   afterwards) and puts that file in the merge path on the next update.
+
 ## What this app is
 
 The roleplay studio, v4: a power-user roleplay UI. Left icon rail (Home / Chats / Characters / Marketplace / Personas /
@@ -50,6 +80,36 @@ to it on every change. Messages are a FLAT list with swipes.
   /v1/audio/speech: keyless Edge voices or a speech endpoint), the data bank
   (plugin /databank) and image generation are all engine-backed.
   Purely local: themes, quick replies, tags/folders, hotkeys, backgrounds.
+
+## Backups (the zip, both directions)
+
+`GET /export/backup` writes public formats plus what those formats have no
+room for, so a restore on another machine is not lossy:
+
+- `characters/<slug>.json` whole cards, `worlds/<slug>.json` books with a
+  `_studio` bag (settings, globalActive, folderId, `_linkedNames`).
+- `personas/<slug>.json` the full record (avatar, title, pronouns, bindings,
+  isDefault) with `_lorebookNames` / `_boundNames`; `User Settings/personas.json`
+  keeps the flat name→description map other tools read.
+- `chats/<owner>/<slug>-<id>.jsonl` plus a `.meta.json` sidecar (the whole
+  chat meta, with `_presetName` / `_personaName` / `_lorebookNames`) and a
+  `.memories.json` vault. Per-message fields the public line shape cannot
+  carry (`hidden`, `bookmark`, `picture`, `translation`, `extra`) ride in
+  `extra.chry`.
+- `settings.json` carries `settings` (the real `ui` object), `library.json`
+  the local collections, `databank/` the retrieval chunks.
+
+IDS DO NOT TRAVEL. Anything pointing at another entity exports a `_…Names`
+sibling and the importer re-resolves it; ids are re-minted on the way in.
+Zip text is UTF-8 — never write latin1 into the archive.
+
+Reading a zip: `normalizeEntryName` anchors on the collection folder, so any
+wrapper above `characters/` or `worlds/` (a data folder, a whole install
+directory, a tool's own backup) is cut. Binary entries arrive from the kernel
+as `{ __b64__: true, base64 }` — use `entryBase64`, never the raw key.
+Entries are handled in phase order (characters → books → presets → regex →
+personas → groups → chats → databank), because the later phases resolve the
+earlier ones by name.
 
 ## Memory, pictures, regex, groups, MCP (how they work now)
 

@@ -70,6 +70,36 @@ const unslugTitle = (s) => {
 };
 const firstOf = (v) => (Array.isArray(v) ? String(v[0] || "") : v === undefined ? "" : String(v));
 
+/** Collection folders a backup can carry, ours and the foreign layouts'.
+ *  Matching one anchors the entry: everything above it is wrapper folders
+ *  (data/, default-user/, the install directory someone zipped) and is cut. */
+const COLLECTION_DIRS = new Set([
+  "characters", "chats", "group chats", "groups", "worlds", "presets", "personas",
+  "regex", "lorebooks", "themes", "backgrounds", "extensions", "databank", "memories",
+  "assets", "user settings", "openai settings", "textgen settings", "koboldai settings",
+  "novelai settings", "instruct", "context", "quickreplies", "user avatars",
+]);
+/** Files that mean something at a backup's root (and nowhere else). */
+const ROOT_FILES = new Set(["card.json", "settings.json", "personas.json", "library.json", "meta.json"]);
+
+/** A zip entry's path as our tree sees it, wrapper folders removed. Unknown
+ *  paths ride through untouched — a name we don't recognize is skipped later
+ *  anyway, and mangling it would only make the summary harder to read. */
+function normalizeEntryName(raw) {
+  const segs = String(raw).split("/").filter((s) => s && s !== ".");
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (COLLECTION_DIRS.has(segs[i].toLowerCase())) return segs.slice(i).join("/");
+  }
+  const base = segs[segs.length - 1] || String(raw);
+  return ROOT_FILES.has(base.toLowerCase()) ? base : String(raw);
+}
+
+/** Base64 of a binary zip entry, or null for a text/oversized one. The kernel
+ *  tags these `__b64__`; an older spelling (`__b64`) is still accepted so a
+ *  mismatch here can never again silently drop every PNG card in a backup. */
+const entryBase64 = (e) =>
+  e && typeof e === "object" && (e.__b64__ === true || e.__b64 === true) && typeof e.base64 === "string" ? e.base64 : null;
+
 /** PNG tEXt chunk reader for embedded cards ("chara" base64 JSON, v2, or
  *  "ccv3" JSON) — mirrors what the browser-side importer does with .png
  *  cards, so backup zips with PNG characters import fully plugin-side. */
@@ -463,12 +493,22 @@ function normalizeChatLines(raw) {
   for (const l of raw.lines) {
     if (!l || typeof l.mes !== "string") continue;
     const isUser = l.is_user === true;
+    // our own backups tuck the fields the public line shape has no room for
+    // into extra.chry — a hidden turn, a bookmark, a generated picture, a
+    // translation, and the model/usage/reasoning stamp on the reply
+    const x = l.extra && typeof l.extra === "object" && l.extra.chry && typeof l.extra.chry === "object" ? l.extra.chry : {};
     msgs.push({
       id: uid("e"), name: typeof l.name === "string" ? l.name : (isUser ? "User" : "Character"),
-      charId: (l.extra && typeof l.extra.chry_char_id === "string" && l.extra.chry_char_id) || null, role: isUser ? "user" : "char",
+      charId: (l.extra && typeof l.extra.chry_char_id === "string" && l.extra.chry_char_id) || null,
+      role: isUser ? "user" : l.is_system === true ? "system" : "char",
       text: l.mes, at: l.send_date && !isNaN(Date.parse(l.send_date)) ? Date.parse(l.send_date) : Date.now(),
       swipes: Array.isArray(l.swipes) && l.swipes.length ? l.swipes.map(String) : [l.mes],
       swipe: typeof l.swipe_id === "number" && l.swipe_id >= 0 ? l.swipe_id : 0,
+      ...(x.hidden === true ? { hidden: true } : {}),
+      ...(x.bookmark ? { bookmark: x.bookmark } : {}),
+      ...(x.picture ? { picture: x.picture } : {}),
+      ...(typeof x.translation === "string" && x.translation ? { translation: x.translation } : {}),
+      ...(x.extra && typeof x.extra === "object" ? { extra: x.extra } : {}),
     });
   }
   if (!msgs.length) return null;
@@ -659,7 +699,7 @@ export function handleRoute(req, host) {
   const fsx = host.fs;
   const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(v, null, 2) + "\n");
   const readJson = (rel, fb) => { try { return JSON.parse(fsx.read(rel)); } catch { return fb; } };
-  const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], errors: [] };
+  const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], databank: [], errors: [] };
   const used = new Set();
   // Id collision guard: dedupes within THIS import batch AND against what
   // already exists on disk — re-importing the same card must never silently
@@ -807,16 +847,48 @@ export function handleRoute(req, host) {
     }
     writeCard(card);
   }
-  const writeBook = (n, fallback) => {
+  // Ids are re-minted on the way in, so anything that pointed at an id in the
+  // backup has to be re-pointed by NAME. These record what each name became.
+  const bookIdByName = new Map();
+  const presetIdByName = new Map();
+  const personaIdByName = new Map();
+  const charIdByName = () => {
+    const m = new Map();
+    try {
+      for (const cid of fsx.list("characters")) {
+        const card = readJson("characters/" + cid + "/card.json", null);
+        if (card && card.name) m.set(String(card.name).toLowerCase(), cid);
+      }
+    } catch {}
+    return m;
+  };
+  const lower = (v) => String(v ?? "").toLowerCase();
+  const writeBook = (n, fallback, studio) => {
     if (!n) return;
     const id = uid(slug(n.name || fallback || "book"), "lorebooks");
-    writeJson("lorebooks/" + id + ".json", { ...n, id });
+    // book-level knobs an export carries alongside the public entry list:
+    // without them a restored book comes back switched off, with stock scan
+    // settings and no link to the cards it belonged to
+    const extra = studio && typeof studio === "object"
+      ? {
+          ...(studio.settings ? { settings: studio.settings } : {}),
+          ...(studio.globalActive === true ? { globalActive: true } : {}),
+          ...(studio.folderId ? { folderId: studio.folderId } : {}),
+          ...(studio.vectorized === true ? { vectorized: true } : {}),
+          ...(Array.isArray(studio._linkedNames) && studio._linkedNames.length
+            ? { linkedCharacterIds: studio._linkedNames.map((nm) => charIdByName().get(lower(nm))).filter(Boolean) }
+            : {}),
+        }
+      : {};
+    writeJson("lorebooks/" + id + ".json", { ...n, ...extra, id });
+    bookIdByName.set(lower(n.name || fallback), id);
     summary.lorebooks.push(id);
   };
   const writePreset = (n) => {
     if (!n) return;
     const id = uid(slug(n.name || "preset"), "presets");
     writeJson("presets/" + id + ".json", { ...n, id });
+    presetIdByName.set(lower(n.name), id);
     summary.presets.push(id);
   };
   const writeRegex = (n) => {
@@ -825,13 +897,38 @@ export function handleRoute(req, host) {
     writeJson("regex/" + id + ".json", { ...n, id });
     summary.regex.push(id);
   };
-  const writePersona = (name, description) => {
+  /** A persona from a backup. `full` is the complete record when the zip
+   *  carried one — the flat {name: description} map foreign tools write is
+   *  all most backups have, and rebuilding from it alone is what dropped the
+   *  avatar, title, pronouns, bound cards, linked books and default flag. */
+  const writePersona = (name, description, full) => {
     if (!name) return;
     const id = uid(slug(name), "personas");
-    writeJson("personas/" + id + ".json", { id, name, description: description || "" });
+    const rest = {};
+    if (full && typeof full === "object") {
+      for (const [k, v] of Object.entries(full)) {
+        if (k === "id" || k === "name" || k === "description" || k.startsWith("_")) continue;
+        if (k === "lorebookIds" || k === "boundCharacterIds") continue;
+        rest[k] = v;
+      }
+      if (Array.isArray(full._lorebookNames) && full._lorebookNames.length) {
+        rest.lorebookIds = full._lorebookNames.map((nm) => bookIdByName.get(lower(nm))).filter(Boolean);
+      }
+      if (Array.isArray(full._boundNames) && full._boundNames.length) {
+        const byName = charIdByName();
+        rest.boundCharacterIds = full._boundNames.map((nm) => byName.get(lower(nm))).filter(Boolean);
+      }
+    }
+    writeJson("personas/" + id + ".json", { ...rest, id, name, description: description || "" });
+    personaIdByName.set(lower(name), id);
     summary.personas.push(id);
   };
-  const writeChat = (n, characterId, groupId) => {
+  /** `saved` is the chat's own meta when the backup carried one: everything
+   *  ABOUT the conversation (its preset, persona, model, author's note,
+   *  summary, memory cutoff, folder, tags, card variant, branch parentage).
+   *  Without it every restored chat landed on the default preset and no
+   *  persona, which is exactly what a move to a second device looked like. */
+  const writeChat = (n, characterId, groupId, saved) => {
     const id = uid(slug(n.title), "chats");
     // pinned to the persona in use at import, like a chat made in the app
     const personaId = readJson("settings.json", {}).personaId || null;
@@ -841,9 +938,41 @@ export function handleRoute(req, host) {
       presetId: "default", personaId: persona ? personaId : null, model: null, userName: (persona && persona.name) || "User",
       authorNote: null, lorebookIds: [], createdAt: Date.now(), updatedAt: Date.now(), tainted: true,
     };
+    if (saved && typeof saved === "object") {
+      // ids are re-minted on import; carry the rest of the meta straight over
+      const SKIP = new Set(["id", "characterId", "groupId", "presetId", "personaId", "lorebookIds"]);
+      for (const [k, v] of Object.entries(saved)) {
+        if (SKIP.has(k) || k.startsWith("_")) continue;
+        meta[k] = v;
+      }
+      if (typeof saved.title === "string" && saved.title.trim()) meta.title = saved.title;
+      const wantPreset = presetIdByName.get(lower(saved._presetName));
+      if (wantPreset) meta.presetId = wantPreset;
+      const wantPersona = personaIdByName.get(lower(saved._personaName));
+      if (wantPersona) {
+        meta.personaId = wantPersona;
+        const p = readJson("personas/" + wantPersona + ".json", null);
+        if (p && p.name) meta.userName = p.name;
+      }
+      if (Array.isArray(saved._lorebookNames)) {
+        meta.lorebookIds = saved._lorebookNames.map((nm) => bookIdByName.get(lower(nm))).filter(Boolean);
+      }
+      // branch parentage points at chat ids from the other machine; the
+      // restored chats are new files, so a stale parent would render a
+      // branch tree that leads nowhere
+      delete meta.parentChatId;
+      delete meta.parentMessageId;
+      meta.id = id;
+      meta.characterId = characterId || null;
+      meta.groupId = groupId || null;
+    }
     fsx.write("chats/" + id + ".jsonl", n.msgs.map((m) => JSON.stringify(m)).join("\n") + "\n");
     writeJson("chats/" + id + ".meta.json", meta);
+    if (Array.isArray(n.memories) && n.memories.length) {
+      writeJson("chats/" + id + ".memories.json", n.memories);
+    }
     summary.chats.push(id);
+    return id;
   };
 
   // ---------- browser-driven batch (can include PNG-extracted cards) ----------
@@ -919,16 +1048,17 @@ export function handleRoute(req, host) {
     const names = Object.keys(rawEntries);
     const isText = (v) => typeof v === "string";
 
-    // Foreign backup layouts normalize to our tree first:
-    //  · charx — a card package: card.json at the root
-    //  · roleplay-tool backup — data/<user>/default-user/{characters,chats,personas,
-    //    worlds,extensions/regex,presets,themes}/…
+    // Foreign backup layouts normalize to our tree first. The old rule matched
+    // one exact nesting (data/<x>/default-user/…) and nothing else, so the
+    // three ways people actually make these zips — the tool's own backup, the
+    // data folder, the whole install directory — all arrived as unrecognized
+    // paths and imported nothing. Anchor on the collection folder instead of
+    // the wrapper: whatever sits above "characters/" or "worlds/" is somebody's
+    // folder name and none of our business.
     for (const raw of names) {
-      let name = raw;
-      const m = /^data\/[^/]+\/default-user\/(.*)$/.exec(raw);
-      if (m) name = m[1];
       if (raw.endsWith(".charx")) continue; // handled as files, not zips
-      entries[name] = rawEntries[raw];
+      const name = normalizeEntryName(raw);
+      if (entries[name] === undefined) entries[name] = rawEntries[raw];
     }
 
     // charx package: card.json at the root + assets/ entries the card
@@ -936,9 +1066,9 @@ export function handleRoute(req, host) {
     if (isText(entries["card.json"])) {
       try {
         const assetDict = {};
-        for (const name of names) {
-          const e = entries[name];
-          if (e && typeof e === "object" && e.__b64 && typeof e.base64 === "string") assetDict[name] = e.base64;
+        for (const name of Object.keys(entries)) {
+          const b64 = entryBase64(entries[name]);
+          if (b64) assetDict[name] = b64;
         }
         const parsed = JSON.parse(entries["card.json"]);
         const card = normalizeCard(parsed);
@@ -947,17 +1077,74 @@ export function handleRoute(req, host) {
       return { status: 400, json: { error: "charx package has no readable card.json" } };
     }
 
-    for (const name of Object.keys(entries)) {
-      if (name.startsWith("characters/") && name.endsWith(".png")) {
-        const e = entries[name];
-        if (e && typeof e === "object" && e.__b64 && e.base64) {
-          const rawCard = cardFromPngBase64(e.base64);
+    // Preset and persona MAPS first: a chat's meta names the preset and
+    // persona it rides, so they have to exist before any chat is written.
+    const presetsText = entries["User Settings/openai_settings.json"];
+    if (isText(presetsText)) {
+      try {
+        const all = JSON.parse(presetsText);
+        // the map key IS the preset's name — pass it through so restored
+        // presets keep their names instead of all landing on "imported"
+        for (const [presetName, preset] of Object.entries(all ?? {})) writePreset(normalizePreset(preset, presetName));
+      } catch { summary.errors.push("presets failed"); }
+    }
+    for (const rname of Object.keys(entries)) {
+      if (!rname.startsWith("User Settings/regex/") || !rname.endsWith(".json") || !isText(entries[rname])) continue;
+      try { writeRegex(normalizeRegex(JSON.parse(entries[rname]))); } catch { summary.errors.push("regex failed: " + rname); }
+    }
+    // The flat {name: description} map is the lowest common denominator; skip
+    // it when the zip also carries full persona records, or every persona
+    // would be imported twice — once whole, once as a bare name.
+    const hasFullPersonas = Object.keys(entries).some((n) => n.startsWith("personas/") && n.endsWith(".json"));
+    for (const flat of ["User Settings/personas.json", "personas.json"]) {
+      if (hasFullPersonas || !isText(entries[flat])) continue;
+      try {
+        const map = JSON.parse(entries[flat]);
+        for (const [pname, v] of Object.entries(map ?? {})) {
+          writePersona(pname, typeof v === "string" ? v : String((v && v.description) || ""));
+        }
+      } catch { summary.errors.push("personas failed: " + flat); }
+    }
+    // A foreign tool keeps its personas inside its settings file instead: a
+    // map of avatar file → name, plus a parallel map of descriptions.
+    if (!hasFullPersonas && isText(entries["settings.json"])) {
+      try {
+        const st = JSON.parse(entries["settings.json"]);
+        const descs = st && typeof st.persona_descriptions === "object" && st.persona_descriptions ? st.persona_descriptions : {};
+        const namesMap = st && typeof st.personas === "object" && st.personas ? st.personas : null;
+        for (const [avatarKey, pname] of Object.entries(namesMap ?? {})) {
+          const d = descs[avatarKey];
+          writePersona(String(pname || avatarKey), String((d && d.description) || ""));
+        }
+      } catch { summary.errors.push("personas failed: settings.json"); }
+    }
+
+    // Order matters: a chat resolves its character, group, preset, persona
+    // and books by NAME, and a persona resolves its books and bound cards the
+    // same way. One pass in whatever order the zip's central directory
+    // happened to list things left half of those unresolved.
+    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "extensions/regex/", "regex/", "personas/", "groups/", "chats/", "databank/"];
+    const phaseOf = (n) => {
+      const l = n.toLowerCase();
+      for (let i = 0; i < PHASES.length; i++) if (l.startsWith(PHASES[i])) return i;
+      return PHASES.length;
+    };
+    const orderedNames = Object.keys(entries).sort((a, b) => phaseOf(a) - phaseOf(b) || (a < b ? -1 : a > b ? 1 : 0));
+    for (const name of orderedNames) {
+      // A card PNG lives in characters/, or loose at the root when someone
+      // zipped a pile of cards. Anywhere else (persona and user avatars,
+      // backgrounds, sprites) a .png is just a picture — reading it as a
+      // failed card would bury the real errors in noise.
+      if (name.endsWith(".png") && (name.startsWith("characters/") || !name.includes("/"))) {
+        const b64 = entryBase64(entries[name]);
+        if (b64) {
+          const rawCard = cardFromPngBase64(b64);
           const n = rawCard && normalizeCard(rawCard);
           // ccdefault: assets point at the card PNG itself
-          if (n) writeCardWithBook(n, rawCard, null, "data:image/png;base64," + e.base64);
-          else summary.errors.push("png card without embedded data: " + name);
-        } else {
-          summary.errors.push("png card (binary) — import it directly from the Import button: " + name);
+          if (n) writeCardWithBook(n, rawCard, null, "data:image/png;base64," + b64);
+          else if (name.startsWith("characters/")) summary.errors.push("png card without embedded data: " + name);
+        } else if (name.startsWith("characters/")) {
+          summary.errors.push("png card too large to read from the zip — import it directly from the Import button: " + name);
         }
         continue;
       }
@@ -969,11 +1156,39 @@ export function handleRoute(req, host) {
         } catch { summary.errors.push("card failed: " + name); }
         continue;
       }
-      if (name.startsWith("worlds/") && name.endsWith(".json") && isText(entries[name])) {
+      if ((name.startsWith("worlds/") || name.startsWith("lorebooks/")) && name.endsWith(".json") && isText(entries[name])) {
         try {
           const fallback = name.split("/").pop().replace(/\.json$/i, "");
-          writeBook(normalizeBook(JSON.parse(entries[name]), fallback), fallback);
+          const raw = JSON.parse(entries[name]);
+          writeBook(normalizeBook(raw, fallback), fallback, raw && raw._studio);
         } catch { summary.errors.push("world failed: " + name); }
+        continue;
+      }
+      // A foreign tool files chat-completion and text-completion presets under
+      // their own folders, one file per preset, named by the file.
+      if (/^(?:openai|textgen) settings\//i.test(name) && name.endsWith(".json") && isText(entries[name])) {
+        try {
+          const n = normalizePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
+          if (n) writePreset(n);
+        } catch { summary.errors.push("preset failed: " + name); }
+        continue;
+      }
+      if (name.startsWith("regex/") && name.endsWith(".json") && isText(entries[name])) {
+        try {
+          const raw = JSON.parse(entries[name]);
+          for (const one of Array.isArray(raw) ? raw : [raw]) writeRegex(normalizeRegex(one));
+        } catch { summary.errors.push("regex failed: " + name); }
+        continue;
+      }
+      if (name.startsWith("databank/") && name.endsWith(".json") && isText(entries[name])) {
+        try {
+          const d = JSON.parse(entries[name]);
+          if (d && typeof d === "object" && Array.isArray(d.chunks)) {
+            const did = uid(slug(d.name || "doc"), "databank");
+            writeJson("databank/" + did + ".json", { ...d, id: did });
+            summary.databank.push(did);
+          }
+        } catch { summary.errors.push("databank failed: " + name); }
         continue;
       }
       if (name.startsWith("groups/") && name.endsWith(".json") && isText(entries[name])) {
@@ -1018,7 +1233,8 @@ export function handleRoute(req, host) {
       if (name.startsWith("personas/") && name.endsWith(".json") && isText(entries[name])) {
         try {
           const p = JSON.parse(entries[name]);
-          writePersona(String(p.name || name.split("/").pop().replace(/\.json$/, "")), String(p.description || ""));
+          // the whole record, not just the two fields the flat map carries
+          writePersona(String(p.name || name.split("/").pop().replace(/\.json$/, "")), String(p.description || ""), p);
         } catch { summary.errors.push("persona failed: " + name); }
         continue;
       }
@@ -1036,6 +1252,17 @@ export function handleRoute(req, host) {
           const file = (parts[2] || "chat").replace(/\.jsonl$/i, "");
           const lines = entries[name].split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
           const n = normalizeChatLines({ character, file, lines });
+          // sidecars our own backups write next to the transcript: everything
+          // ABOUT the chat, and its facts vault
+          const sidecar = name.replace(/\.jsonl$/i, ".meta.json");
+          const saved = isText(entries[sidecar]) ? (() => { try { return JSON.parse(entries[sidecar]); } catch { return null; } })() : null;
+          const vault = name.replace(/\.jsonl$/i, ".memories.json");
+          if (n && isText(entries[vault])) {
+            try {
+              const mem = JSON.parse(entries[vault]);
+              if (Array.isArray(mem) && mem.length) n.memories = mem;
+            } catch { /* a bad vault is not worth failing the chat over */ }
+          }
           if (n) {
             let characterId = null;
             try {
@@ -1059,7 +1286,11 @@ export function handleRoute(req, host) {
             const ownerCard = characterId ? readJson("characters/" + characterId + "/card.json", null) : null;
             const ownerGroup = groupId ? readJson("groups/" + groupId + ".json", null) : null;
             const ownerName = ownerCard?.name || ownerGroup?.name;
-            if (ownerName) n.title = ownerName + " — " + unslugTitle(file);
+            // the slug filename is a lossy echo of the title (no case, no
+            // punctuation); the sidecar has the real one, so only fall back
+            // to un-slugging when there is no sidecar to read
+            if (saved && typeof saved.title === "string" && saved.title.trim()) n.title = saved.title;
+            else if (ownerName) n.title = ownerName + " — " + unslugTitle(file);
             // group message attribution: engine ids changed on restore —
             // remap each msg.charId by id, then by the speaker name
             if (groupId) {
@@ -1075,32 +1306,36 @@ export function handleRoute(req, host) {
                 m.charId = (m.name && byName.get(String(m.name).toLowerCase())) || null;
               }
             }
-            writeChat(n, characterId, groupId);
+            writeChat(n, characterId, groupId, saved);
           }
         } catch { summary.errors.push("chat failed: " + name); }
         continue;
       }
     }
 
-    const presetsText = entries["User Settings/openai_settings.json"];
-    if (isText(presetsText)) {
+    // App settings and the local collections (quick replies, themes,
+    // backgrounds, tags, folders, connection profiles) are part of a backup
+    // too: without them a restore comes up on stock everything.
+    if (isText(entries["settings.json"])) {
       try {
-        const all = JSON.parse(presetsText);
-        // the map key IS the preset's name — pass it through so restored
-        // presets keep their names instead of all landing on "imported"
-        for (const [presetName, preset] of Object.entries(all ?? {})) writePreset(normalizePreset(preset, presetName));
-      } catch { summary.errors.push("presets failed"); }
+        const st = JSON.parse(entries["settings.json"]);
+        const saved = st && typeof st.settings === "object" && st.settings ? st.settings : null;
+        // `ui` is the whole app settings object. The model is deliberately
+        // NOT restored: the connection it names belongs to the other machine.
+        if (saved && saved.ui && typeof saved.ui === "object") {
+          writeJson("settings.json", { ...readJson("settings.json", {}), ui: saved.ui });
+          summary.settings = true;
+        }
+      } catch { summary.errors.push("settings failed"); }
     }
-    for (const name of names) {
-      if (!name.startsWith("User Settings/regex/") || !name.endsWith(".json") || !isText(entries[name])) continue;
-      try { writeRegex(normalizeRegex(JSON.parse(entries[name]))); } catch { summary.errors.push("regex failed: " + name); }
-    }
-    const personasText = entries["User Settings/personas.json"];
-    if (isText(personasText)) {
+    if (isText(entries["library.json"])) {
       try {
-        const map = JSON.parse(personasText);
-        for (const [pid, desc] of Object.entries(map)) writePersona(pid, String(desc ?? ""));
-      } catch { summary.errors.push("personas failed"); }
+        const lib = JSON.parse(entries["library.json"]);
+        if (lib && typeof lib === "object" && Object.keys(lib).length) {
+          writeJson("library.json", { ...readJson("library.json", {}), ...lib });
+          summary.library = true;
+        }
+      } catch { summary.errors.push("library failed"); }
     }
     return { status: 200, json: summary };
   }

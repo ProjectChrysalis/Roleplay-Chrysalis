@@ -561,10 +561,10 @@ function DataSection() {
     if (!file) return
     setBusy(true)
     try {
-      const summary = await j<{ characters: string[]; lorebooks: string[]; presets: string[]; regex: string[]; personas: string[]; chats: string[]; errors: string[] }>("/import/zip", {
+      const summary = await j<{ characters: string[]; lorebooks: string[]; presets: string[]; regex: string[]; personas: string[]; chats: string[]; databank?: string[]; errors: string[] }>("/import/zip", {
         method: "POST", body: JSON.stringify({ zipBase64: await fileToRawBase64(file) }),
       })
-      const n = summary.characters.length + summary.lorebooks.length + summary.presets.length + summary.regex.length + summary.personas.length + summary.chats.length
+      const n = summary.characters.length + summary.lorebooks.length + summary.presets.length + summary.regex.length + summary.personas.length + summary.chats.length + (summary.databank?.length ?? 0)
       toast.success(`Restored ${n} items`, { description: summary.errors.length ? `${summary.errors.length} skipped (incl. PNG cards, import those from Characters → Import)` : undefined })
       await hydrate()
     } catch (e) {

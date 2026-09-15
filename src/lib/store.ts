@@ -290,6 +290,10 @@ const sessionOpenedChats = new Set<ID>()
  *  storms, tab focus) only multiply the windows where a chat the user just
  *  opened could be judged abandoned from a stale snapshot */
 let sweepDone = false
+/** The unpinned-chat persona migration, once per page load. On every hydrate
+ *  it re-applied a persona switch to every chat that had not pinned one, so
+ *  the switch leaked out of the chat it was made in. */
+let personaPinDone = false
 /** reentrancy guard for quick-reply automation hooks */
 let autoExecDepth = 0
 /** last-issued swipe request per message id (see setSwipe) */
@@ -443,43 +447,35 @@ export const useApp = create<AppState>()(
             return true
           })
           sweepDone = true
-          // chats still pinned to a STOCK (locked) preset follow the user's
-          // default copy — covers everyone who made a copy the default BEFORE
-          // the switch event started migrating riders (stock presets are
-          // immutable, so being on one means riding whatever was default)
-          const def = presets.find((x) => x.isDefault && !x.readOnly)
-          if (def) {
-            const stockIds = new Set<string | null>(presets.filter((x) => x.readOnly).map((x) => x.id))
-            for (const c of kept) {
-              if (stockIds.has(c.presetId) && def.id !== c.presetId) {
-                c.presetId = def.id
-                void j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ presetId: def.id as string }) })
-                  .catch(() => undefined)
-              }
-            }
-          }
+          // Chats on a STOCK preset used to be dragged onto the user's
+          // default copy here, and written back — on every hydrate, and a
+          // hydrate runs on every look_changed. Picking the stock preset for
+          // a chat undid itself a moment later, on disk. The migration this
+          // was for now runs at the moment of the switch (updatePreset),
+          // where a migration can still be told apart from a choice.
           const withBranches = attachBranches(kept)
-          // heal dead preset bindings: a chat pinned to a preset that no
-          // longer exists (a vanished import, a delete) silently assembled
-          // with the bare fallback engine-side while the UI showed the
-          // default's name — re-point those chats at the user's default
+          // A dead preset binding shows the preset the engine will really
+          // assemble with (it falls back on its own), but the repair is NOT
+          // written back: one preset file that momentarily fails to load
+          // drops out of the boot payload, and writing would re-point every
+          // chat that rode it at the default, for good.
           {
             const presetIds = new Set(presets.map((p) => p.id))
             const defId = presets.find((p) => p.isDefault && !p.readOnly)?.id ?? presets[0]?.id
             if (defId) {
               for (const c of withBranches) {
-                if (c.presetId && !presetIds.has(c.presetId)) {
-                  c.presetId = defId
-                  void j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ presetId: defId }) })
-                    .catch(() => undefined)
-                }
+                if (c.presetId && !presetIds.has(c.presetId)) c.presetId = defId
               }
             }
           }
           // chats that never stored a persona rode the default, so picking a
           // persona anywhere swapped them all — pin each to the persona it
-          // shows right now; from here only an explicit switch changes it
-          {
+          // shows right now; from here only an explicit switch changes it.
+          // Once per load: a switch made while the app is open pins the
+          // chats it leaves behind itself (see updatePersona), and a heal
+          // running again afterwards would drag them onto the new default.
+          if (!personaPinDone) {
+            personaPinDone = true
             const defId = personas.find((p) => p.isDefault)?.id
             if (defId) {
               for (const c of withBranches) {
@@ -1464,6 +1460,22 @@ export const useApp = create<AppState>()(
       },
       updatePersona: (id, patch) => {
         bumpMutate()
+        // A chat that never pinned a persona reads the default, so promoting
+        // one rewrote {{user}} in all of them — switching persona in one chat
+        // changed every other. Pin them to the persona they speak as now,
+        // BEFORE the default moves. (Presets follow the same rule.)
+        if (patch.isDefault) {
+          const prevDefault = get().personas.find((p) => p.id !== id && p.isDefault)
+          if (prevDefault) {
+            const riders = get().chats.filter((c) => !c.personaId)
+            if (riders.length) {
+              set((s2) => ({ chats: s2.chats.map((c) => (c.personaId ? c : { ...c, personaId: prevDefault.id })) }))
+              for (const c of riders) {
+                writeThrough('the chats that rode the old persona', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ personaId: prevDefault.id }) }))
+              }
+            }
+          }
+        }
         set((s) => ({
           personas: s.personas.map((p) => {
             if (p.id === id) return { ...p, ...patch }

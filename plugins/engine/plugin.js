@@ -989,7 +989,14 @@ function chatPersona(fsx, meta) {
   if (!pid) { try { pid = JSON.parse(fsx.read("settings.json")).personaId || null; } catch {} }
   let persona = null;
   if (pid) { try { persona = JSON.parse(fsx.read("personas/" + pid + ".json")); } catch {} }
-  return { persona, personaId: persona ? pid : null, userName: (persona && persona.name) || chatUserName(fsx, meta) };
+  // NEVER call chatUserName from here: it is this function's own accessor, so
+  // the fallback has to be the stored name, not another lookup. Reading the
+  // persona through it recursed until the sandbox stack gave out, and every
+  // chat that could not resolve a persona — no pick, no default in
+  // settings.json, or a persona file a restore didn't bring along — failed
+  // every generation, peek and title with "maximum call stack size exceeded".
+  const userName = (persona && persona.name) || (typeof meta.userName === "string" && meta.userName) || "User";
+  return { persona, personaId: persona ? pid : null, userName };
 }
 const chatUserName = (fsx, meta) => chatPersona(fsx, meta).userName;
 
@@ -1630,49 +1637,117 @@ function crc32(bytes) {
   for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
-function latin1Bytes(s) {
-  const out = [];
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    out.push(c & 0xff);
-    if (c > 0xff) out[out.length - 1] = 0x3f; // non-latin1 → '?'
+/** UTF-8 bytes of a string, as a Uint8Array.
+ *
+ *  This used to write latin1 and turn every character above U+00FF into "?".
+ *  A backup is prose: curly quotes, em dashes, ellipses, emoji, and any name
+ *  that isn't plain ASCII all came out as "?" — and the U+0080..U+00FF range
+ *  (é, ñ, ü) came out as bare high bytes, which is not valid UTF-8, so the
+ *  file the importer read back wasn't even parseable JSON. Exports were
+ *  lossy for anyone whose characters don't write in ASCII. */
+function utf8Bytes(s) {
+  const str = String(s);
+  // one pass to size the buffer, one to fill it — no per-byte array growth
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.codePointAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c < 0x10000) n += 3;
+    else { n += 4; i++; }
+  }
+  const out = new Uint8Array(n);
+  let j = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.codePointAt(i);
+    if (c < 0x80) out[j++] = c;
+    else if (c < 0x800) {
+      out[j++] = 0xc0 | (c >> 6);
+      out[j++] = 0x80 | (c & 63);
+    } else if (c < 0x10000) {
+      out[j++] = 0xe0 | (c >> 12);
+      out[j++] = 0x80 | ((c >> 6) & 63);
+      out[j++] = 0x80 | (c & 63);
+    } else {
+      out[j++] = 0xf0 | (c >> 18);
+      out[j++] = 0x80 | ((c >> 12) & 63);
+      out[j++] = 0x80 | ((c >> 6) & 63);
+      out[j++] = 0x80 | (c & 63);
+      i++; // the low surrogate was consumed by codePointAt
+    }
   }
   return out;
 }
 function bytesToB64(bytes) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let out = "";
+  // built in chunks: one += per group of 3 bytes reallocates the whole string
+  // on every step, which is what made a large backup crawl
+  const parts = [];
+  let chunk = "";
   for (let i = 0; i < bytes.length; i += 3) {
     const b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2];
-    out += chars[b0 >> 2] + chars[((b0 & 3) << 4) | ((b1 ?? 0) >> 4)];
-    out += b1 === undefined ? "=" : chars[((b1 & 15) << 2) | ((b2 ?? 0) >> 6)];
-    out += b2 === undefined ? "=" : chars[b2 & 63];
+    chunk += chars[b0 >> 2] + chars[((b0 & 3) << 4) | ((b1 === undefined ? 0 : b1) >> 4)];
+    chunk += b1 === undefined ? "=" : chars[((b1 & 15) << 2) | ((b2 === undefined ? 0 : b2) >> 6)];
+    chunk += b2 === undefined ? "=" : chars[b2 & 63];
+    if (chunk.length >= 8192) { parts.push(chunk); chunk = ""; }
   }
-  return out;
+  if (chunk) parts.push(chunk);
+  return parts.join("");
 }
 function buildZip(files) {
-  // files: [{name, text}] — STORE method, timestamps zeroed
-  const locals = [];
+  // files: [{name, text}] — STORE method, timestamps zeroed.
+  // Byte buffers are typed arrays, not arrays of numbers: a whole backup used
+  // to exist as one JS array with an element per byte, which costs an order
+  // of magnitude more than the bytes themselves and blew the sandbox's heap
+  // long before a real library finished exporting.
+  const u16 = (a, o, v) => { a[o] = v & 255; a[o + 1] = (v >> 8) & 255; };
+  const u32 = (a, o, v) => { a[o] = v & 255; a[o + 1] = (v >> 8) & 255; a[o + 2] = (v >> 16) & 255; a[o + 3] = (v >>> 24) & 255; };
+  const parts = [];
   const centrals = [];
   let offset = 0;
-  const u16 = (v) => [v & 255, (v >> 8) & 255];
-  const u32 = (v) => [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255];
   for (const f of files) {
-    const nameB = latin1Bytes(f.name);
-    const dataB = latin1Bytes(f.text);
+    const nameB = utf8Bytes(f.name);
+    const dataB = utf8Bytes(f.text);
     const crc = crc32(dataB);
-    const local = [...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(dataB.length), ...u32(dataB.length), ...u16(nameB.length), ...u16(0), ...nameB, ...dataB];
-    const central = [...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc), ...u32(dataB.length), ...u32(dataB.length), ...u16(nameB.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...nameB];
-    locals.push(local);
+    const local = new Uint8Array(30 + nameB.length + dataB.length);
+    u32(local, 0, 0x04034b50);
+    u16(local, 4, 20);
+    // bit 11 = the name and comment are UTF-8, per the zip appendix; without
+    // it an unpacker is entitled to read the name as its own code page
+    u16(local, 6, 0x0800);
+    u32(local, 14, crc);
+    u32(local, 18, dataB.length);
+    u32(local, 22, dataB.length);
+    u16(local, 26, nameB.length);
+    local.set(nameB, 30);
+    local.set(dataB, 30 + nameB.length);
+    const central = new Uint8Array(46 + nameB.length);
+    u32(central, 0, 0x02014b50);
+    u16(central, 4, 20);
+    u16(central, 6, 20);
+    u16(central, 8, 0x0800);
+    u32(central, 16, crc);
+    u32(central, 20, dataB.length);
+    u32(central, 24, dataB.length);
+    u16(central, 28, nameB.length);
+    u32(central, 42, offset);
+    central.set(nameB, 46);
+    parts.push(local);
     centrals.push(central);
     offset += local.length;
   }
   const cdSize = centrals.reduce((a, c) => a + c.length, 0);
-  const eocd = [...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(offset), ...u16(0)];
-  const all = [];
-  for (const l of locals) for (const b of l) all.push(b);
-  for (const c of centrals) for (const b of c) all.push(b);
-  for (const b of eocd) all.push(b);
+  const eocd = new Uint8Array(22);
+  u32(eocd, 0, 0x06054b50);
+  u16(eocd, 8, files.length);
+  u16(eocd, 10, files.length);
+  u32(eocd, 12, cdSize);
+  u32(eocd, 16, offset);
+  const all = new Uint8Array(offset + cdSize + eocd.length);
+  let at = 0;
+  for (const p of parts) { all.set(p, at); at += p.length; }
+  for (const c of centrals) { all.set(c, at); at += c.length; }
+  all.set(eocd, at);
   return bytesToB64(all);
 }
 
@@ -2156,12 +2231,16 @@ export function handleRoute(req, host) {
   if (head === "export" && id === "backup" && req.method === "GET") {
     const files = [];
     const usedNames = new Set();
-    const uname = (base, ext) => {
+    // Names are deduped WITHIN a folder: a character and a book that share a
+    // name are two different files in two different places, and renaming one
+    // of them to "-2" only makes the zip harder to read.
+    const unameIn = (dir, base, ext) => {
       let n = base + ext, i = 2;
-      while (usedNames.has(n)) n = base + "-" + i++ + ext;
-      usedNames.add(n);
+      while (usedNames.has(dir + "/" + n)) n = base + "-" + i++ + ext;
+      usedNames.add(dir + "/" + n);
       return n;
     };
+    const uname = (base, ext) => unameIn("characters", base, ext);
     const chars = [];
     try {
       for (const cid of fsx.list("characters")) {
@@ -2218,11 +2297,45 @@ export function handleRoute(req, host) {
         });
       }
     } catch {}
+    // book names, so anything that points at a book can travel by name: ids
+    // are re-minted on the machine that restores, so an id reference is a
+    // dangling one the moment it leaves this install
+    const bookNames = new Map();
+    try {
+      for (const f of fsx.list("lorebooks").filter((x) => x.endsWith(".json"))) {
+        const b = readJson("lorebooks/" + f, null);
+        if (b) bookNames.set(b.id || f.replace(/\.json$/, ""), b.name || f.replace(/\.json$/, ""));
+      }
+    } catch {}
+    const presetNames = new Map();
+    try {
+      for (const f of fsx.list("presets").filter((x) => x.endsWith(".json"))) {
+        const p = readJson("presets/" + f, null);
+        if (p) presetNames.set(p.id || f.replace(/\.json$/, ""), p.name || f.replace(/\.json$/, ""));
+      }
+    } catch {}
+    const namesOf = (ids, map) => (Array.isArray(ids) ? ids.map((x) => map.get(x)).filter(Boolean) : []);
+    // Personas travelled as a flat {name: description} map, so a restore
+    // rebuilt them with the default avatar, no title, no pronouns, no bound
+    // characters, no linked books and nothing marked default — which is what
+    // made personas behave as if they had been reset on the second device.
+    // The full record rides its own file; the flat map stays for other tools.
     let personas = {};
     try {
       for (const f of fsx.list("personas").filter((x) => x.endsWith(".json"))) {
         const p = readJson("personas/" + f, null);
-        if (p) personas[p.name || f.replace(/\.json$/, "")] = p.description || "";
+        if (!p) continue;
+        const name = p.name || f.replace(/\.json$/, "");
+        personas[name] = p.description || "";
+        files.push({
+          name: "personas/" + unameIn("personas", slug(name), ".json"),
+          text: JSON.stringify({
+            ...p,
+            name,
+            _lorebookNames: namesOf(p.lorebookIds, bookNames),
+            _boundNames: namesOf(p.boundCharacterIds, idToName),
+          }, null, 2),
+        });
       }
     } catch {}
     files.push({ name: "User Settings/personas.json", text: JSON.stringify(personas, null, 2) });
@@ -2264,7 +2377,25 @@ export function handleRoute(req, host) {
             matchPersonaDescription: ms.persona === true,
           };
         });
-        files.push({ name: "worlds/" + slug(book.name || f.replace(/\.json$/, "")) + ".json", text: JSON.stringify({ name: book.name || f.replace(/\.json$/, ""), entries }, null, 2) });
+        const bookName = book.name || f.replace(/\.json$/, "");
+        files.push({
+          name: "worlds/" + unameIn("worlds", slug(bookName), ".json"),
+          text: JSON.stringify({
+            name: bookName,
+            entries,
+            // book-level knobs the public world-info shape has nowhere to put:
+            // scan depth, budget, recursion, and whether the book is global or
+            // linked to particular cards. Without these a restored book came
+            // back switched off and scanning with stock settings.
+            _studio: {
+              settings: book.settings ?? null,
+              globalActive: book.globalActive === true,
+              folderId: book.folderId ?? null,
+              vectorized: book.vectorized === true,
+              _linkedNames: namesOf(book.linkedCharacterIds, idToName),
+            },
+          }, null, 2),
+        });
       }
     } catch {}
     // chats → per character/group folders, public jsonl chat shape
@@ -2277,17 +2408,71 @@ export function handleRoute(req, host) {
           ? (groups.find((g) => g.id === m.groupId) || { slug: slug(m.groupId) }).slug
           : (chars.find((c) => c.id === m.characterId) || { slug: slug(m.characterId || "chat") }).slug;
         const lines = chat.msgs.map((msg) => JSON.stringify({
-          name: msg.name, is_user: msg.role === "user", is_system: false,
+          name: msg.name, is_user: msg.role === "user", is_system: msg.role === "system",
           send_date: new Date(msg.at || 0).toISOString(),
           mes: msg.text,
           swipes: msg.swipes && msg.swipes.length ? msg.swipes : [msg.text],
           swipe_id: msg.swipe || 0,
-          extra: { chry_char_id: msg.charId || undefined },
+          // the public line shape has no room for a hidden turn, a bookmark, a
+          // generated picture, a translation or the model/usage stamp — all of
+          // it used to be dropped on export and could never come back
+          extra: {
+            chry_char_id: msg.charId || undefined,
+            chry: {
+              id: msg.id,
+              ...(msg.hidden === true ? { hidden: true } : {}),
+              ...(msg.bookmark ? { bookmark: msg.bookmark } : {}),
+              ...(msg.picture ? { picture: msg.picture } : {}),
+              ...(msg.translation ? { translation: msg.translation } : {}),
+              ...(msg.extra && typeof msg.extra === "object" ? { extra: msg.extra } : {}),
+            },
+          },
         }));
-        files.push({ name: "chats/" + ownerSlug + "/" + slug(m.title || m.id) + "-" + m.id + ".jsonl", text: lines.join("\n") + "\n" });
+        const base = "chats/" + ownerSlug + "/" + unameIn("chats/" + ownerSlug, slug(m.title || m.id) + "-" + m.id, "");
+        files.push({ name: base + ".jsonl", text: lines.join("\n") + "\n" });
+        // The transcript alone loses everything ABOUT the conversation: which
+        // preset and persona it rides, its model, its author's note, its
+        // summary and memory cutoff, its folder and tags, which card variant
+        // it sends, and where it branched from. A restore re-pinned every
+        // chat to the default preset and no persona. The sidecar carries it,
+        // with ids that don't survive the trip written out as names too.
+        files.push({
+          name: base + ".meta.json",
+          text: JSON.stringify({
+            ...m,
+            title: m.title || "",
+            _presetName: presetNames.get(m.presetId) ?? null,
+            _personaName: (() => {
+              const p = m.personaId ? readJson("personas/" + m.personaId + ".json", null) : null;
+              return p ? p.name || null : null;
+            })(),
+            _lorebookNames: namesOf(m.lorebookIds, bookNames),
+          }, null, 2),
+        });
+        const memories = loadMemories(fsx, m.id);
+        if (memories.length) files.push({ name: base + ".memories.json", text: JSON.stringify(memories, null, 2) });
       }
     } catch {}
-    files.push({ name: "settings.json", text: JSON.stringify({ app: "studio", exportedAt: new Date().toISOString(), version: 1 }, null, 2) });
+    // the data bank rides along: its chunks are the retrieval index, and
+    // rebuilding them means re-uploading every source document by hand
+    try {
+      for (const f of fsx.list("databank").filter((x) => x.endsWith(".json"))) {
+        const d = readJson("databank/" + f, null);
+        if (d) files.push({ name: "databank/" + unameIn("databank", slug(d.name || f.replace(/\.json$/, "")), ".json"), text: JSON.stringify(d, null, 2) });
+      }
+    } catch {}
+    // settings.json used to be a three-field stamp, so a restore came up with
+    // stock theme, fonts, hotkeys, TTS, translation and chat behaviour, and
+    // library.json (quick replies, themes, backgrounds, tags, folders,
+    // connection profiles) wasn't in the zip at all.
+    files.push({
+      name: "settings.json",
+      text: JSON.stringify({
+        app: "studio", exportedAt: new Date().toISOString(), version: 2,
+        settings: readJson("settings.json", {}),
+      }, null, 2),
+    });
+    files.push({ name: "library.json", text: JSON.stringify(readJson("library.json", {}), null, 2) });
     return ok({ filename: "studio-backup-" + new Date().toISOString().slice(0, 10) + ".zip", base64: buildZip(files) });
   }
 
