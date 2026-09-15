@@ -2255,6 +2255,49 @@ describe("rp studio: outside preset/book formats", () => {
     expect(preset.temperature).toBe(1.1);
   }, 30_000);
 
+  it("a preset keeps its sections' generation types through backup and restore", async () => {
+    const m = mockHost();
+    const all = ["normal", "continue", "impersonate", "swipe", "regenerate", "quiet"];
+    fs.writeFileSync(path.join(root, "presets", "mine.json"), JSON.stringify({
+      id: "mine", name: "Mine", temperature: 0.95,
+      prompts: [{ identifier: "cyoa", name: "Cyoa", role: "user", content: "End with choices." }],
+      prompt_order: [{ character_id: 100001, order: [{ identifier: "cyoa", enabled: true }] }],
+      studio: { isDefault: true, sections: [{ id: "cyoa", name: "Cyoa", injectionTriggers: all, groupId: "g1" }], samplers: { bannedTokens: ["x"] } },
+    }));
+    const zip = await drive(engineUrl, { method: "GET", path: "/export/backup" }, m);
+    const files = unzipSync(Buffer.from(zip.json.base64 as string, "base64")) as Record<string, Uint8Array>;
+    const entries = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, new TextDecoder().decode(v)]));
+    fs.rmSync(path.join(root, "presets", "mine.json"));
+    (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => 1 };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    const id = (r.json.presets as string[]).find((x) => x.startsWith("mine"))!;
+    const back = JSON.parse(fs.readFileSync(path.join(root, "presets", `${id}.json`), "utf8"));
+    expect(back.name).toBe("Mine");
+    expect(back.studio.sections[0].injectionTriggers).toEqual(all);
+    expect(back.studio.sections[0].groupId).toBe("g1");
+    expect(back.studio.samplers.bannedTokens).toEqual(["x"]);
+    expect(back.studio.isDefault).toBeUndefined();
+  }, 30_000);
+
+  it("an update gives every generation type back to presets limited to normal everywhere", async () => {
+    const m = mockHost();
+    const sec = (id: string, injectionTriggers: string[]) => ({ id, name: id, injectionTriggers });
+    fs.writeFileSync(path.join(root, "presets", "damaged.json"), JSON.stringify({
+      id: "damaged", name: "Damaged", studio: { sections: [sec("main", ["normal"]), sec("cyoa", ["normal"]), sec("chatHistory", ["normal"])] },
+    }));
+    fs.writeFileSync(path.join(root, "presets", "chosen.json"), JSON.stringify({
+      id: "chosen", name: "Chosen", studio: { sections: [sec("main", ["normal", "swipe"]), sec("note", ["normal"])] },
+    }));
+    const mod = await import(engineUrl);
+    const out = mod.onAppUpdate({ from: "4.18.1", to: "4.18.2" }, m.host);
+    expect(out.upgraded).toEqual(["presets/damaged.json generation types"]);
+    const damaged = JSON.parse(fs.readFileSync(path.join(root, "presets", "damaged.json"), "utf8"));
+    for (const s of damaged.studio.sections) expect(s.injectionTriggers).toContain("swipe");
+    const chosen = JSON.parse(fs.readFileSync(path.join(root, "presets", "chosen.json"), "utf8"));
+    expect(chosen.studio.sections[1].injectionTriggers).toEqual(["normal"]);
+    expect(mod.onAppUpdate({ from: "4.18.2", to: "4.18.3" }, m.host).upgraded).toEqual([]);
+  }, 30_000);
+
   it("a world file survives the export/import round trip intact", async () => {
     const m = mockHost();
     const source = {

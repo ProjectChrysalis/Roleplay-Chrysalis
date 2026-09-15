@@ -4,6 +4,9 @@
 // and the example bot — nothing else.
 import type { ThemePreset, SamplerSettings, AppSettings, Preset, PromptSection, SectionMarker, PromptFormatSequences } from './types.js'
 
+/** Every generation type a preset section can be limited to. */
+export const GENERATION_TYPES = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'] as const
+
 const now = Date.now()
 
 // ── Samplers default ──
@@ -79,7 +82,7 @@ export function buildDefaultPreset(): Preset {
     position: 'relative',
     depth: 4,
     order: 0,
-    injectionTriggers: ['normal'],
+    injectionTriggers: [...GENERATION_TYPES],
     forbidOverrides: false,
     groupId: null,
   })

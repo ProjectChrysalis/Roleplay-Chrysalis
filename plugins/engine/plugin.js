@@ -1911,12 +1911,35 @@ function flattenLorebookInsertion(b) {
   return { ...b, entries };
 }
 
+/** The editor used to give every section that had no generation types of
+ *  its own just "normal", so swipes, regenerations and continues sent none of
+ *  the preset. A preset where every section is limited to "normal" is that
+ *  damage, not a choice: it gets every generation type back. */
+function allTriggersWhereNormalOnly(preset) {
+  const sections = preset && preset.studio && Array.isArray(preset.studio.sections) ? preset.studio.sections : null;
+  if (!sections || !sections.length) return null;
+  const normalOnly = (s) => s && Array.isArray(s.injectionTriggers) && s.injectionTriggers.length === 1 && s.injectionTriggers[0] === "normal";
+  if (!sections.every(normalOnly)) return null;
+  const all = ["normal", "continue", "impersonate", "swipe", "regenerate", "quiet"];
+  return { ...preset, studio: { ...preset.studio, sections: sections.map((s) => ({ ...s, injectionTriggers: all })) } };
+}
+
 /** Run once by the engine after this app's code moved from `from` to `to`.
  *  Every step is idempotent and only reads data an older version wrote. */
 export function onAppUpdate(ctx, host) {
   const fsx = host.fs;
   const from = ctx && typeof ctx.from === "string" ? ctx.from : "0.0.0";
   const done = [];
+  if (olderThan(from, "4.18.2")) {
+    let files = [];
+    try { files = fsx.list("presets").filter((f) => f.endsWith(".json")); } catch { files = []; }
+    for (const f of files) {
+      const out = allTriggersWhereNormalOnly(readJsonFile(fsx, "presets/" + f));
+      if (!out) continue;
+      writeJsonFile(fsx, "presets/" + f, out);
+      done.push("presets/" + f + " generation types");
+    }
+  }
   if (!olderThan(from, "4.0.0")) return { upgraded: done };
 
   const defaultPreset = readJsonFile(fsx, "presets/default.json");

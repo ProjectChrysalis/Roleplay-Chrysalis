@@ -351,6 +351,20 @@ function instructFormat(t) {
   };
 }
 
+/** A preset this app wrote comes back whole: its editor sections carry the
+ *  generation types, groups and conditions the portable format has no room
+ *  for. Which preset is the default, and which are stock, stays the target's
+ *  call. Anything else is another tool's file and goes through the converter. */
+function restorePreset(raw, fallbackName) {
+  if (!raw || typeof raw !== "object" || !raw.studio || typeof raw.studio !== "object" || !Array.isArray(raw.studio.sections)) {
+    return normalizePreset(raw, fallbackName);
+  }
+  const { id: _id, ...rest } = raw;
+  const { isDefault: _isDefault, readOnly: _readOnly, ...studio } = raw.studio;
+  const name = typeof raw.name === "string" && raw.name.trim() ? raw.name : fallbackName || "imported";
+  return { ...rest, name, studio };
+}
+
 function normalizePreset(raw, fallbackName) {
   if (!raw || typeof raw !== "object") return null;
   const label = typeof raw.name === "string" && raw.name.trim() ? raw.name
@@ -999,7 +1013,7 @@ export function handleRoute(req, host) {
       try { writeBook(normalizeBook(w, "imported-book"), "imported-book"); } catch { summary.errors.push("world info failed"); }
     }
     for (const p of b.presets || []) {
-      try { writePreset(normalizePreset(p)); } catch { summary.errors.push("preset failed"); }
+      try { writePreset(restorePreset(p)); } catch { summary.errors.push("preset failed"); }
     }
     for (const r of b.regex || []) {
       try { writeRegex(normalizeRegex(r)); } catch { summary.errors.push("regex failed"); }
@@ -1085,7 +1099,7 @@ export function handleRoute(req, host) {
         const all = JSON.parse(presetsText);
         // the map key IS the preset's name — pass it through so restored
         // presets keep their names instead of all landing on "imported"
-        for (const [presetName, preset] of Object.entries(all ?? {})) writePreset(normalizePreset(preset, presetName));
+        for (const [presetName, preset] of Object.entries(all ?? {})) writePreset(restorePreset(preset, presetName));
       } catch { summary.errors.push("presets failed"); }
     }
     for (const rname of Object.keys(entries)) {
@@ -1168,7 +1182,7 @@ export function handleRoute(req, host) {
       // their own folders, one file per preset, named by the file.
       if (/^(?:openai|textgen) settings\//i.test(name) && name.endsWith(".json") && isText(entries[name])) {
         try {
-          const n = normalizePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
+          const n = restorePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
           if (n) writePreset(n);
         } catch { summary.errors.push("preset failed: " + name); }
         continue;
@@ -1240,7 +1254,7 @@ export function handleRoute(req, host) {
       }
       if (name.startsWith("presets/") && name.endsWith(".json") && isText(entries[name])) {
         try {
-          const n = normalizePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
+          const n = restorePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
           if (n) writePreset(n);
         } catch { summary.errors.push("preset failed: " + name); }
         continue;

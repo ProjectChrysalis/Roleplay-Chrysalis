@@ -12,7 +12,7 @@ import type {
   Swipe, ID, ModelInfo, ModelPricing, PromptSection, DataBankFile, PromptFormatSequences,
 } from './types'
 import { uid } from './tokens'
-import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT } from './seed'
+import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT, GENERATION_TYPES } from './seed'
 import { DEFAULT_AVATAR, storedMediaUrl } from './utils'
 import { saveFile } from './export'
 
@@ -1007,7 +1007,8 @@ export function enginePresetToUI(ep: EnginePreset, id: string): Preset {
         position: p?.injection_position === 'absolute' ? ('in-chat' as const) : ('relative' as const),
         depth: p?.injection_depth ?? 4,
         order: i,
-        injectionTriggers: bagSection?.injectionTriggers ?? ['normal'],
+        // a section that never chose its generation types runs for all of them
+        injectionTriggers: bagSection?.injectionTriggers ?? [...GENERATION_TYPES],
         forbidOverrides: bagSection?.forbidOverrides ?? false,
         groupId: bagSection?.groupId ?? null,
         condition: bagSection?.condition ?? null,
