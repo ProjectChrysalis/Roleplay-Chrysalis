@@ -11,7 +11,7 @@ import { Slider } from '@/components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useApp } from '@/lib/store'
-import { defaultSamplers } from '@/lib/seed'
+import { defaultSamplers, normalizeCache } from '@/lib/seed'
 import { cn } from '@/lib/utils'
 import type { Preset, SamplerSettings } from '@/lib/types'
 
@@ -33,6 +33,9 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
   const updatePreset = useApp((s) => s.updatePreset)
   const ro = preset.readOnly
   const sp = preset.samplers
+  // old stored blocks are coerced to the current shape; the whole object is
+  // written back on any edit
+  const cache = normalizeCache(sp.cache)
   const up = (patch: Partial<SamplerSettings>) => updatePreset(preset.id, { samplers: { ...sp, ...patch } })
 
   return (
@@ -67,6 +70,7 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
             <TabsTrigger value="tokensctx" className="flex-none px-2.5 text-xs">Tokens & bias</TabsTrigger>
             <TabsTrigger value="extra" className="flex-none px-2.5 text-xs">Extra params</TabsTrigger>
             <TabsTrigger value="reasoning" className="flex-none px-2.5 text-xs">Reasoning</TabsTrigger>
+            <TabsTrigger value="cache" className="flex-none px-2.5 text-xs">Caching</TabsTrigger>
           </TabsList>
         </div>
 
@@ -181,6 +185,37 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
               <Input value={sp.reasoning.thinkTagClose} disabled={ro} onChange={(e) => up({ reasoning: { ...sp.reasoning, thinkTagClose: e.target.value } })} className="h-7 font-mono text-xs" aria-label="Think tag close" />
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="cache" className="mt-3 flex max-w-md flex-col gap-3">
+          <p className="text-xs text-muted-foreground">Caching is on by default. Turning it off removes the cache markers and hints the engine sends.</p>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={cache.enabled} disabled={ro} onCheckedChange={(v) => up({ cache: { ...cache, enabled: v } })} aria-label="Prompt caching" />
+            Prompt caching
+          </label>
+          <label className={cn('flex items-center gap-2 text-sm', !cache.enabled && 'opacity-50')}>
+            <Switch checked={cache.pinned} disabled={ro || !cache.enabled} onCheckedChange={(v) => up({ cache: { ...cache, pinned: v } })} aria-label="Pin breakpoint at depth" />
+            Pin breakpoint at depth (Anthropic models)
+          </label>
+          <div className="flex items-center gap-3">
+            <Label className="w-28 text-xs">Depth</Label>
+            <Input
+              type="number" min={0} value={cache.depth} disabled={ro || !cache.enabled || !cache.pinned}
+              onChange={(e) => up({ cache: { ...cache, depth: Math.max(0, Math.floor(Number(e.target.value) || 0)) } })}
+              className="h-7 w-24 text-xs" aria-label="Cache depth"
+            />
+          </div>
+          <div className={cn('flex items-center gap-3', !cache.enabled && 'opacity-50')}>
+            <Label className="w-28 text-xs">Window</Label>
+            <Select value={cache.ttl} onValueChange={(v) => up({ cache: { ...cache, ttl: v as never } })}>
+              <SelectTrigger className="w-32" aria-label="Cache window" disabled={ro || !cache.enabled}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="short">Default</SelectItem>
+                <SelectItem value="long">Extended</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-xs text-muted-foreground">Extended: 1 hour on Anthropic, 24 hours on OpenAI.</p>
         </TabsContent>
 
       </Tabs>

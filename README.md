@@ -28,6 +28,7 @@ builds it into your copy while you watch.
 
 **Prompts and memory**
 - Presets with a drag-and-drop prompt manager and every sampler setting
+- Anthropic prompt caching pinned at a set depth, with a 5m or 1h window
 - Lorebooks (world info), global or linked to a character or persona
 - Regex scripts for input, output, prompts and display
 - Chat memory: a running summary with undo, plus a per-chat facts vault

@@ -12,7 +12,7 @@ import type {
   Swipe, ID, ModelInfo, ModelPricing, PromptSection, DataBankFile, PromptFormatSequences,
 } from './types'
 import { uid } from './tokens'
-import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT, GENERATION_TYPES } from './seed'
+import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT, GENERATION_TYPES, normalizeCache } from './seed'
 import { DEFAULT_AVATAR, storedMediaUrl } from './utils'
 import { saveFile } from './export'
 
@@ -89,7 +89,6 @@ export interface EngineChatMeta {
   summary?: string
   memoryCutoffMessageId?: string | null
   compactions?: unknown[]
-  fieldVariantSelection?: Chat['fieldVariantSelection']
   parentChatId?: string | null
   parentMessageId?: string | null
   createdAt: number
@@ -629,6 +628,7 @@ export function cardToCharacter(card: EngineCard, id: string, lastChatAt = 0): C
     descVariants: studio.descVariants ?? [],
     personalityVariants: studio.personalityVariants ?? [],
     scenarioVariants: studio.scenarioVariants ?? [],
+    variantSelection: studio.variantSelection ?? {},
     versions: studio.versions ?? [],
     voiceProvider: studio.voiceProvider ?? '',
     voiceId: studio.voiceId ?? '',
@@ -669,6 +669,7 @@ export function characterToCard(c: Character): EngineCard {
       embeddedLorebookId: c.embeddedLorebookId, linkedLorebookIds: c.linkedLorebookIds,
       colors: c.colors, stats: c.stats, descVariants: c.descVariants,
       personalityVariants: c.personalityVariants, scenarioVariants: c.scenarioVariants,
+      variantSelection: c.variantSelection,
       versions: c.versions, voiceProvider: c.voiceProvider, voiceId: c.voiceId,
       gallery: c.gallery, expressions: c.expressions, defaultExpression: c.defaultExpression,
       characterRegexIds: c.characterRegexIds, css: c.css,
@@ -691,7 +692,7 @@ export function groupToCharacter(g: EngineGroup, members: Character[]): Characte
     createdAt: 0, lastChatAt: 0, embeddedLorebookId: null, linkedLorebookIds: [],
     colors: { name: '', dialogue: '', bubble: '' }, stats: [],
     isGroup: true, members: g.memberIds ?? [],
-    descVariants: [], personalityVariants: [], scenarioVariants: [], versions: [],
+    descVariants: [], personalityVariants: [], scenarioVariants: [], variantSelection: {}, versions: [],
     voiceProvider: '', voiceId: '', gallery: [], expressions: [], defaultExpression: 'neutral', characterRegexIds: [], css: '',
   }
 }
@@ -775,7 +776,6 @@ export function engineChatToUI(meta: EngineChatMeta, msgs: EngineMessage[]): Cha
     folderId: meta.folderId ?? null,
     chatTags: meta.chatTags ?? [],
     backgroundId: meta.backgroundId ?? null,
-    fieldVariantSelection: meta.fieldVariantSelection ?? {},
     // carried so an unloaded chat still renders a preview and a count; a
     // loaded transcript makes them redundant
     preview: meta.preview ?? '',
@@ -797,7 +797,6 @@ export function chatPatchOf(p: Partial<Chat>): Record<string, unknown> {
   if ('folderId' in p) out.folderId = p.folderId
   if ('chatTags' in p) out.chatTags = p.chatTags
   if ('backgroundId' in p) out.backgroundId = p.backgroundId
-  if ('fieldVariantSelection' in p) out.fieldVariantSelection = p.fieldVariantSelection
   return out
 }
 
@@ -1037,6 +1036,7 @@ export function enginePresetToUI(ep: EnginePreset, id: string): Preset {
   const samplers = bag?.samplers
     ? { ...base, ...bag.samplers, ...Object.fromEntries(Object.entries(flat).filter(([, v]) => v != null).map(([k, v]) => [k, (k === 'stopStrings' || k === 'maxTokens' || k === 'contextSize' || k === 'seed') ? v : (typeof v === 'number' ? { value: v, enabled: true } : v)])) }
     : base
+  samplers.cache = normalizeCache(samplers.cache)
   return {
     id,
     name: ep.name ?? id,

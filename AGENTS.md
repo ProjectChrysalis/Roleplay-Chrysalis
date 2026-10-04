@@ -55,7 +55,7 @@ ordering, so it gets its own switch and takes over the sort; an unknown sort
 key is a 400, never a fallback; tags are `topics`, and OR is `inclusive_or`
 (`tags_mode` is read by nothing).
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
-to it on every change. Messages are a FLAT list with swipes.
+to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
 
 ## Phase status
 
@@ -243,7 +243,6 @@ data/
 ├─ chats/<id>.jsonl     one message per line; <id>.meta.json holds title,
 │                       folderId, personaId, presetId, model, branch
 │                       parentage (parentChatId/parentMessageId), summary,
-│                       fieldVariantSelection (which card alternate this chat sends)
 ├─ groups/<id>.json     { memberIds, mode, mutedIds }
 ├─ presets/<id>.json    portable shape (prompts[] + prompt_order[]) + `studio` bag
 │                       (library, variables, samplers, utility prompts)
@@ -261,10 +260,10 @@ Characters: alternates, versions, per-chat choice — exact shapes:
 - `card.studio.versions`: `[{ id, label, savedAt, snapshot }]`, `snapshot`
   carrying `description`, `personality`, `scenario`, `firstMessage`,
   `exampleDialogue`, `systemPromptOverride`, `postHistoryInstructions`.
-- A chat rides an alternate via its meta `fieldVariantSelection: { desc?,
+- The card selects alternates with `studio.variantSelection: { desc?,
   personality?, scenario? }` (values are variant ids; absent key = base text).
-  Generation and prompt peek resolve through it, so editing the meta switches
-  that one conversation immediately.
+  The character editor changes this selection. Generation and prompt peek
+  resolve through it in every chat.
 
 Rules of thumb:
 - JSON edits: keep the exact same shape the files already use; the app's

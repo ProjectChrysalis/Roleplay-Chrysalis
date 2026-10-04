@@ -1000,12 +1000,12 @@ function chatPersona(fsx, meta) {
 }
 const chatUserName = (fsx, meta) => chatPersona(fsx, meta).userName;
 
-/** Per-chat field variants: a conversation can ride an alternate description /
- *  personality / scenario instead of the card's primary text. The choice lives
- *  on the chat meta (fieldVariantSelection = {desc, personality, scenario}),
- *  points at studio.<field>Variants entries, and an absent key means "primary".
- *  Assembly resolves cards through this, so the chat picker actually changes
- *  the prompt and prompt peek shows what a send would really send. */
+/** Field variants: a character can carry an alternate description /
+ *  personality / scenario, and the chip row in the character editor picks
+ *  which one the card sends. The choice lives on the card itself
+ *  (studio.variantSelection = {desc, personality, scenario}), so every chat
+ *  reads the same variant, and assembly resolves cards through it — prompt
+ *  peek shows exactly what a send would send. */
 const VARIANT_FIELDS = [
   ["desc", "description", "descVariants"],
   ["personality", "personality", "personalityVariants"],
@@ -1028,8 +1028,7 @@ function resolveCardVariants(card, sel) {
 
 function chatMembers(fsx, meta) {
   // returns [{id, name, card}] the bots participating in this chat, each card
-  // resolved through the chat's own field-variant selection
-  const sel = meta.fieldVariantSelection;
+  // resolved through the character's own variant selection
   if (meta.groupId) {
     let g = null;
     try { g = JSON.parse(fsx.read("groups/" + meta.groupId + ".json")); } catch {}
@@ -1038,7 +1037,7 @@ function chatMembers(fsx, meta) {
     for (const mid of g.memberIds || []) {
       try {
         const card = JSON.parse(fsx.read("characters/" + mid + "/card.json"));
-        const rcard = resolveCardVariants(card, sel);
+        const rcard = resolveCardVariants(card, card && card.studio && card.studio.variantSelection);
         out.push({ id: mid, name: rcard.name, card: rcard });
       } catch { /* member deleted */ }
     }
@@ -1047,7 +1046,7 @@ function chatMembers(fsx, meta) {
   if (meta.characterId) {
     try {
       const card = JSON.parse(fsx.read("characters/" + meta.characterId + "/card.json"));
-      const rcard = resolveCardVariants(card, sel);
+      const rcard = resolveCardVariants(card, card && card.studio && card.studio.variantSelection);
       return [{ id: meta.characterId, name: rcard.name, card: rcard }];
     } catch {}
   }
@@ -1552,6 +1551,24 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   const verb = preset && preset.studio && typeof preset.studio.verbosity === "string"
     && ["low", "medium", "high"].includes(preset.studio.verbosity) ? preset.studio.verbosity : null;
   if (verb) params.verbosity = verb;
+  // Anthropic prompt caching: the kernel caches by default; the preset can
+  // opt out, or pin the history breakpoint a fixed number of role runs back
+  // (plus one two runs deeper) so an unchanging prefix stays cached while
+  // the tail churns, and can ask for the endpoint's 1h window. Other
+  // transports ignore the depth. Builds before the pinned flag stored the
+  // pin toggle as `enabled` with caching always on, so a legacy block reads
+  // its `enabled` as the pin and never as an opt-out.
+  const cacheBag = S && S.cache && typeof S.cache === "object" ? S.cache : null;
+  let cacheCfg = null;
+  if (cacheBag) {
+    const legacy = cacheBag.pinned === undefined;
+    const enabled = legacy ? true : cacheBag.enabled !== false;
+    const pinned = legacy ? cacheBag.enabled === true : cacheBag.pinned === true;
+    const ttl = cacheBag.ttl === "long" ? "long" : "short";
+    if (!enabled) cacheCfg = { retention: "none" };
+    else if (pinned && Number.isInteger(cacheBag.depth) && cacheBag.depth >= 0) cacheCfg = { depth: cacheBag.depth, retention: ttl };
+    else if (ttl === "long") cacheCfg = { retention: "long" };
+  }
   const presetParams = {
     ...(preset && typeof preset.temperature === "number" ? { temperature: preset.temperature } : {}),
     ...(preset && typeof preset.openai_max_tokens === "number" && preset.openai_max_tokens > 0 ? { max_tokens: preset.openai_max_tokens } : {}),
@@ -1564,6 +1581,7 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
     messages,
     presetParams,
     ...(assistantPrefill ? { assistantPrefill } : {}),
+    ...(cacheCfg ? { cache: cacheCfg } : {}),
     ...(preset && typeof preset.reasoning === "string" && preset.reasoning !== "off" ? { reasoning: preset.reasoning } : {}),
     ...(preset && preset.reasoningTags && preset.reasoningTags.open && preset.reasoningTags.close ? { reasoningTags: preset.reasoningTags } : {}),
     ...(preset && typeof preset.thinkingBudget === "number" && preset.thinkingBudget > 0 ? { thinkingBudget: preset.thinkingBudget } : {}),
@@ -1786,7 +1804,7 @@ function applyStashVars(req, meta) {
 // the generic connectivity hint so a filtered turn reads as filtered.
 function llmFailReason(reply) {
   const cause = reply && typeof reply.error === "string" ? reply.error.trim() : "";
-  return cause || "model failed — check the connection in Settings";
+  return cause || "Model failed. Check the connection in Settings.";
 }
 
 // ---------- summarization default ----------
@@ -2216,6 +2234,7 @@ export function handleRoute(req, host) {
       ...(a.thinkingBudget ? { thinkingBudget: a.thinkingBudget } : {}),
       ...(a.promptFormat ? { promptFormat: a.promptFormat } : {}),
       ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
+      ...(a.cache ? { cache: a.cache } : {}),
       ...(toolDefs && toolDefs.length ? { tools: toolDefs } : {}),
     });
   }
@@ -2238,7 +2257,7 @@ export function handleRoute(req, host) {
         dryRun: true, config: preset && preset.studio && preset.studio.worldInfo,
         sources: (() => {
           const base = chat.meta.characterId ? readJson("characters/" + chat.meta.characterId + "/card.json", null) : null;
-          const card = resolveCardVariants(base, chat.meta.fieldVariantSelection);
+          const card = resolveCardVariants(base, base && base.studio && base.studio.variantSelection);
           return {
             description: card ? card.description : null,
             personality: card ? card.personality : null,
@@ -2822,7 +2841,7 @@ const toolX = (r) => ({
       const same = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
       const keys = ["title", "presetId", "personaId", "model", "authorNote", "lorebookIds", "userName", "characterId", "groupId",
         "authorNoteObject", "folderId", "chatTags", "backgroundId", "temporary", "summary",
-        "memoryCutoffMessageId", "fieldVariantSelection", "parentChatId", "parentMessageId"];
+        "memoryCutoffMessageId", "parentChatId", "parentMessageId"];
       if (keys.every((k) => !(k in b) || same(b[k], meta[k]))) return ok(meta);
       const prevPersonaId = meta.personaId;
       for (const k of keys) {
@@ -2865,12 +2884,14 @@ const toolX = (r) => ({
     // with no user turn — nothing is written into the transcript.
     if (op === "send" && req.method === "POST") {
       const b = body();
+      const existingReply = b.replyMessageId && chat.msgs.find((m) => m.id === b.replyMessageId);
+      if (existingReply) return ok({ reply: existingReply });
       const typed = String(b.text || "").trim();
       if (!typed && b.allowEmpty !== true) return err(400, "text required");
       const text = typed ? onSave(typed, "user_input", members[0] || null).trim() : "";
       const reply = host.llm.results.reply;
       const userMsg = text ? {
-        id: uid(), name: chatUserName(fsx, meta), charId: null, role: "user",
+        id: typeof b.userMessageId === "string" && b.userMessageId ? b.userMessageId : uid(), name: chatUserName(fsx, meta), charId: null, role: "user",
         ...(chatPersona(fsx, meta).personaId ? { personaId: chatPersona(fsx, meta).personaId } : {}),
         text, at: Date.now(), swipes: [text], swipe: 0,
         // attachments (data-URL images/files) ride on the stored message
@@ -2938,6 +2959,7 @@ const toolX = (r) => ({
           ...(a.thinkingBudget ? { thinkingBudget: a.thinkingBudget } : {}),
           ...(a.promptFormat ? { promptFormat: a.promptFormat } : {}),
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
+          ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
           stream: { chatId: id, name: speaker ? speaker.name : "" },
         });
@@ -2963,14 +2985,14 @@ const toolX = (r) => ({
       // the real cause (content filter, bad key, …). The client's refresh then
       // lands the user bubble instead of wiping its staged copy.
       if (reply.model === "error") {
-        if (userMsg) {
+        if (userMsg && !chat.msgs.some((m) => m.id === userMsg.id)) {
           chat.msgs.push(userMsg);
           applyStashVars(req, meta);
           saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
         }
         return err(503, llmFailReason(reply));
       }
-      if (userMsg) chat.msgs.push(userMsg);
+      if (userMsg && !chat.msgs.some((m) => m.id === userMsg.id)) chat.msgs.push(userMsg);
       let speaker = members[0] || null;
       let replyText = String(reply.text || "").trim();
       const plan = group && req.stash && Array.isArray(req.stash.plan) ? req.stash.plan : null;
@@ -2984,7 +3006,7 @@ const toolX = (r) => ({
       replyText = onSave(replyText, "ai_output", speaker);
       if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
       const charMsg = {
-        id: uid(), name: speaker.name, charId: speaker.id, role: "char",
+        id: typeof b.replyMessageId === "string" && b.replyMessageId ? b.replyMessageId : uid(), name: speaker.name, charId: speaker.id, role: "char",
         text: replyText, at: Date.now(), swipes: [replyText], swipe: 0,
         extra: { model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, swipeMeta: [swipeMetaEntry(reply)], ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) },
       };
@@ -3018,6 +3040,8 @@ const toolX = (r) => ({
     if (op === "next" && req.method === "POST") {
       if (!group) return err(400, "not a group chat");
       const b = body();
+      const existingReply = b.replyMessageId && chat.msgs.find((m) => m.id === b.replyMessageId);
+      if (existingReply) return ok({ reply: existingReply });
       const speaker = members.find((m) => m.id === b.charId) || null;
       if (!speaker) return err(400, "charId must be a member of this group");
       const reply = host.llm.results.reply;
@@ -3034,6 +3058,7 @@ const toolX = (r) => ({
           ...(a.thinkingBudget ? { thinkingBudget: a.thinkingBudget } : {}),
           ...(a.promptFormat ? { promptFormat: a.promptFormat } : {}),
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
+          ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
           stream: { chatId: id, name: speaker.name },
         });
@@ -3047,7 +3072,7 @@ const toolX = (r) => ({
       replyText = onSave(replyText, "ai_output", speaker);
       if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
       const charMsg = {
-        id: uid(), name: speaker.name, charId: speaker.id, role: "char",
+        id: typeof b.replyMessageId === "string" && b.replyMessageId ? b.replyMessageId : uid(), name: speaker.name, charId: speaker.id, role: "char",
         text: replyText, at: Date.now(), swipes: [replyText], swipe: 0,
         extra: { model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, swipeMeta: [swipeMetaEntry(reply)], ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) },
       };
@@ -3088,6 +3113,9 @@ const toolX = (r) => ({
       if (dir !== 1) return err(400, "no earlier swipe");
       // generate a fresh swipe (two-phase) from history WITHOUT this message
       const reply = host.llm.results.reply;
+      const guard = body();
+      if (reply && ((guard.expectedSwipes != null && (msg.swipes || [msg.text]).length !== guard.expectedSwipes) ||
+          (guard.expectedText != null && msg.text !== guard.expectedText))) return err(409, "target message changed");
       const before = chat.msgs.slice(0, idx);
       const speaker = members.find((m) => m.id === msg.charId) || members[0] || null;
       if (!speaker) return err(400, "speaker character missing");
@@ -3104,6 +3132,7 @@ const toolX = (r) => ({
           ...(a.thinkingBudget ? { thinkingBudget: a.thinkingBudget } : {}),
           ...(a.promptFormat ? { promptFormat: a.promptFormat } : {}),
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
+          ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
           stream: { chatId: id, name: msg.name },
         });
@@ -3123,53 +3152,54 @@ const toolX = (r) => ({
       return ok({ message: chat.msgs[idx], swipe: swipes.length - 1, count: swipes.length });
     }
 
-    // cancelled: the client aborted a generation and owns what survived — it
-    // froze the exact on-screen bytes and commits them here. The engine's own
-    // completion for that generation was discarded, so this is the ONLY
-    // writer. body: { text, parts?, userText?, attachments?, targetMessageId?,
-    // expectedSwipes? } — a fresh send carries its staged user message; an
-    // in-place regen targets the message and appends the swipe (guarded by
-    // expectedSwipes so a commit that snuck in before the abort 409s instead
-    // of double-writing)
+    // Interrupted saves are idempotent and cannot replace a newer generation.
     if (op === "cancelled" && req.method === "POST") {
       const b = body();
-      const stripPreset = readJson("presets/" + (meta.presetId || "default") + ".json", null);
-      const cancelSpeaker = members.find((m) => m.id === (chat.msgs.find((x) => x.id === b.targetMessageId) || {}).charId) || members[0] || null;
-      const text = onSave(stripEchoedName(String(b.text ?? ""), stripPreset, !!group, cancelSpeaker ? cancelSpeaker.name : undefined), "ai_output", cancelSpeaker);
-      const parts = Array.isArray(b.parts) ? b.parts : null;
-      if (!text.trim() && !(parts && parts.length)) return err(400, "nothing to keep");
-      let idx = -1;
+      if (b.replyMessageId && chat.msgs.some((m) => m.id === b.replyMessageId)) return ok({ ok: true });
+      const target = b.targetMessageId ? chat.msgs.find((m) => m.id === b.targetMessageId) : null;
+      const speaker = members.find((m) => m.id === (target ? target.charId : b.charId)) || members[0] || null;
+      const preset = readJson("presets/" + (meta.presetId || "default") + ".json", null);
+      const text = b.operation === "continue"
+        ? String(b.text ?? "")
+        : onSave(stripEchoedName(String(b.text ?? ""), preset, !!group, speaker ? speaker.name : undefined), "ai_output", speaker);
+      const parts = Array.isArray(b.parts) ? b.parts : [];
+      const keep = !!text.trim() || parts.length > 0;
+      const genMs = Math.max(0, Number(b.genMs) || 0);
+      const model = typeof b.model === "string" ? b.model : "";
       if (b.targetMessageId) {
-        idx = chat.msgs.findIndex((m) => m.id === b.targetMessageId);
-        if (idx < 0) return err(409, "target message changed");
-        const msg = chat.msgs[idx];
-        const swipes = msg.swipes && msg.swipes.length ? msg.swipes : [msg.text];
-        if (b.expectedSwipes != null && swipes.length !== b.expectedSwipes) return err(409, "a generation already committed");
-        swipes.push(text);
-        const cancelledMs = Number(b.genMs) || 0;
-        const cancelledModel = typeof b.model === "string" && b.model ? b.model : "";
-        // the cancelled partial owns its own facts; the message-level extra
-        // describes the ACTIVE swipe, so the replaced generation's
-        // usage/timing/reasoning must not leak onto it
-        chat.msgs[idx] = { ...msg, text, swipe: swipes.length - 1, swipes, translation: undefined, extra: pushSwipeMeta({ ...msg.extra, model: cancelledModel, genMs: cancelledMs, usage: undefined, params: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, ...(parts && parts.length ? { parts } : {}) }, swipes.length, { genMs: cancelledMs, ...(cancelledModel ? { model: cancelledModel } : {}) }) };
+        if (!target) return err(409, "target message changed");
+        const swipes = target.swipes && target.swipes.length ? target.swipes.slice() : [target.text];
+        if ((b.expectedSwipes != null && swipes.length !== b.expectedSwipes) ||
+            (b.expectedText != null && target.text !== b.expectedText)) return err(409, "a generation already committed");
+        if (!keep) return ok({ ok: true });
+        const continuing = b.operation === "continue";
+        if (continuing) swipes[target.swipe || 0] = text;
+        else swipes.push(text);
+        const swipe = continuing ? target.swipe || 0 : swipes.length - 1;
+        const extra = { ...target.extra, model, genMs, usage: undefined, params: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
+        if (continuing) {
+          const swipeMeta = Array.isArray(target.extra?.swipeMeta) ? target.extra.swipeMeta.slice() : swipes.map(() => ({}));
+          swipeMeta[swipe] = { genMs, ...(model ? { model } : {}) };
+          extra.swipeMeta = swipeMeta;
+        }
+        chat.msgs[chat.msgs.indexOf(target)] = { ...target, text, swipes, swipe, translation: undefined,
+          extra: continuing ? extra : pushSwipeMeta(extra, swipes.length, { genMs, ...(model ? { model } : {}) }) };
       } else {
         const userText = typeof b.userText === "string" ? onSave(b.userText.trim(), "user_input", members[0] || null).trim() : "";
-        if (userText) {
+        if (!keep && !userText) return err(400, "nothing to keep");
+        if (keep && !speaker) return err(400, "chat has no participating characters");
+        if (userText && !(b.userMessageId && chat.msgs.some((m) => m.id === b.userMessageId))) {
           chat.msgs.push({
-            id: uid(), name: chatUserName(fsx, meta), charId: null, role: "user",
+            id: b.userMessageId || uid(), name: chatUserName(fsx, meta), charId: null, role: "user",
             ...(chatPersona(fsx, meta).personaId ? { personaId: chatPersona(fsx, meta).personaId } : {}),
             text: userText, at: Date.now(), swipes: [userText], swipe: 0,
             ...(Array.isArray(b.attachments) && b.attachments.length ? { attachments: b.attachments } : {}),
           });
         }
-        const speaker = members[0] || null;
-        if (!speaker) return err(400, "chat has no participating characters");
-        const cancelledMs = Number(b.genMs) || 0;
-        const cancelledModel = typeof b.model === "string" && b.model ? b.model : "";
-        chat.msgs.push({
-          id: uid(), name: speaker.name, charId: speaker.id, role: "char",
+        if (keep) chat.msgs.push({
+          id: b.replyMessageId || uid(), name: speaker.name, charId: speaker.id, role: "char",
           text, at: Date.now(), swipes: [text], swipe: 0,
-          extra: { ...(parts && parts.length ? { parts } : {}), genMs: cancelledMs, ...(cancelledModel ? { model: cancelledModel } : {}) },
+          extra: { ...(parts.length ? { parts } : {}), genMs, ...(model ? { model } : {}) },
         });
       }
       applyStashVars(req, meta);
@@ -3188,6 +3218,9 @@ const toolX = (r) => ({
       const speaker = members.find((m) => m.id === msg.charId) || members[0] || null;
       if (!speaker) return err(400, "speaker character missing");
       const reply = host.llm.results.reply;
+      const guard = body();
+      if (reply && ((guard.expectedSwipes != null && (msg.swipes || [msg.text]).length !== guard.expectedSwipes) ||
+          (guard.expectedText != null && msg.text !== guard.expectedText))) return err(409, "target message changed");
       if (!reply) {
         const a = assemble(fsx, meta, chat.msgs, speaker, null, { gen: "continue" });
         // continue nudge: preset utility prompt (blank = plain continue, no
@@ -3214,6 +3247,7 @@ const toolX = (r) => ({
           ...(a.thinkingBudget ? { thinkingBudget: a.thinkingBudget } : {}),
           ...(a.promptFormat ? { promptFormat: a.promptFormat } : {}),
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
+          ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
           stream: { chatId: id, name: msg.name },
         });
@@ -3497,6 +3531,7 @@ const toolX = (r) => ({
           ...(a.thinkingBudget ? { thinkingBudget: a.thinkingBudget } : {}),
           ...(a.promptFormat ? { promptFormat: a.promptFormat } : {}),
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
+          ...(a.cache ? { cache: a.cache } : {}),
         });
         return pendingOut(meta);
       }

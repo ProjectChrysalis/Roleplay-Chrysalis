@@ -34,6 +34,12 @@ function TokenBadge({ text }: { text: string }) {
   return <Badge variant="outline" className="text-[10px] text-muted-foreground">{formatTokens(estimateTokens(text))} tok</Badge>
 }
 
+/** The chip index for a stored variant selection: -1 is the base text. */
+function variantIndex(variants: { id: string }[], id?: string): number {
+  if (!id) return -1
+  return variants.findIndex((v) => v.id === id)
+}
+
 export function CharacterEditor({ character, onClose }: { character: Character; onClose: () => void }) {
   useBackClose(true, onClose)
   const c = character
@@ -208,6 +214,8 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
                 onChange={(v) => up({ description: v })}
                 variants={c.descVariants}
                 onVariantsChange={(descVariants) => up({ descVariants })}
+                active={variantIndex(c.descVariants, c.variantSelection?.desc)}
+                onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), desc: id } })}
                 rows={5}
               />
               <Field label="First message" value={c.firstMessage} onChange={(v) => up({ firstMessage: v })} rows={4} />
@@ -272,6 +280,8 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
                 onChange={(v) => up({ scenario: v })}
                 variants={c.scenarioVariants}
                 onVariantsChange={(scenarioVariants) => up({ scenarioVariants })}
+                active={variantIndex(c.scenarioVariants, c.variantSelection?.scenario)}
+                onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), scenario: id } })}
                 rows={2}
               />
               <VariantField
@@ -280,6 +290,8 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
                 onChange={(v) => up({ personality: v })}
                 variants={c.personalityVariants}
                 onVariantsChange={(personalityVariants) => up({ personalityVariants })}
+                active={variantIndex(c.personalityVariants, c.variantSelection?.personality)}
+                onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), personality: id } })}
                 rows={2}
               />
               <Collapsible>

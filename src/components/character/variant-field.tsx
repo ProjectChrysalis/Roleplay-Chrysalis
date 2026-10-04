@@ -10,18 +10,11 @@ import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
 import { cn } from '@/lib/utils'
 import type { AltVariant } from '@/lib/types'
 
-/** Which variant tab each field last had open. The tab only picks WHICH text
- *  you are editing (the chat's picker is what equips a variant), but losing it
- *  on every remount made it look like the choice had reset. Session-scoped,
- *  keyed by field label. */
-const lastTab = new Map<string, number>()
-
 /**
  * A character text field that can carry alternates, the way alternate greetings
- * already do. The base value is variant "Original"; extra variants live
- * alongside it and a chat picks which one it wants (see the per-chat picker in
- * the chat view). Greetings are deliberately excluded — they have their own
- * swipe-based mechanism.
+ * already do. The chip row picks both the text you edit and the text the
+ * character sends: the choice lives on the card, so every chat reads the same
+ * variant. "Original" is the base field.
  */
 export function VariantField({
   label,
@@ -30,6 +23,8 @@ export function VariantField({
   onChange,
   variants,
   onVariantsChange,
+  active,
+  onActiveChange,
   rows = 3,
 }: {
   label: string
@@ -38,20 +33,11 @@ export function VariantField({
   onChange: (v: string) => void
   variants: AltVariant[]
   onVariantsChange: (next: AltVariant[]) => void
+  /** -1 addresses the base field; >= 0 indexes into `variants`. */
+  active: number
+  onActiveChange: (id: string | undefined) => void
   rows?: number
 }) {
-  // -1 addresses the base field; >= 0 indexes into `variants`.
-  const [active, setActiveState] = useState(() => {
-    const saved = lastTab.get(label)
-    return saved != null && saved < variants.length ? saved : -1
-  })
-  const setActive = (next: number | ((a: number) => number)) => {
-    setActiveState((prev) => {
-      const v = typeof next === 'function' ? next(prev) : next
-      lastTab.set(label, v)
-      return v
-    })
-  }
   const [renaming, setRenaming] = useState<string | null>(null)
 
   const current = active < 0 ? value : (variants[active]?.content ?? '')
@@ -61,15 +47,16 @@ export function VariantField({
   }
 
   const addVariant = () => {
-    const label = `Variant ${variants.length + 1}`
-    onVariantsChange([...variants, { id: uid('var'), label, content: current }])
-    setActive(variants.length)
-    toast.success(`Added ${label}`)
+    const name = `Variant ${variants.length + 1}`
+    const variant = { id: uid('var'), label: name, content: current }
+    onVariantsChange([...variants, variant])
+    onActiveChange(variant.id)
+    toast.success(`Added ${name}`)
   }
 
   const removeVariant = (i: number) => {
     onVariantsChange(variants.filter((_, j) => j !== i))
-    setActive((a) => (a === i ? -1 : a > i ? a - 1 : a))
+    if (active === i) onActiveChange(undefined)
   }
 
   /** Swap a variant into the base slot, so it becomes what unaware code reads. */
@@ -78,6 +65,7 @@ export function VariantField({
     if (!v) return
     onChange(v.content)
     onVariantsChange(variants.map((x, j) => (j === i ? { ...x, content: value } : x)))
+    onActiveChange(undefined)
     toast.success(`"${v.label}" is now the primary ${label.toLowerCase()}`)
   }
 
@@ -101,14 +89,14 @@ export function VariantField({
         <VariantChip
           label="Original"
           active={active < 0}
-          onSelect={() => setActive(-1)}
+          onSelect={() => onActiveChange(undefined)}
         />
         {variants.map((v, i) => (
           <VariantChip
             key={v.id}
             label={v.label}
             active={active === i}
-            onSelect={() => setActive(i)}
+            onSelect={() => onActiveChange(v.id)}
             onRename={() => setRenaming(v.id)}
             onPromote={() => promote(i)}
             onRemove={() => removeVariant(i)}
@@ -164,7 +152,7 @@ export function VariantField({
       />
       {active >= 0 && (
         <p className="text-[11px] text-muted-foreground">
-          Editing an alternate. Chats choose which variant they use; the primary one is sent by default.
+          This variant is what the character sends.
         </p>
       )}
     </div>

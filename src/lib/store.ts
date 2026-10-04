@@ -103,7 +103,7 @@ interface AppState {
   focusPresetId: ID | null
   focusPersonaId: ID | null
   selectedSettingsSection: string
-  streaming: { chatId: ID; messageId: ID; full: string; shown: number; startedAt: number; thinking?: string; thinkingT0?: number; thinkingMs?: number; marks?: Array<{ kind: 'tool'; at: number; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean } | { kind: 'think'; at: number; text: string; t0: number; ms?: number }> } | null
+  streaming: { chatId: ID; messageId: ID; operation?: 'send' | 'swipe' | 'continue' | 'next'; prefix?: string; full: string; shown: number; startedAt: number; thinking?: string; thinkingT0?: number; thinkingMs?: number; marks?: Array<{ kind: 'tool'; at: number; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean } | { kind: 'think'; at: number; text: string; t0: number; ms?: number }> } | null
   /** one-shot: suppress the swipe animation for this messageId:swipeIndex
    *  (set when a cancelled regen appends its frozen swipe) */
   swipeFxSkip: string | null
@@ -279,6 +279,7 @@ let distReloadPending = false
 let distReloadArmed = false
 /** in-flight generation controllers by chat — Stop aborts the matching one */
 const activeGens = new Map<ID, AbortController>()
+const interruptedChats = new Set<ID>()
 /** chats created this client session — off-limits to the boot sweep (the
  *  user may still come back to them before the page closes) */
 const sessionNewChats = new Set<ID>()
@@ -514,10 +515,11 @@ export const useApp = create<AppState>()(
           // turn and the live bubble mid-stream; keep the local copy and let
           // the commit's own refreshChat reconcile when the run lands.
           const liveChatId = get().streaming?.chatId ?? null
-          const liveLocal = liveChatId ? get().chats.find((c) => c.id === liveChatId) ?? null : null
-          const chatsOut = liveLocal
-            ? withBranches.map((c) => (c.id === liveChatId ? liveLocal : c))
-            : withBranches
+          const chatsOut = withBranches.map((c) => (
+            c.id === liveChatId || interruptedChats.has(c.id)
+              ? get().chats.find((local) => local.id === c.id) ?? c
+              : c
+          ))
           // lastChatAt for character cards
           const byId = new Map(characters.map((c) => [c.id, c]))
           for (const c of withBranches) {
@@ -641,7 +643,7 @@ export const useApp = create<AppState>()(
             // deltas still accumulate but nothing is revealed until commit
             const chat = get().chats.find((c) => c.id === chatId)
             const preset = chat ? get().presets.find((p) => p.id === chat.presetId) : null
-            if (preset && preset.samplers?.streaming === false) return
+            const reveal = preset?.samplers?.streaming !== false
             const full = st.full + delta
             // first text token ends the thinking phase — freeze its span so the
             // live block can say "Thought for Xs" WHILE the reply streams
@@ -655,7 +657,7 @@ export const useApp = create<AppState>()(
             if (lastMark && lastMark.kind === 'think' && lastMark.ms == null) {
               marks![marks!.length - 1] = { ...lastMark, ms: Date.now() - lastMark.t0 }
             }
-            set({ streaming: { ...st, full, shown: Math.min(full.length, st.shown + Math.ceil(delta.length * 1.5)), ...(marks ? { marks } : {}), ...(thinkingMs != null ? { thinkingMs } : {}) } })
+            set({ streaming: { ...st, full, shown: reveal ? Math.min(full.length, st.shown + Math.ceil(delta.length * 1.5)) : st.shown, ...(marks ? { marks } : {}), ...(thinkingMs != null ? { thinkingMs } : {}) } })
           }
           stopStreams = connectStreams((chatId, _name, delta) => {
             const st = get().streaming
@@ -880,47 +882,14 @@ export const useApp = create<AppState>()(
         const st = get().streaming
         if (!st) return
         activeGens.get(st.chatId)?.abort()
-        // cancel is CLIENT-AUTHORITATIVE: freeze NOW on the bytes on screen
-        // (the fetch abort clears streaming moments later, so there is
-        // nothing to wait for), then tell the engine to discard its own
-        // completion and commit these exact bytes through the cancelled
-        // route — identical by construction, no race between two versions
-        const stagedUser = get().chats.find((c) => c.id === st.chatId)
-          ?.messages.find((m) => m.id.startsWith('pending-') && m.role === 'user')
-        const frozen = freezeCancelledStream(set, get, st)
-        if (get().streaming?.chatId === st.chatId) set({ streaming: null })
-        void (async () => {
-          try { await j('/__abort', { method: 'POST', body: JSON.stringify({ chatId: st.chatId }) }) } catch { /* already gone */ }
-          if (!frozen.keep) return
-          try {
-            await j(`/chats/${encodeURIComponent(st.chatId)}/cancelled`, {
-              method: 'POST',
-              body: JSON.stringify({
-                text: frozen.text,
-                genMs: frozen.genMs,
-                ...(get().model ? { model: get().model } : {}),
-                ...(frozen.parts.length ? { parts: frozen.parts } : {}),
-                ...(frozen.isStaged
-                  ? {
-                      ...(stagedUser?.swipes[0]?.content ? { userText: stagedUser.swipes[0].content } : {}),
-                      ...(stagedUser?.attachments?.length ? { attachments: stagedUser.attachments } : {}),
-                    }
-                  : { targetMessageId: st.messageId, ...(frozen.expectedSwipes != null ? { expectedSwipes: frozen.expectedSwipes } : {}) }),
-              }),
-            })
-          } catch { /* 409: a real commit beat the abort — the reconcile shows it */ }
-          // reconcile fast with targeted single-chat refreshes
-          for (const delay of [500, 1500]) {
-            await new Promise((r) => setTimeout(r, delay))
-            if (get().streaming || !get().chats.some((c) => c.id === st.chatId)) return
-            await refreshChat(set, get, st.chatId)
-          }
-        })()
+        void preserveInterruptedStream(set, get, st)
       },
       tickStream: () => {
         const st = get().streaming
         if (!st) return
         if (st.shown >= st.full.length) return
+        const chat = get().chats.find((c) => c.id === st.chatId)
+        if (get().presets.find((p) => p.id === chat?.presetId)?.samplers.streaming === false) return
         set({ streaming: { ...st, shown: Math.min(st.full.length, st.shown + 3) } })
       },
       regenerate: (chatId, messageId) => {
@@ -1121,17 +1090,24 @@ export const useApp = create<AppState>()(
         }).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
       },
       impersonate: (chatId) => {
-        if (get().streaming?.chatId === chatId) return
+        if (get().streaming?.chatId === chatId || interruptedChats.has(chatId)) return
+        const ctrl = new AbortController()
+        activeGens.set(chatId, ctrl)
         set({ streaming: { chatId, messageId: '', full: '', shown: 0, startedAt: Date.now() } })
         void (async () => {
           try {
             const r = await j<{ text: string }>(`/chats/${encodeURIComponent(chatId)}/impersonate`, {
-              method: 'POST', body: JSON.stringify(get().model ? { model: get().model } : {}),
+              method: 'POST', body: JSON.stringify(get().model ? { model: get().model } : {}), signal: ctrl.signal,
             })
-            set({ composerDraft: r.text, streaming: null })
+            if (!ctrl.signal.aborted) set({ composerDraft: r.text, streaming: null })
           } catch (e) {
-            set({ streaming: null })
+            if (ctrl.signal.aborted) return
+            flushStreamDeltas?.()
+            const st = get().streaming
+            if (st?.chatId === chatId) set({ composerDraft: st.full, streaming: null })
             toast.error(String((e as Error).message ?? e))
+          } finally {
+            if (activeGens.get(chatId) === ctrl) activeGens.delete(chatId)
           }
         })()
       },
@@ -1409,7 +1385,7 @@ export const useApp = create<AppState>()(
           depthPrompt: { text: '', depth: 4, role: 'system' }, creatorNotes: '', creator: '', version: '1.0',
           tags: [], favorite: false, folderId: null, createdAt: Date.now(), lastChatAt: 0, css: '',
           embeddedLorebookId: null, linkedLorebookIds: [], colors: { name: '', dialogue: '', bubble: '' },
-          stats: [], isGroup: false, descVariants: [], personalityVariants: [], scenarioVariants: [],
+          stats: [], isGroup: false, descVariants: [], personalityVariants: [], scenarioVariants: [], variantSelection: {},
           versions: [], voiceProvider: '', voiceId: '', gallery: [], expressions: [],
           defaultExpression: 'neutral', characterRegexIds: [],
         }
@@ -1811,7 +1787,7 @@ function freezeCancelledStream(
       if (a > prev && text.slice(prev, a).trim()) parts.push({ type: 'text', text: text.slice(prev, a) })
       for (const m of marks) {
         if (m.at !== a) continue
-        if (m.kind === 'think') parts.push({ type: 'thinking', text: m.text, ...(m.ms != null ? { ms: m.ms } : {}) })
+        if (m.kind === 'think') parts.push({ type: 'thinking', text: m.text, ms: m.ms ?? Math.max(0, Date.now() - m.t0) })
         else parts.push({ type: 'tool', name: m.name, args: m.args, resultText: m.done ? (m.resultText ?? '') : 'cancelled', isError: !!m.isError && !!m.done })
       }
       prev = a
@@ -1819,13 +1795,13 @@ function freezeCancelledStream(
     if (text.slice(prev).trim()) parts.push({ type: 'text', text: text.slice(prev) })
   }
   // thinking counts as content — a cancel mid-thought keeps its think block
-  const keep = text.trim().length > 0 || (st.marks ?? []).some((m) => m.kind === 'think' && m.text.trim()) || (st.marks ?? []).some((m) => m.kind === 'tool')
+  const keep = text.slice(st.prefix?.length ?? 0).trim().length > 0 || (st.marks ?? []).some((m) => m.kind === 'think' && m.text.trim()) || (st.marks ?? []).some((m) => m.kind === 'tool')
   // suppress the swipe animation when the freeze APPENDS a swipe to a real
   // message (a staged bubble keeps index 0 — nothing to animate)
   const target = get().chats.find((c) => c.id === st.chatId)?.messages.find((m) => m.id === st.messageId)
   const isStagedOut = !!target && target.id.startsWith('pending-')
   const expectedSwipesOut = target && !isStagedOut ? target.swipes.length : null
-  const skipKey = keep && target && !isStagedOut && target.swipes.length > 0
+  const skipKey = keep && st.operation !== 'continue' && target && !isStagedOut && target.swipes.length > 0
     ? `${target.id}:${target.swipes.length}`
     : null
   bumpMutate() // the frozen message must survive any in-flight hydrate
@@ -1841,8 +1817,10 @@ function freezeCancelledStream(
           // regen keeps its old swipes untouched
           if (!keep) return isStaged ? null : m
           const frozenSwipe = { id: uid('sw'), content: text, model: m.swipes[m.activeSwipe]?.model ?? '', genTimeMs: genMs, timestamp: Date.now(), ...(parts.length ? { parts } : {}) }
-          const swipes = isStaged || m.swipes.length === 0 ? [frozenSwipe] : [...m.swipes, frozenSwipe]
-          return { ...m, swipes, activeSwipe: swipes.length - 1 }
+          const swipes = st.operation === 'continue'
+            ? m.swipes.map((sw, i) => i === m.activeSwipe ? { ...frozenSwipe, id: sw.id } : sw)
+            : isStaged || m.swipes.length === 0 ? [frozenSwipe] : [...m.swipes, frozenSwipe]
+          return { ...m, swipes, activeSwipe: st.operation === 'continue' ? m.activeSwipe : swipes.length - 1 }
         })
         .filter((m): m is Message => m !== null),
     })),
@@ -1850,11 +1828,63 @@ function freezeCancelledStream(
   return { keep, text, parts, isStaged: isStagedOut, expectedSwipes: expectedSwipesOut, genMs }
 }
 
+async function preserveInterruptedStream(
+  set: SetFn, get: GetFn, st: NonNullable<AppState['streaming']>,
+) {
+  if (!st.messageId) {
+    interruptedChats.add(st.chatId)
+    set({ composerDraft: st.full, streaming: null })
+    try { await j('/__abort', { method: 'POST', body: JSON.stringify({ chatId: st.chatId }) }) }
+    catch (e) { toast.error(String((e as Error).message ?? e)) }
+    finally { interruptedChats.delete(st.chatId) }
+    return
+  }
+  const chat = get().chats.find((c) => c.id === st.chatId)
+  const target = chat?.messages.find((m) => m.id === st.messageId)
+  const user = chat?.messages.find((m) => m.id.startsWith('pending-') && m.role === 'user')
+  const expectedText = target?.swipes[target.activeSwipe]?.content
+  interruptedChats.add(st.chatId)
+  const frozen = freezeCancelledStream(set, get, st)
+  if (get().streaming === st) set({ streaming: null })
+  const save = async () => {
+    try {
+      await j('/__abort', { method: 'POST', body: JSON.stringify({ chatId: st.chatId }) })
+      if (frozen.keep || user) {
+        await j(`/chats/${encodeURIComponent(st.chatId)}/cancelled`, {
+          method: 'POST',
+          body: JSON.stringify({
+            text: frozen.text, parts: frozen.parts, genMs: frozen.genMs,
+            model: get().model ?? '', operation: st.operation,
+            ...(frozen.isStaged ? {
+              replyMessageId: st.messageId.replace(/^pending-/, ''), charId: target?.characterId,
+              userMessageId: user?.id.replace(/^pending-/, ''), userText: user?.swipes[0]?.content,
+              attachments: user?.attachments,
+            } : { targetMessageId: st.messageId, expectedSwipes: frozen.expectedSwipes, expectedText }),
+          }),
+        })
+      }
+      interruptedChats.delete(st.chatId)
+      await refreshChat(set, get, st.chatId)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        interruptedChats.delete(st.chatId)
+        await refreshChat(set, get, st.chatId)
+      } else {
+        toast.error(`Could not save the interrupted reply: ${String((e as Error).message ?? e)}`, {
+          duration: Infinity, action: { label: 'Retry', onClick: () => { void save() } },
+        })
+      }
+    }
+  }
+  await save()
+}
+
 async function refreshChat(set: SetFn, get: GetFn, chatId: ID) {
+  if (interruptedChats.has(chatId)) return
   const seqAtStart = mutateSeq
   try {
     const r = await j<{ meta: EngineChatMeta; messages: EngineMessage[] }>(`/chats/${encodeURIComponent(chatId)}`)
-    if (mutateSeq !== seqAtStart) return // an optimistic mutation is ahead of this snapshot
+    if (mutateSeq !== seqAtStart || interruptedChats.has(chatId)) return // an optimistic mutation is ahead of this snapshot
     set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? engineChatToUI(r.meta, r.messages ?? []) : c)) }))
   } catch { /* chat may be gone */ }
   void refreshLists(set, get)
@@ -1908,7 +1938,7 @@ async function runGeneration(
   body: Record<string, unknown>,
   opts?: { userText?: string; attachments?: Message['attachments']; regenerateInto?: ID },
 ): Promise<boolean> {
-  if (get().streaming?.chatId === chatId) return false
+  if (get().streaming?.chatId === chatId || interruptedChats.has(chatId)) return false
   const chat = get().chats.find((c) => c.id === chatId)
   if (!chat) return false
 
@@ -1921,8 +1951,11 @@ async function runGeneration(
   // appended at the bottom (then vanishing on commit) reads as a glitch.
   const inPlaceId = opts?.regenerateInto
   if (inPlaceId) {
-    set(() => ({ streaming: { chatId, messageId: inPlaceId, full: '', shown: 0, startedAt: Date.now() } }))
-    return runStream(set, get, chatId, op, body, ctrl, chat, bookIds)
+    const target = chat.messages.find((m) => m.id === inPlaceId)
+    const content = target?.swipes[target.activeSwipe]?.content ?? ''
+    const prefix = op === 'continue' ? content + (content && !/\s$/.test(content) ? ' ' : '') : ''
+    set(() => ({ streaming: { chatId, messageId: inPlaceId, operation: op, prefix, full: prefix, shown: prefix.length, startedAt: Date.now() } }))
+    return runStream(set, get, chatId, op, { ...body, expectedSwipes: target?.swipes.length, expectedText: content }, ctrl, chat, bookIds)
   }
   const pendingId = `pending-${uid('reply')}`
   const stageUser = opts?.userText?.trim()
@@ -1944,13 +1977,13 @@ async function runGeneration(
   }
   bumpMutate() // staged bubbles must survive any in-flight hydrate
   set((s) => ({
-    streaming: { chatId, messageId: pendingId, full: '', shown: 0, startedAt: Date.now() },
+    streaming: { chatId, messageId: pendingId, operation: op, full: '', shown: 0, startedAt: Date.now() },
     chats: s.chats.map((c) => (c.id === chatId ? {
       ...c,
       messages: [...c.messages, ...(stageUser ? [stageUser] : []), pendingMsg],
     } : c)),
   }))
-  return runStream(set, get, chatId, op, body, ctrl, chat, bookIds)
+  return runStream(set, get, chatId, op, { ...body, replyMessageId: pendingId.replace(/^pending-/, ''), ...(stageUser ? { userMessageId: stageUser.id.replace(/^pending-/, '') } : {}) }, ctrl, chat, bookIds)
 }
 
 /** Fetch + commit half of a generation; the staging half decided where the
@@ -1977,17 +2010,22 @@ async function runStream(
     if (res && res.__llmPending === true) {
       await new Promise((r) => setTimeout(r, 600))
     }
+    if (ctrl.signal.aborted || interruptedChats.has(chatId)) return false
     committedRes = res
     await refreshChat(set, get, chatId)
     committed = true
   } catch (e) {
-    if ((e as Error).name === 'AbortError') return false // stopped by the user
-    toast.error(String((e as Error).message ?? e))
-    await refreshChat(set, get, chatId)
-  } finally {
-    activeGens.delete(chatId)
+    if (ctrl.signal.aborted) return false
+    toast.error(String((e as Error).message ?? e), { duration: 10000 })
+    flushStreamDeltas?.()
     const st = get().streaming
-    if (st?.chatId === chatId) {
+    if (st?.chatId === chatId) await preserveInterruptedStream(set, get, st)
+    else await refreshChat(set, get, chatId)
+  } finally {
+    const ownsGeneration = activeGens.get(chatId) === ctrl
+    if (ownsGeneration) activeGens.delete(chatId)
+    const st = get().streaming
+    if (ownsGeneration && st?.chatId === chatId && !ctrl.signal.aborted) {
       // a staged reply commits under a server id: carry the row's reasoning
       // open/closed state across so a box the user closed mid-stream stays
       // closed, and drop the now-dead staging key

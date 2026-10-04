@@ -313,6 +313,48 @@ describe("rp studio engine: chats + swipes", () => {
     expect(lines).toHaveLength(3); // greeting + user + reply
   }, 30_000);
 
+  it("prompt caching: opt-out and pinned placements ride the reply, defaults send nothing", async () => {
+    const m = mockHost();
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (fs.readdirSync(path.join(root, "chats")).find((f) => f.endsWith(".meta.json")) as string).replace(/\.meta\.json$/, "");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "default", model: "mock/model" } }, m);
+    // caching is the kernel default; nothing is sent unless the preset asks
+    expect((m.requests[0]!.req as { cache?: unknown }).cache).toBeUndefined();
+
+    const presetPath = path.join(root, "presets", "default.json");
+    const preset = JSON.parse(fs.readFileSync(presetPath, "utf8")) as Record<string, unknown>;
+    const writeCache = (cache: unknown) => fs.writeFileSync(presetPath, JSON.stringify({ ...preset, studio: { samplers: { cache } } }));
+
+    writeCache({ enabled: true, pinned: true, depth: 1, ttl: "long" });
+    const m2 = mockHost();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "pinned", model: "mock/model" } }, m2);
+    expect((m2.requests[0]!.req as { cache?: unknown }).cache).toEqual({ depth: 1, retention: "long" });
+
+    // the window is its own choice: 1h works without pinning a depth
+    writeCache({ enabled: true, pinned: false, depth: 0, ttl: "long" });
+    const m3 = mockHost();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "long window", model: "mock/model" } }, m3);
+    expect((m3.requests[0]!.req as { cache?: unknown }).cache).toEqual({ retention: "long" });
+
+    // opting out sends the off switch
+    writeCache({ enabled: false, pinned: false, depth: 0, ttl: "short" });
+    const m4 = mockHost();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "no caching", model: "mock/model" } }, m4);
+    expect((m4.requests[0]!.req as { cache?: unknown }).cache).toEqual({ retention: "none" });
+
+    // blocks from builds before the pinned flag: `enabled` was the pin and
+    // caching was never off, so the old false sends nothing and the old true
+    // still pins
+    writeCache({ enabled: true, depth: 2, ttl: "long" });
+    const m5 = mockHost();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "legacy pin", model: "mock/model" } }, m5);
+    expect((m5.requests[0]!.req as { cache?: unknown }).cache).toEqual({ depth: 2, retention: "long" });
+    writeCache({ enabled: false, depth: 0, ttl: "short" });
+    const m6 = mockHost();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "legacy off", model: "mock/model" } }, m6);
+    expect((m6.requests[0]!.req as { cache?: unknown }).cache).toBeUndefined();
+  }, 30_000);
+
   it("a failed generation keeps the user's message instead of deleting it", async () => {
     const m = mockHost("error");
     await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
@@ -338,6 +380,66 @@ describe("rp studio engine: chats + swipes", () => {
     expect(r.status).toBe(503);
     expect(r.json.error as string).toContain("content_filter");
   }, 30_000);
+
+  it("interrupted sends save partial output once, including after a provider error", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (created.json.meta as { id: string }).id;
+    const failing = mockHost("error");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello", userMessageId: "pending-user" } }, failing);
+    const body = { text: "A partial reply", userText: "hello", userMessageId: "pending-user", replyMessageId: "pending-reply" };
+    for (let i = 0; i < 2; i++) {
+      const saved = await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body }, m);
+      expect(saved.status).toBe(200);
+    }
+    const saved = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    const messages = saved.json.messages as { id: string; text: string }[];
+    expect(messages.filter((msg) => msg.id === "pending-user")).toHaveLength(1);
+    expect(messages.filter((msg) => msg.id === "pending-reply")).toEqual([expect.objectContaining({ text: "A partial reply" })]);
+  });
+
+  it("a completed reply wins a late interrupted save without cloning it", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (created.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello", userMessageId: "pending-user", replyMessageId: "pending-reply" } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body: { text: "partial", userText: "hello", userMessageId: "pending-user", replyMessageId: "pending-reply" } }, m);
+    const saved = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    const messages = saved.json.messages as { id: string; text: string }[];
+    expect(messages.filter((msg) => msg.id === "pending-reply")).toEqual([expect.objectContaining({ text: "MOCK-REPLY" })]);
+    expect(messages.filter((msg) => msg.text === "hello")).toHaveLength(1);
+  });
+
+  it("stopping before output keeps only the user turn", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (created.json.meta as { id: string }).id;
+    const saved = await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body: { text: "", userText: "hello", userMessageId: "pending-user" } }, m);
+    expect(saved.status).toBe(200);
+    const chat = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    expect((chat.json.messages as unknown[])).toHaveLength(2);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello", userMessageId: "pending-user" } }, mockHost("error"));
+    const late = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    expect((late.json.messages as unknown[])).toHaveLength(2);
+
+  });
+
+  it("interrupted Continue updates the active swipe and refuses a stale save", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (created.json.meta as { id: string }).id;
+    const sent = await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello" } }, m);
+    const reply = sent.json.reply as { id: string; text: string };
+    const body = { operation: "continue", targetMessageId: reply.id, expectedSwipes: 1, expectedText: reply.text, text: reply.text + " unfinished" };
+    const saved = await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body }, m);
+    expect(saved.status).toBe(200);
+    const stale = await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body }, m);
+    expect(stale.status).toBe(409);
+    const chat = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    const last = (chat.json.messages as { text: string; swipes: string[] }[]).at(-1)!;
+    expect(last.text).toBe(body.text);
+    expect(last.swipes).toEqual([body.text]);
+  });
 
   it("reply requests are tool-accepting (wantsTools marker); trace persists", async () => {
     const m1 = mockHost();
@@ -662,7 +764,7 @@ describe("rp studio engine: export + regex + prompt preview", () => {
     expect((r.json.messages as { content: string }[]).at(-1)!.content).toBe("espresso");
   }, 30_000);
 
-  it("a chat's field-variant selection decides what generation and peek send", async () => {
+  it("the card's variant selection decides what generation and peek send", async () => {
     fs.writeFileSync(
       path.join(root, "characters", "aria", "card.json"),
       JSON.stringify({
@@ -683,16 +785,31 @@ describe("rp studio engine: export + regex + prompt preview", () => {
     const joined = (r: { json: Record<string, unknown> }) =>
       (r.json.messages as { content: string }[]).map((x) => x.content).join("\n");
 
+    // no selection: the card's base text rides
     const before = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
     expect(joined(before)).toContain("A quiet barista.");
     expect(joined(before)).toContain("clipped tone");
 
-    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { fieldVariantSelection: { desc: "var_night", personality: "var_warm" } } }, m);
+    // the editor's chip row stores the choice on the card; every chat reads it
+    const cardPath = path.join(root, "characters", "aria", "card.json");
+    const card = JSON.parse(fs.readFileSync(cardPath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(cardPath, JSON.stringify({
+      ...card,
+      studio: {
+        ...(card.studio as Record<string, unknown>),
+        variantSelection: { desc: "var_night", personality: "var_warm" },
+      },
+    }));
     const after = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
     expect(joined(after)).toContain("A night-shift barista who hums.");
     expect(joined(after)).toContain("warm and chatty");
     expect(joined(after)).not.toContain("A quiet barista.");
     expect(joined(after)).not.toContain("clipped tone");
+
+    // generation resolves the card the same way peek does
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "coffee", model: "mock/model" } }, m);
+    const sent = m.requests.at(-1)!.req as { messages: { content: string }[] };
+    expect(sent.messages.map((x) => x.content).join("\n")).toContain("A night-shift barista who hums.");
   }, 30_000);
 
   it("peek at a message assembles the prompt AS OF that message, not the chat tail", async () => {

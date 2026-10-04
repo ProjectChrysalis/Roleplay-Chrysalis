@@ -37,7 +37,6 @@ import { MemoryPanel } from './memory-panel'
 import { HelpDialog } from './help-dialog'
 import { ExpressionPanel } from './expression-panel'
 import { ConvertToGroupDialog } from './convert-to-group-dialog'
-import { FieldVariantPicker } from './field-variant-picker'
 
 /** The mobile chat's section bar. The desktop header's quick switch has no
  *  place here: presets, personas and connections are each one tap away, and
@@ -1003,10 +1002,6 @@ export function ChatView() {
                   aria-label="Include author's note in World Info scan"
                 />
               </label>
-              <div className="flex flex-col gap-2 border-t border-border pt-3">
-                <p className="text-sm font-medium">Card variants for this chat</p>
-                <FieldVariantPicker chat={chat} character={character} />
-              </div>
               <Field>
                 <FieldLabel htmlFor="an-char">Character-private note: {character.name}</FieldLabel>
                 <Textarea

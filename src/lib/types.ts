@@ -58,6 +58,9 @@ export interface Character {
   descVariants: AltVariant[]
   personalityVariants: AltVariant[]
   scenarioVariants: AltVariant[]
+  /** The variant each field sends, chosen in the editor's chip row. Absent
+   *  means the base text (Original). */
+  variantSelection: { desc?: ID; personality?: ID; scenario?: ID }
   versions: CharacterVersion[]
   voiceProvider: string
   voiceId: string
@@ -181,7 +184,6 @@ export interface Chat {
   folderId: ID | null
   chatTags: string[]
   backgroundId: ID | 'none' | null
-  fieldVariantSelection: { desc?: ID; personality?: ID; scenario?: ID }
   /** From the chat list meta: what a chat shows BEFORE its transcript loads.
    *  `messages` is empty until the chat is opened, so lists read these two
    *  rather than the transcript. */
@@ -279,6 +281,13 @@ export interface SamplerSettings {
   /** Sent as a trailing assistant turn — the reply starts with this text.
    *  An assistant-role prompt section placed last in the chain does the same. */
   assistantPrefill: string
+  /**
+   * Anthropic prompt caching. It is on by default; `enabled: false` opts
+   * out for this preset. `pinned` moves the history breakpoint a set number
+   * of role runs back (plus one two runs deeper) so the stable prefix stays
+   * cached while depth injections churn the tail. `ttl` picks the window.
+   */
+  cache: { enabled: boolean; pinned: boolean; depth: number; ttl: 'short' | 'long' }
 }
 
 export interface Preset {

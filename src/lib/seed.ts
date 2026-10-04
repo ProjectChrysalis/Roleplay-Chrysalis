@@ -7,6 +7,20 @@ import type { ThemePreset, SamplerSettings, AppSettings, Preset, PromptSection, 
 /** Every generation type a preset section can be limited to. */
 export const GENERATION_TYPES = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet'] as const
 
+/** Coerce a stored cache block to the current shape. Builds before the
+ *  pinned flag stored the pin toggle as `enabled` and always cached, so the
+ *  legacy false means "not pinned", never "caching off". */
+export function normalizeCache(cache: unknown): SamplerSettings['cache'] {
+  const c = (cache ?? {}) as Partial<SamplerSettings['cache']>
+  const depth = typeof c.depth === 'number' && Number.isFinite(c.depth) ? Math.max(0, Math.floor(c.depth)) : 0
+  const ttl = c.ttl === 'long' ? ('long' as const) : ('short' as const)
+  if (c.pinned === undefined) {
+    const legacy = c as { enabled?: unknown }
+    return { enabled: true, pinned: legacy.enabled === true, depth, ttl }
+  }
+  return { enabled: c.enabled !== false, pinned: c.pinned === true, depth, ttl }
+}
+
 const now = Date.now()
 
 // ── Samplers default ──
@@ -19,6 +33,7 @@ export function defaultSamplers(): SamplerSettings {
     stopStrings: ['\\n{{user}}:', '</s>'], logitBias: [],
     reasoning: { enabled: true, effort: 'med', budget: 2048, autoParse: true, display: 'collapsed', thinkTagOpen: '<think>', thinkTagClose: '</think>' },
     streaming: true, streamingSpeed: 30, assistantPrefill: '',
+    cache: { enabled: true, pinned: false, depth: 0, ttl: 'short' },
   }
 }
 
