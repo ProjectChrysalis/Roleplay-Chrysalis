@@ -12,7 +12,7 @@ riding alongside public formats: copy them through untouched.
 | `settings.json` | `{ model, personaId, ui }` — `ui` is the WHOLE AppSettings object: theme preset, chat font + scale, hotkeys, display/chat/streaming behavior, TTS, translation, `summary` (mode/interval/word budget, the ordered summary prompt list, injection position/template), memory… edit any key and the UI applies it live. |
 | `library.json` | `{ qrSets, themes, backgrounds, tags, folders, connectionProfiles }` — every local collection in ONE file: quick-reply sets (incl. auto-execute hooks), theme palettes, chat backgrounds, tags, folders, connection profiles (named connection+model pairs). |
 | `characters/<id>/card.json` | Full character cards: portable card fields (name, description, personality, scenario, first_mes, alternate_greetings, example_dialogue, tags…) + `studio` bag (avatar, favorites, colors, stats, sprites, gallery, versions, variants). |
-| `chats/<id>.jsonl` + `.meta.json` | One message per line (swipes, per-message `translation`, hidden/bookmarked flags); meta holds title, folderId, persona/preset/model, author's note, `summary` + `memoryCutoffMessageId` (what the summarizer covers / what the prompt drops), `chatVars` (chat-local {{setvar}}/{{getvar}} variables), `fieldVariantSelection` (which card alternate this chat sends), branch parentage (parentChatId/parentMessageId). |
+| `chats/<id>.jsonl` + `.meta.json` | One message per line (swipes, per-message `translation`, hidden/bookmarked flags); meta holds title, folderId, persona/preset/model, author's note, `summary` + `memoryCutoffMessageId` (what the summarizer covers / what the prompt drops), `chatVars` (chat-local {{setvar}}/{{getvar}} variables), branch parentage (parentChatId/parentMessageId). |
 | `groups/<id>.json` | Group chats: `{ memberIds, mode, mutedIds }`. |
 | `presets/<id>.json` | Portable prompt-list shape (`prompts[]` + `prompt_order[]`) + `studio` bag (prompt library, variables, sampler objects, utility prompts). `default` is the read-only stock preset. |
 | `lorebooks/<id>.json` | World-info books: entries (keys, positions, probability…), scan settings, vectorization config. Entry `status` is the source of truth: `"normal"` (keyed), `"constant"` (always injected), `"vectorized"` (embedding match). Don't write the legacy `constant` boolean — when both exist, `status` wins. |
@@ -20,7 +20,7 @@ riding alongside public formats: copy them through untouched.
 | `personas/<id>.json` | User personas: name, description, pronouns, bindings. |
 | `databank/<id>.json` | Data-bank documents: `{ name, scope, enabled, size, chunks: [{i, text}] }`. The engine chunks uploaded text (1000 chars, 150 overlap) and injects the top term-matching chunks into the prompt when a message is sent. |
 
-## Characters: alternates, versions, per-chat choice
+## Characters: alternates, versions, character-wide selection
 
 - `card.studio.descVariants` / `personalityVariants` / `scenarioVariants`:
   `[{ id: "var_…", label, content }]` — alternates for the three always-resident
@@ -30,11 +30,10 @@ riding alongside public formats: copy them through untouched.
 - `card.studio.versions`: snapshots `[{ id, label, savedAt, snapshot }]` where
   `snapshot` carries `description`, `personality`, `scenario`, `firstMessage`,
   `exampleDialogue`, `systemPromptOverride`, `postHistoryInstructions`.
-- Which alternate a single chat rides is the chat's own choice, not the card's:
-  `chats/<id>.meta.json` → `fieldVariantSelection: { desc?, personality?,
-  scenario? }`, values are `studio.<field>Variants[].id`. An absent key means
-  the card's base text. Generation and prompt peek resolve through it, so
-  setting the meta switches that conversation immediately.
+- The card selects alternates with `studio.variantSelection: { desc?,
+  personality?, scenario? }`, values are `studio.<field>Variants[].id`.
+  An absent key means the card's base text. The character editor changes this
+  selection. Generation and prompt peek resolve through it in every chat.
 
 Rules of thumb:
 - Content/settings changes → edit here. CODE changes → `../src/` (triggers a

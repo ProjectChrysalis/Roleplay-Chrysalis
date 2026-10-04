@@ -8,6 +8,8 @@ so it works with any model provider Chrysalis connects to, and like every
 Chrysalis app it is plain files: ask the Chrysalis agent for a feature and it
 builds it into your copy while you watch.
 
+Roleplay 4.19.0 requires Chrysalis 1.0.3 or newer.
+
 ## Features
 
 **Chats**

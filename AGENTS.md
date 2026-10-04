@@ -252,7 +252,7 @@ data/
 └─ personas/<id>.json   user personas
 ```
 
-Characters: alternates, versions, per-chat choice — exact shapes:
+Characters: alternates, versions, character-wide selection. Exact shapes:
 - `card.studio.descVariants` / `personalityVariants` / `scenarioVariants`:
   `[{ id: "var_…", label, content }]`. The card's base `description` /
   `personality` / `scenario` stays the default; append to an array to add an
