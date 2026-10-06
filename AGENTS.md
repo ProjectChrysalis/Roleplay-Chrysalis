@@ -68,6 +68,9 @@ matches at a time. `chatLorebookIds`
 stores explicit chat bindings separately from the inherited `lorebookIds` scope.
 Both prompt assembly and semantic preparation include them; backups remap the
 explicit bindings through `_chatLorebookNames`. Forks inherit the selection.
+Stored avatar URLs must pass through `lib/avatar-media.ts` before the UI kit
+preloads them. Detached image preloaders cannot carry the frame’s session; the
+resolver shares authenticated fetches and gives the component a blob URL.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
 to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
 

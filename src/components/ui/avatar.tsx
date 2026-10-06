@@ -3,6 +3,7 @@ import * as React from "react"
 import { Avatar as AvatarPrimitive } from "@base-ui/react/avatar"
 
 import { cn } from "@/lib/utils"
+import { resolveAvatarMedia } from "@/lib/avatar-media"
 
 function Avatar({
   className,
@@ -26,9 +27,20 @@ function Avatar({
   )
 }
 
-function AvatarImage({ className, ...props }: AvatarPrimitive.Image.Props) {
+function AvatarImage({ className, src, ...props }: AvatarPrimitive.Image.Props) {
+  const [resolved, setResolved] = React.useState<{ source: string; url: string } | null>(null)
+  const stored = typeof src === 'string' && src.startsWith('/v1/')
+  React.useEffect(() => {
+    if (!stored || !src) return
+    let active = true
+    resolveAvatarMedia(src).then((url) => {
+      if (active) setResolved({ source: src, url })
+    }).catch(() => { if (active) setResolved(null) })
+    return () => { active = false }
+  }, [src, stored])
   return (
     <AvatarPrimitive.Image
+      src={stored ? (resolved?.source === src ? resolved.url : undefined) : src}
       data-slot="avatar-image"
       className={cn(
         "size-full rounded-[inherit] object-cover",
