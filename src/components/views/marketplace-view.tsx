@@ -21,6 +21,7 @@ type MarketplaceItem = {
   id: string
   name: string
   creator: string
+  creatorId?: string | null
   tagline: string
   description: string
   topics: string[]
@@ -43,19 +44,23 @@ type MarketplaceDetail = {
   greeting: string
   alternateGreetings: string[]
   personality: string
+  traits?: string
   scenario: string
   exampleDialogs: string
   creatorNotes: string
   systemPrompt: string
   postHistoryInstructions: string
   lorebookEntries: number
+  importable?: boolean
+  importReason?: string | null
+  avatar?: string | null
 }
 
 /** Orderings the catalog accepts. Download order is also its default, and a
  *  search term narrows the pool before any ordering applies, so there is no
  *  separate relevance mode. "Trending" is deliberately absent: it is not an
  *  ordering but a different, much smaller pool, so it gets its own switch. */
-const SORTS = ['downloads', 'rating', 'newest', 'updated', 'tokens', 'name', 'random', 'score'] as const
+const SORTS = ['downloads', 'rating', 'newest', 'updated', 'tokens', 'name', 'random', 'score', 'chats'] as const
 type SortKey = (typeof SORTS)[number]
 /** Sources supported by the marketplace plugin. */
 const SOURCES = [{ value: 'chub', label: 'Chub' }, { value: 'datacat', label: 'Datacat' }] as const
@@ -153,7 +158,7 @@ function loadBrowse(): Browse {
       source,
       query: str(p.query),
       applied: str(p.applied),
-      sort: source === 'datacat' ? (p.sort === 'score' ? 'score' : 'newest') : SORTS.includes(p.sort as SortKey) && p.sort !== 'score' ? p.sort as SortKey : NO_BROWSE.sort,
+      sort: source === 'datacat' ? (p.sort === 'chats' && p.creator ? 'chats' : p.sort === 'score' ? 'score' : 'newest') : SORTS.includes(p.sort as SortKey) && p.sort !== 'score' ? p.sort as SortKey : NO_BROWSE.sort,
       trending: source === 'chub' && p.trending === true,
       tags: Array.isArray(p.tags) ? p.tags.filter((t): t is string => typeof t === 'string').slice(0, MAX_TAGS) : [],
       tagsMode: p.tagsMode === 'any' ? 'any' : 'all',
@@ -253,18 +258,29 @@ export function MarketplaceView() {
   const [tagVocab, setTagVocab] = useState<{ tag: string; n: number; id?: number }[]>([])
   const [tagsError, setTagsError] = useState<string | null>(null)
   const [retry, setRetry] = useState(0)
+  useEffect(() => { setTagVocab([]) }, [source])
   useEffect(() => {
     let live = true
-    setTagVocab([])
     setTagsError(null)
     if (source === 'datacat') {
-      j<{ tags: { tag: string; n: number; id: number }[] }>('/marketplace/tags', { method: 'POST', body: JSON.stringify({ source }) })
-        .then((r) => { if (live) setTagVocab(r.tags) })
-        .catch((e: Error) => { if (live) setTagsError(e.message) })
+      const timeout = setTimeout(() => {
+        j<{ tags: { tag: string; n: number; id: number }[] }>('/marketplace/tags', {
+          method: 'POST', body: JSON.stringify({ source, search: tagQuery, selected: tags }),
+        })
+          .then((r) => {
+            if (!live) return
+            const missing = tags.filter(tag => !r.tags.some(t => t.tag.toLowerCase() === tag.toLowerCase()))
+            if (missing.length) setTagsError(`Tag unavailable: ${missing.join(', ')}`)
+            setTagVocab(r.tags)
+          })
+          .catch((e: Error) => { if (live) setTagsError(e.message) })
+      }, 300)
+      return () => { live = false; clearTimeout(timeout) }
     }
     return () => { live = false }
-  }, [source, retry])
+  }, [source, retry, tagQuery, tags])
   const [creator, setCreator] = useState<string | null>(restored.creator)
+  useEffect(() => { if (source === 'datacat' && !creator && sort === 'chats') setSort('newest') }, [source, creator, sort])
   const [filters, setFilters] = useState<Filters>(() => loadFilters())
   const [filtersOpen, setFiltersOpen] = useState(false)
   // committed filters (Apply) stick around for the next visit
@@ -328,17 +344,22 @@ export function MarketplaceView() {
     if (el && restored.scrollTop > 0) el.scrollTop = restored.scrollTop
   }, [loading, items, restored.scrollTop])
 
-  const tagIds = tags.map((t) => tagVocab.find((v) => v.tag === t)?.id).filter((id) => id !== undefined).join(',')
+  const tagIds = tags.map((t) => tagVocab.find((v) => v.tag.toLowerCase() === t.toLowerCase())?.id).filter((id) => id !== undefined).join(',')
 
   // Catalog requests run through the plugin's allowlisted network access.
   useEffect(() => {
     const id = ++reqId.current
+    if (source === 'datacat' && tags.some(tag => !tagVocab.some(v => v.tag.toLowerCase() === tag.toLowerCase()))) {
+      setLoading(!tagsError)
+      setError(tagsError)
+      return
+    }
     setLoading(true)
     setError(null)
     j<SearchResponse>('/marketplace/search', {
       method: 'POST',
       body: JSON.stringify(source === 'datacat'
-        ? { source, search: applied, sort: sort === 'score' ? 'score' : 'newest', page, first: PAGE_SIZE, tagIds: tagIds ? tagIds.split(',').map(Number) : [], nsfw: filters.maturity !== 'safe', nsfwOnly: filters.maturity === 'only', minTokens: filters.minTokens }
+        ? { source, search: applied, sort: sort === 'score' ? 'score' : 'newest', page, first: PAGE_SIZE, tagIds: tagIds ? tagIds.split(',').map(Number) : [], nsfw: filters.maturity !== 'safe', nsfwOnly: filters.maturity === 'only', minTokens: filters.minTokens, ...(creator ? { creator } : {}) }
         : { source, search: applied, sort: sort === 'score' ? 'downloads' : sort, trending, page, first: PAGE_SIZE, tags, tagsMode, ...filterBody(filters), ...(creator ? { creator } : {}) }),
     })
       .then((r) => {
@@ -362,7 +383,7 @@ export function MarketplaceView() {
       })
       .finally(() => { if (id === reqId.current) setLoading(false) })
     return () => { reqId.current++ }
-  }, [source, applied, sort, trending, page, tags, tagsMode, creator, filters, retry, source === 'datacat' ? tagIds : null])
+  }, [source, applied, sort, trending, page, tags, tagsMode, creator, filters, retry, source === 'datacat' ? tagIds : null, tagsError])
 
   // full card definition loads when a listing is opened for preview
   useEffect(() => {
@@ -388,19 +409,20 @@ export function MarketplaceView() {
     e?.preventDefault()
     setPage(1)
     setApplied(query.trim())
+    if (source === 'datacat') setCreator(null)
   }
 
   /** Toggle a tag filter — from the picker, a topic chip, or a typed custom
    *  tag. Capped, back to page 1. */
   const toggleTag = (t: string) => {
+    if (source === 'datacat') setCreator(null)
     const clean = t.trim().slice(0, 60)
     if (!clean || (source === 'datacat' && !tagVocab.some((v) => v.tag === clean))) return
     setTags((ts) => (ts.includes(clean) ? ts.filter((x) => x !== clean) : ts.length >= MAX_TAGS ? ts : [...ts, clean]))
     setPage(1)
   }
 
-  /** Download a card through the proven chub URL-import path — the engine
-   *  pulls the card PNG + avatar and writes a local character. */
+  /** Import through the source route, preserving full card fields. */
   const download = async (item: MarketplaceItem) => {
     if (downloading[item.id] || downloaded.has(item.id)) return
     setDownloading((d) => ({ ...d, [item.id]: true }))
@@ -408,15 +430,17 @@ export function MarketplaceView() {
       // full-res card image, downscaled to a sane avatar size; fall back to
       // the listing thumbnail if the full-res fetch fails
       let avatar: string | undefined
-      if (item.maxRes) {
-        try { avatar = await downscaleRemoteImage(item.maxRes) } catch { /* keep the thumbnail */ }
+      const artwork = source === 'datacat' ? detailData?.avatar || item.maxRes || item.avatar : item.maxRes
+      if (artwork) {
+        try { avatar = await downscaleRemoteImage(artwork) } catch { /* keep the thumbnail */ }
       }
-      const r = await j<{ characters: string[]; name?: string }>('/import/url', {
+      const r = await j<{ characters: string[]; name?: string; warning?: string }>(source === 'datacat' ? '/marketplace/import' : '/import/url', {
         method: 'POST',
-        body: JSON.stringify({ url: `https://chub.ai/characters/${item.id}`, ...(avatar ? { avatar } : {}) }),
+        body: JSON.stringify(source === 'datacat' ? { source, id: item.id, ...(avatar ? { avatar } : {}) } : { url: `https://chub.ai/characters/${item.id}`, ...(avatar ? { avatar } : {}) }),
       })
       setDownloaded((s) => new Set(s).add(item.id))
       toast.success(`${r.name ?? item.name} added to Characters`)
+      if (r.warning) toast.warning(r.warning)
       await hydrate()
     } catch (e) {
       toast.error(`Couldn't download ${item.name}`, { description: String((e as Error).message ?? e) })
@@ -455,12 +479,13 @@ export function MarketplaceView() {
               <Fire className="size-3.5" aria-hidden="true" />
               Trending
             </Button>}
-            <Select value={sort} onValueChange={(v) => { setSort(v as SortKey); setPage(1) }} disabled={source === 'chub' && trending}>
+            <Select value={sort} onValueChange={(v) => { setSort(v as SortKey); setPage(1); if (source === 'datacat') setCreator(null) }} disabled={(source === 'chub' && trending) || (source === 'datacat' && !!creator)}>
               <SelectTrigger className="h-8 w-32 text-xs" aria-label="Sort marketplace results">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {source === 'datacat' ? <>
+                  {creator && <SelectItem value="chats">Most chats</SelectItem>}
                   <SelectItem value="newest">Recently added</SelectItem>
                   <SelectItem value="score">Recommended</SelectItem>
                 </> : <>
@@ -483,7 +508,7 @@ export function MarketplaceView() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.form?.requestSubmit() }}
-              placeholder="Search characters…"
+              placeholder={source === 'datacat' ? 'Search characters and creators…' : 'Search characters…'}
               className="h-9 pl-9 pr-9 text-sm"
               aria-label="Search marketplace"
             />
@@ -514,7 +539,7 @@ export function MarketplaceView() {
             filters={filters}
             open={filtersOpen}
             onOpen={setFiltersOpen}
-            onApply={(f) => { setFilters(f); setPage(1); setFiltersOpen(false) }}
+            onApply={(f) => { if (source === 'datacat') setCreator(null); setFilters(f); setPage(1); setFiltersOpen(false) }}
           />
         </div>
         {(tags.length > 0 || creator) && (
@@ -527,7 +552,7 @@ export function MarketplaceView() {
                 aria-label={`Stop browsing ${creator}`}
               >
                 <User className="size-3" aria-hidden="true" />
-                {creator}
+                {source === 'datacat' ? items.find(item => item.creatorId === creator)?.creator || 'Creator' : creator}
                 <X className="size-3" aria-hidden="true" />
               </button>
             )}
@@ -677,7 +702,7 @@ export function MarketplaceView() {
                     <DialogDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                       <button
                         type="button"
-                        onClick={() => { if (detail.creator) { if (source === 'datacat') { setQuery(detail.creator); setApplied(detail.creator) } else setCreator(detail.creator); setPage(1); setDetail(null) } }}
+                        onClick={() => { if (detail.creator) { if (source === 'datacat' && detail.creatorId) { setCreator(detail.creatorId); setQuery(''); setApplied(''); setTags([]); setSort('chats'); setFilters({ ...NO_FILTERS, maturity: 'include' }) } else if (source === 'datacat') { setCreator(null); setQuery(detail.creator); setApplied(detail.creator) } else setCreator(detail.creator); setPage(1); setDetail(null) } }}
                         title={`Browse everything by ${detail.creator}`}
                         className="inline-flex min-w-0 items-center gap-1 [overflow-wrap:anywhere] underline-offset-2 hover:underline"
                       >
@@ -753,6 +778,7 @@ export function MarketplaceView() {
                       </section>
                     )}
                     <CardSection title="Description" text={detailData.personality} />
+                    <CardSection title="Personality" text={detailData.traits || ''} />
                     <CardSection title="Scenario" text={detailData.scenario} />
                     <CardSection title="Example dialogue" text={detailData.exampleDialogs} />
                     <CardSection title="Creator notes" text={detailData.creatorNotes} />
@@ -768,7 +794,7 @@ export function MarketplaceView() {
                 )}
               </div>
 
-              {source === 'datacat' && <p className="text-xs text-muted-foreground">Download on Datacat, complete its verification, then import the card file in Characters.</p>}
+              {source === 'datacat' && detailData?.importReason && <p className="text-xs text-muted-foreground">{detailData.importReason}</p>}
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <a
                   href={source === 'datacat' ? `https://datacat.run/characters/${detail.id}` : `https://chub.ai/characters/${detail.id}`}
@@ -778,17 +804,15 @@ export function MarketplaceView() {
                 >
                   <ArrowSquareOut className="size-3.5" aria-hidden="true" />Open on {source === 'datacat' ? 'Datacat' : 'Chub'}
                 </a>
-                {source === 'datacat' ? (
-                  <Button size="sm" variant="outline" onClick={() => { setDetail(null); setView('characters') }}>Import a card file</Button>
-                ) : downloaded.has(detail.id) ? (
+                {downloaded.has(detail.id) ? (
                   <Button size="sm" onClick={() => { setDetail(null); setView('characters') }}>
                     <Check className="size-4" aria-hidden="true" />Open Characters
                   </Button>
                 ) : (
-                  <Button size="sm" disabled={downloading[detail.id]} onClick={() => void download(detail)}>
+                  <Button size="sm" disabled={downloading[detail.id] || (source === 'datacat' && (!detailData?.importable || detailLoading))} onClick={() => void download(detail)}>
                     {downloading[detail.id]
                       ? <><CircleNotch className="size-4 animate-spin" aria-hidden="true" />Downloading…</>
-                      : <><DownloadSimple className="size-4" aria-hidden="true" />Download</>}
+                      : <><DownloadSimple className="size-4" aria-hidden="true" />{source === 'datacat' ? 'Import' : 'Download'}</>}
                   </Button>
                 )}
               </div>

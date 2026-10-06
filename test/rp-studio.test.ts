@@ -100,7 +100,7 @@ function mockHost(
       list: (rel = ".") => fs.readdirSync(path.resolve(root, rel)).sort(),
       remove: (rel: string) => fs.rmSync(path.resolve(root, rel), { recursive: true, force: true }),
     },
-    store: { get: () => null, put: () => {}, delete: () => {}, keys: () => [] },
+    store: { get: (): unknown => null, put: () => {}, delete: () => {}, keys: () => [] },
     llm: {
       request: (key: string, req: Record<string, unknown>) => { requests.push({ key, req }); },
       results,
@@ -2954,6 +2954,64 @@ describe("marketplace Datacat discovery", () => {
     expect((await drive(stUrl, { method: "POST", path: "/marketplace/search", body: { source: "datacat" } }, m)).status).toBe(502);
     const broken = mockHost(undefined, (key) => key === "identify" ? { ok: true, json: { sessionToken: "token" } } : { ok: true, json: { success: true, characters: [] } });
     expect((await drive(stUrl, { method: "POST", path: "/marketplace/search", body: { source: "datacat" } }, broken)).status).toBe(502);
+  });
+  it("imports complete public cards, artwork, embedded lore, and provenance inside the app", async () => {
+    const definition = "A complete definition. ".repeat(2000);
+    const m = mockHost(undefined, (key, req) => {
+      expect(String(req.url)).not.toContain("/download");
+      if (key === "identify") return { ok: true, json: { sessionToken: "private-token" } };
+      if (key === "avatar") { delete m.host.net.results.datacat; return { ok: true, contentType: "image/png", base64: "aW1hZ2U=" }; }
+      return { ok: true, json: { success: true, character: { character_id: id, name: "Public Mage", creator_name: "Author", is_public: true, avatar: "https://media.datacat.run/avatar.png", chara_card_v2_json: { spec: "chara_card_v2", data: { name: "Public Mage", avatar: "none", description: definition, first_mes: "Hello", alternate_greetings: ["Hi"], system_prompt: "Stay in character", depth_prompt: { depth: 4, prompt: "Keep detail" }, extensions: { custom: true }, character_book: { name: "Mage lore", entries: [{ id: 0, keys: ["magic"], content: "Magic lore", enabled: true }] } } } } } };
+    });
+    m.host.store.get = () => ({ token: "private-token", expiresAt: Date.now() + 60000 });
+    const preview = await drive(stUrl, { method: "POST", path: "/marketplace/detail", body: { source: "datacat", id } }, m);
+    expect(preview.json.importable).toBe(true);
+    expect(String(preview.json.personality).length).toBe(24000);
+    const result = await drive(stUrl, { method: "POST", path: "/marketplace/import", body: { source: "datacat", id } }, m);
+    expect(result.status).toBe(200);
+    expect(result.__llmPending).toBeUndefined();
+    const cid = (result.json.characters as string[])[0]!;
+    const card = JSON.parse(fs.readFileSync(path.join(root, "characters", cid, "card.json"), "utf8"));
+    expect(card.description).toBe(definition);
+    expect(card.avatar).toBe("data:image/png;base64,aW1hZ2U=");
+    expect(card.system_prompt).toBe("Stay in character");
+    expect(card.alternate_greetings).toEqual(["Hi"]);
+    expect(card.depth_prompt).toEqual({ depth: 4, prompt: "Keep detail" });
+    expect(card.extensions.custom).toBe(true);
+    expect(card.extensions.datacat.id).toBe(id);
+    expect(card.creator).toBe("Author");
+    expect(card.studio.embeddedLorebookId).toBe((result.json.lorebooks as string[])[0]);
+    expect(JSON.stringify(result.json)).not.toContain("private-token");
+  });
+  it("blocks restricted or missing definitions without writing cards", async () => {
+    for (const restriction of [{ downloads_disabled: true }, { creator_chat_download_policy: "deny" }, { creator_lifecycle_status: "dormant" }, { is_public: false }, { is_recovery_placeholder: true }]) {
+      const m = mockHost(undefined, key => key === "identify" ? { ok: true, json: { sessionToken: "token" } } : { ok: true, json: { success: true, character: { ...restriction, name: "Restricted", personality: "Definition" } } });
+      const preview = await drive(stUrl, { method: "POST", path: "/marketplace/detail", body: { source: "datacat", id } }, m);
+      expect(preview.json.importable).toBe(false);
+      expect((await drive(stUrl, { method: "POST", path: "/marketplace/import", body: { source: "datacat", id } }, m)).status).toBe(403);
+    }
+    const missing = mockHost(undefined, key => key === "identify" ? { ok: true, json: { sessionToken: "token" } } : { ok: true, json: { success: true, character: { name: "Only a blurb", description: "Website notes" } } });
+    expect((await drive(stUrl, { method: "POST", path: "/marketplace/import", body: { source: "datacat", id } }, missing)).status).toBe(403);
+    expect(fs.readdirSync(path.join(root, "characters"))).toEqual(["aria"]);
+  });
+  it("reuses backend sessions, browses creator catalogs, and searches less common tags", async () => {
+    const creator = "a5cc3d86-23ac-47ef-916f-9d50c8e3ef41";
+    const m = mockHost(undefined, (key, req) => {
+      expect(key).toBe("datacat");
+      expect((req.headers as Record<string, string>)["X-Session-Token"]).toBe("saved-token");
+      if (String(req.url).includes("/tags/")) return { ok: true, json: { success: true, tags: [...Array.from({ length: 2000 }, (_, i) => ({ id: i + 1, name: "Popular " + i, count: 100 })), { id: 2001, name: "Rare fantasy", count: 1 }] } };
+      expect(String(req.url)).toContain(`/api/creators/${creator}/characters?limit=24&offset=24&sortBy=chat_count`);
+      return { ok: true, json: { success: true, total: 25, list: [{ characterId: id, creatorId: creator, name: "Mage", creatorName: "Author", chatCount: 42, tokenCounts: { totalTokens: 1200 } }] } };
+    });
+    m.host.store.get = () => ({ token: "saved-token", expiresAt: Date.now() + 60000 });
+    const result = await drive(stUrl, { method: "POST", path: "/marketplace/search", body: { source: "datacat", creator, page: 2 } }, m);
+    expect(result.json.count).toBe(25);
+    expect((result.json.results as object[])[0]).toMatchObject({ creatorId: creator, chats: 42, tokens: 1200 });
+    const tags = await drive(stUrl, { method: "POST", path: "/marketplace/tags", body: { source: "datacat", search: "rare" } }, m);
+    expect(tags.json.tags).toEqual([{ id: 2001, tag: "Rare fantasy", n: 1 }]);
+    const restored = await drive(stUrl, { method: "POST", path: "/marketplace/tags", body: { source: "datacat", selected: ["Rare fantasy"] } }, m);
+    expect((restored.json.tags as object[])[0]).toEqual({ id: 2001, tag: "Rare fantasy", n: 1 });
+    expect(JSON.stringify(tags.json)).not.toContain("saved-token");
   });
   it("records actual import time and preserves other studio fields", async () => {
     const start = Date.now();

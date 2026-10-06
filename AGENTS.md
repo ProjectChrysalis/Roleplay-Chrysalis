@@ -46,10 +46,14 @@ the bottom tab bar. Views are components/views/*, the chat experience lives in
 components/chat/*, the tabbed character editor in components/character/*.
 The Marketplace (components/views/marketplace-view.tsx) searches Chub and
 Datacat through studio-import routes (/marketplace/search, /marketplace/detail,
-/marketplace/tags). Chub downloads use /import/url. Datacat uses request-scoped
-anonymous sessions; downloads require verification on its website, then the
-user imports the downloaded card file in Characters. Its filters support
-rating tags, popular catalog tag IDs, minimum tokens, recent additions and score order.
+/marketplace/tags, /marketplace/import). Public Datacat definitions import inside
+the app with attribution, embedded lore, and artwork. Disabled/private/placeholder
+cards are blocked; the official file-download endpoint can still require website
+verification. Anonymous sessions are cached in the backend plugin store, never in
+card data. Creator catalogs use their actual IDs and chat order; entering a search
+or applying filters returns to the whole catalog. Tag searches reach beyond the
+popular subset. Rating tags, minimum tokens, recent additions and score order are
+supported by the catalog endpoint.
 Do not send Chub-specific controls to Datacat. Remote art uses /img.
 Chub needs explicit nsfw/nsfl/nsfw_only flags; trending selects a separate pool;
 tags use topics and inclusive_or for any-tag matching.
