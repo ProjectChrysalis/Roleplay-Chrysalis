@@ -61,6 +61,10 @@ Characters grid/list and sort preferences live in settings.ui.characterBrowser.
 Imported cards record studio.importedAt and initialize studio.createdAt when
 missing. Unknown historical import dates stay unknown. Recent-chat ordering
 also uses chat activity instead of relying only on the card timestamp.
+Chat lorebooks are selected in the chat menu’s lorebook panel. `chatLorebookIds`
+stores explicit chat bindings separately from the inherited `lorebookIds` scope.
+Both prompt assembly and semantic preparation include them; backups remap the
+explicit bindings through `_chatLorebookNames`. Forks inherit the selection.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
 to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
 

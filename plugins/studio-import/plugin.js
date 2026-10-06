@@ -1114,7 +1114,7 @@ export function handleRoute(req, host) {
     };
     if (saved && typeof saved === "object") {
       // ids are re-minted on import; carry the rest of the meta straight over
-      const SKIP = new Set(["id", "characterId", "groupId", "presetId", "personaId", "lorebookIds"]);
+      const SKIP = new Set(["id", "characterId", "groupId", "presetId", "personaId", "lorebookIds", "chatLorebookIds"]);
       for (const [k, v] of Object.entries(saved)) {
         if (SKIP.has(k) || k.startsWith("_")) continue;
         meta[k] = v;
@@ -1131,6 +1131,8 @@ export function handleRoute(req, host) {
       if (Array.isArray(saved._lorebookNames)) {
         meta.lorebookIds = saved._lorebookNames.map((nm) => bookIdByName.get(lower(nm))).filter(Boolean);
       }
+      meta.chatLorebookIds = Array.isArray(saved._chatLorebookNames)
+        ? saved._chatLorebookNames.map((nm) => bookIdByName.get(lower(nm))).filter(Boolean) : [];
       // branch parentage points at chat ids from the other machine; the
       // restored chats are new files, so a stale parent would render a
       // branch tree that leads nowhere

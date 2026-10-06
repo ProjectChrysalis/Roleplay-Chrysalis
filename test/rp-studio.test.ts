@@ -1394,6 +1394,28 @@ describe("rp studio engine: world info scope", () => {
     expect(req.messages.some((x) => x.role === "system" && x.content.includes("A cozy tavern."))).toBe(false);
   }, 30_000);
 
+  it("chat lore stays isolated, survives inherited scope refresh and can be removed", async () => {
+    shipTownBook();
+    const m = mockHost();
+    const create = async () => chatIdOf(await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m));
+    const first = await create();
+    const second = await create();
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${first}`, body: { chatLorebookIds: ["town"] } }, m);
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${first}`, body: { lorebookIds: [] } }, m);
+    const peek = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: first } }, m);
+    expect(JSON.stringify(peek.json.messages)).toContain("A cozy tavern.");
+    const isolated = await drive(engineUrl, { method: "POST", path: "/wi-status", body: { chatId: second } }, m);
+    expect(isolated.json.fired as unknown[]).toHaveLength(0);
+    await drive(engineUrl, { method: "POST", path: `/chats/${first}/send`, body: { text: "hello", model: "mock/model" } }, m);
+    expect(JSON.stringify(m.requests[0]!.req)).toContain("A cozy tavern.");
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${first}`, body: { lorebookIds: ["town"] } }, m);
+    const deduped = await drive(engineUrl, { method: "POST", path: "/wi-status", body: { chatId: first } }, m);
+    expect(deduped.json.fired as unknown[]).toHaveLength(1);
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${first}`, body: { lorebookIds: [], chatLorebookIds: [] } }, m);
+    const removed = await drive(engineUrl, { method: "POST", path: "/wi-status", body: { chatId: first } }, m);
+    expect(removed.json.fired as unknown[]).toHaveLength(0);
+  });
+
   it("entry status is the constant source of truth; the legacy boolean only counts when status is absent", async () => {
     shipBook("statusbook", [
       { uid: 0, title: "Status const", keys: [], content: "Status constant, no boolean.", status: "constant", enabled: true, order: 100, position: "before_char" },
@@ -2625,6 +2647,29 @@ describe("rp studio: backup zips survive the trip", () => {
     for (const [name, data] of Object.entries(files)) entries[name] = new TextDecoder().decode(data);
     return entries;
   };
+
+  it("restores chat lore bindings with new IDs and keeps them on branches", async () => {
+    fs.writeFileSync(path.join(root, "lorebooks", "local.json"), JSON.stringify({ id: "local", name: "Local lore", entries: [{ uid: 0, content: "A local secret.", keys: ["secret"], enabled: true }] }));
+    const m = mockHost();
+    const chat = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (chat.json.meta as { id: string }).id;
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { chatLorebookIds: ["local"] } }, m);
+    const branch = await drive(engineUrl, { method: "POST", path: `/chats/${id}/fork`, body: {} }, m);
+    expect((branch.json.meta as { chatLorebookIds: string[] }).chatLorebookIds).toEqual(["local"]);
+    const entries = await exportEntries(m);
+    fs.rmSync(path.join(root, "lorebooks", "local.json"));
+    const restored = mockHost();
+    (restored.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const result = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, restored);
+    expect(result.status).toBe(200);
+    for (const chatId of result.json.chats as string[]) {
+      const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", `${chatId}.meta.json`), "utf8"));
+      expect(meta.chatLorebookIds).toHaveLength(1);
+      expect(meta.chatLorebookIds[0]).not.toBe("local");
+      const book = JSON.parse(fs.readFileSync(path.join(root, "lorebooks", `${meta.chatLorebookIds[0]}.json`), "utf8"));
+      expect(book.name).toBe("Local lore");
+    }
+  });
 
   it("writes UTF-8, not latin1 with every other character punched out", async () => {
     // curly quotes, an em dash, an accent and an emoji — ordinary prose

@@ -183,6 +183,7 @@ export interface Chat {
   compactions: number
   temporary: boolean
   folderId: ID | null
+  chatLorebookIds?: ID[]
   chatTags: string[]
   backgroundId: ID | 'none' | null
   /** From the chat list meta: what a chat shows BEFORE its transcript loads.

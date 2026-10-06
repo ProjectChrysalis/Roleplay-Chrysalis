@@ -20,7 +20,7 @@ import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { estimateTokens, formatCost, knownCost } from '@/lib/tokens'
-import { fileToRawDataUrl, fetchWIStatus, type WIStatus } from '@/lib/engine'
+import { fileToRawDataUrl, fetchWIStatus, j, type WIStatus } from '@/lib/engine'
 import { useApp, useChat, useCharacter } from '@/lib/store'
 import { speakText, voiceFor } from '@/lib/tts'
 import { ChatQuickSwitch } from '@/components/chat/chat-quick-bar'
@@ -109,6 +109,8 @@ export function ChatView() {
   const streamingMessageId = useApp((s) => s.streaming?.messageId ?? null)
   const tickStream = useApp((s) => s.tickStream)
   const settings = useApp((s) => s.settings)
+  const lorebooks = useApp((s) => s.lorebooks)
+  const [savingLore, setSavingLore] = useState(false)
   const updateChat = useApp((s) => s.updateChat)
   const openChat = useApp((s) => s.openChat)
   const backgrounds = useApp((s) => s.backgrounds)
@@ -1046,9 +1048,32 @@ export function ChatView() {
       <Sheet open={loreOpen} onOpenChange={setLoreOpen}>
         <SheetContent side="right" className="w-full sm:max-w-md">
           <SheetHeader>
-            <SheetTitle>World info activity</SheetTitle>
+            <SheetTitle>Chat lorebooks</SheetTitle>
           </SheetHeader>
           <ScrollArea className="min-h-0 flex-1 px-4 pb-4">
+            <div className="mb-5 flex flex-col gap-2">
+              <p className="text-xs text-muted-foreground">Add lore for this chat. Character, persona and global lore still apply.</p>
+              {lorebooks.length === 0 && <p className="text-sm text-muted-foreground">Create or import a lorebook first.</p>}
+              {lorebooks.map((book) => (
+                <label key={book.id} className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-2.5">
+                  <span className="min-w-0 break-words text-sm">{book.name}</span>
+                  <Switch aria-label={book.name} disabled={savingLore}
+                    checked={(chat.chatLorebookIds ?? []).includes(book.id)}
+                    onCheckedChange={async (checked) => {
+                      const ids = new Set(chat.chatLorebookIds ?? [])
+                      if (checked) ids.add(book.id); else ids.delete(book.id)
+                      const patch = { chatLorebookIds: [...ids] }
+                      setSavingLore(true)
+                      try {
+                        await j(`/chats/${encodeURIComponent(chat.id)}`, { method: 'PATCH', body: JSON.stringify(patch) })
+                        updateChat(chat.id, patch)
+                      } catch (e) { toast.error(e instanceof Error ? e.message : 'Could not save chat lore') }
+                      finally { setSavingLore(false) }
+                    }} />
+                </label>
+              ))}
+            </div>
+            <h3 className="mb-3 text-sm font-medium">World info activity</h3>
             {!wiStatus ? (
               <p className="text-sm text-muted-foreground">Checking what actually fires…</p>
             ) : wiStatus.fired.length === 0 ? (

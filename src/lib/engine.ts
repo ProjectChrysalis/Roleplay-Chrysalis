@@ -83,6 +83,7 @@ export interface EngineChatMeta {
   authorNote?: string | null
   authorNoteObject?: Chat['authorNote']
   lorebookIds?: string[]
+  chatLorebookIds?: string[]
   folderId?: string | null
   chatTags?: string[]
   backgroundId?: string | 'none' | null
@@ -778,6 +779,7 @@ export function engineChatToUI(meta: EngineChatMeta, msgs: EngineMessage[]): Cha
     compactions: Array.isArray(meta.compactions) ? meta.compactions.length : 0,
     temporary: meta.temporary === true,
     folderId: meta.folderId ?? null,
+    chatLorebookIds: meta.chatLorebookIds ?? [],
     chatTags: meta.chatTags ?? [],
     backgroundId: meta.backgroundId ?? null,
     // carried so an unloaded chat still renders a preview and a count; a
@@ -799,6 +801,7 @@ export function chatPatchOf(p: Partial<Chat>): Record<string, unknown> {
   if ('summary' in p) out.summary = p.summary
   if ('temporary' in p) out.temporary = p.temporary
   if ('folderId' in p) out.folderId = p.folderId
+  if ('chatLorebookIds' in p) out.chatLorebookIds = p.chatLorebookIds
   if ('chatTags' in p) out.chatTags = p.chatTags
   if ('backgroundId' in p) out.backgroundId = p.backgroundId
   return out

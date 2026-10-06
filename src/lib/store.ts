@@ -1996,9 +1996,7 @@ async function runStream(
   let committedRes: Record<string, unknown> | null = null
   try {
     // keep the engine's chat meta in sync with the UI's lorebook bindings
-    if (bookIds.length || (chat.messages.length === 0 && op === 'send')) {
-      await j(`/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify({ lorebookIds: bookIds }), signal: ctrl.signal })
-    }
+    await j(`/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify({ lorebookIds: bookIds }), signal: ctrl.signal })
     const model = get().model
     const res = await j<Record<string, unknown>>(`/chats/${encodeURIComponent(chatId)}/${op}`, {
       method: 'POST',

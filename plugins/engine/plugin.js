@@ -444,7 +444,7 @@ function wiVectorKey(book, entry, i) { return (book.id || book.name) + "#" + (en
 function semanticEmbedWork(fsx, meta, extraBookIds) {
   const vecMap = loadWiVectors(fsx);
   const needed = [];
-  const bound = new Set([...(meta.lorebookIds || []), ...(extraBookIds || [])]);
+  const bound = new Set([...(meta.lorebookIds || []), ...(meta.chatLorebookIds || []), ...(extraBookIds || [])]);
   let books = [];
   try {
     books = fsx.list("lorebooks").filter((f) => f.endsWith(".json"))
@@ -732,7 +732,7 @@ function activateWorldInfo(fsx, meta, dialogue, extraBookIds, budgetChars, opts)
   // to the chat, embedded in / linked to the character, or global (the app
   // resolves all three into meta.lorebookIds before each send). An empty
   // scope means NO world info, never "scan the whole library".
-  const bound = new Set([...(meta.lorebookIds || []), ...(extraBookIds || [])]);
+  const bound = new Set([...(meta.lorebookIds || []), ...(meta.chatLorebookIds || []), ...(extraBookIds || [])]);
   books = books.filter((b) => bound.has(b.id || b.name));
   // budget knobs live on the books: contextPercent rescales the caller's
   // budget (which is the 25% figure), budgetCap is an absolute ceiling —
@@ -2545,6 +2545,7 @@ export function handleRoute(req, host) {
               return p ? p.name || null : null;
             })(),
             _lorebookNames: namesOf(m.lorebookIds, bookNames),
+            _chatLorebookNames: namesOf(m.chatLorebookIds, bookNames),
           }, null, 2),
         });
         const memories = loadMemories(fsx, m.id);
@@ -2890,7 +2891,7 @@ const toolX = (r) => ({
       // look_changed, and the client's hydrate wipes its staged streaming
       // bubble mid-generation. Nothing changed → no write, no event.
       const same = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
-      const keys = ["title", "presetId", "personaId", "model", "authorNote", "lorebookIds", "userName", "characterId", "groupId",
+      const keys = ["title", "presetId", "personaId", "model", "authorNote", "lorebookIds", "chatLorebookIds", "userName", "characterId", "groupId",
         "authorNoteObject", "folderId", "chatTags", "backgroundId", "temporary", "summary",
         "memoryCutoffMessageId", "parentChatId", "parentMessageId"];
       if (keys.every((k) => !(k in b) || same(b[k], meta[k]))) return ok(meta);
