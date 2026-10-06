@@ -61,7 +61,10 @@ Characters grid/list and sort preferences live in settings.ui.characterBrowser.
 Imported cards record studio.importedAt and initialize studio.createdAt when
 missing. Unknown historical import dates stay unknown. Recent-chat ordering
 also uses chat activity instead of relying only on the card timestamp.
-Chat lorebooks are selected in the chat menu’s lorebook panel. `chatLorebookIds`
+The chat header’s Lore button and the Chat lorebooks menu item open a compact
+searchable selector with removable selected chips. Lorebook activity stays a
+separate panel. The selector searches the entire library and renders up to 60
+matches at a time. `chatLorebookIds`
 stores explicit chat bindings separately from the inherited `lorebookIds` scope.
 Both prompt assembly and semantic preparation include them; backups remap the
 explicit bindings through `_chatLorebookNames`. Forks inherit the selection.

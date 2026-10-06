@@ -163,6 +163,7 @@ interface AppState {
   forkChat: (chatId: ID, messageId: ID) => Promise<ID>
   forkAndOpen: (chatId: ID, messageId: ID) => Promise<void>
   updateChat: (chatId: ID, patch: Partial<Chat>) => void
+  setChatLorebooks: (chatId: ID, ids: ID[]) => Promise<void>
   newChat: (charId: ID, greetingIndex?: number) => Promise<ID>
   startChatAndOpen: (charId: ID, greetingIndex?: number) => Promise<void>
   createGroup: (name: string, memberIds: ID[]) => Promise<ID>
@@ -1130,6 +1131,11 @@ export const useApp = create<AppState>()(
       forkAndOpen: async (chatId, messageId) => {
         const id = await get().forkChat(chatId, messageId)
         get().openChat(id)
+      },
+      setChatLorebooks: async (chatId, ids) => {
+        await j(`/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify({ chatLorebookIds: ids }) })
+        bumpMutate()
+        set((s) => ({ chats: s.chats.map((c) => c.id === chatId ? { ...c, chatLorebookIds: ids } : c) }))
       },
       updateChat: (chatId, patch) => {
         bumpMutate()
