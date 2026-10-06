@@ -44,16 +44,19 @@ becomes a row of section icons (tap to drop the section down over the chat,
 tap again to close); elsewhere on mobile a section is the page, reached from
 the bottom tab bar. Views are components/views/*, the chat experience lives in
 components/chat/*, the tabbed character editor in components/character/*.
-The Marketplace (components/views/marketplace-view.tsx) searches chub through
-studio-import plugin routes (/marketplace/search, /marketplace/detail) and
-downloads via the /import/url path; remote art rides the engine's same-origin
-image proxy (/v1/apps/roleplay/img) because app pages are CSP-locked to
-self-origin images. Catalog gotchas, all verified against the live endpoint:
-adult listings are hidden unless nsfw/nsfl/nsfw_only are ALL stated (absent
-= ~95% of the catalog missing); "trending" is a POOL of ~1.4k cards, not an
-ordering, so it gets its own switch and takes over the sort; an unknown sort
-key is a 400, never a fallback; tags are `topics`, and OR is `inclusive_or`
-(`tags_mode` is read by nothing).
+The Marketplace (components/views/marketplace-view.tsx) searches Chub and
+Datacat through studio-import routes (/marketplace/search, /marketplace/detail,
+/marketplace/tags). Chub downloads use /import/url. Datacat uses request-scoped
+anonymous sessions; downloads require verification on its website, then the
+user imports the downloaded card file in Characters. Its filters support
+rating tags, popular catalog tag IDs, minimum tokens, recent additions and score order.
+Do not send Chub-specific controls to Datacat. Remote art uses /img.
+Chub needs explicit nsfw/nsfl/nsfw_only flags; trending selects a separate pool;
+tags use topics and inclusive_or for any-tag matching.
+Characters grid/list and sort preferences live in settings.ui.characterBrowser.
+Imported cards record studio.importedAt and initialize studio.createdAt when
+missing. Unknown historical import dates stay unknown. Recent-chat ordering
+also uses chat activity instead of relying only on the card timestamp.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
 to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
 

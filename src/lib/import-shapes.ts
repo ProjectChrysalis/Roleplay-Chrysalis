@@ -365,7 +365,7 @@ export function regexExport(script: RegexScript): WireRegex {
 export async function extractCharaFromPng(file: File): Promise<unknown | null> {
   const buf = new Uint8Array(await file.arrayBuffer())
   // PNG signature is 8 bytes; then chunks: length(4) type(4) data(length) crc(4)
-  if (buf.length < 8) return null
+  if (buf.length < 8 || ![137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => buf[i] === v)) return null
   let pos = 8
   const td = new TextDecoder('latin1')
   let v2: unknown | null = null

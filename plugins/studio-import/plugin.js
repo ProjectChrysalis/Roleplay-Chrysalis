@@ -33,18 +33,33 @@ function extractCardFromPng(bytes) {
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   for (let i = 0; i < 8; i++) if (bytes[i] !== sig[i]) return null;
   let off = 8;
-  while (off + 8 <= bytes.length) {
-    const len = (bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3];
+  let v2 = null;
+  while (off + 12 <= bytes.length) {
+    const len = bytes[off] * 0x1000000 + (bytes[off + 1] << 16) + (bytes[off + 2] << 8) + bytes[off + 3];
+    if (off + 12 + len > bytes.length) break;
     const type = latin1(bytes.slice(off + 4, off + 8));
-    if (type === "tEXt") {
+    if (type === "tEXt" || type === "iTXt") {
       const data = bytes.slice(off + 8, off + 8 + len);
       const nul = data.indexOf(0);
       if (nul > 0) {
         const keyword = latin1(data.slice(0, nul));
         if (keyword === "ccv3" || keyword === "chara") {
           try {
-            const json = latin1(b64ToBytes(latin1(data.slice(nul + 1))));
-            return JSON.parse(json);
+            let start = nul + 1;
+            if (type === "iTXt") {
+              if (data[start] !== 0 || data[start + 1] !== 0) throw new Error("compressed text is unsupported");
+              const languageEnd = data.indexOf(0, start + 2);
+              const translatedEnd = languageEnd < 0 ? -1 : data.indexOf(0, languageEnd + 1);
+              if (translatedEnd < 0) throw new Error("invalid text chunk");
+              start = translatedEnd + 1;
+            }
+            const payload = latin1(data.slice(start));
+            const text = type === "iTXt" && keyword === "ccv3" && payload.trimStart().startsWith("{")
+              ? new TextDecoder().decode(new Uint8Array(data.slice(start)))
+              : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)));
+            const card = JSON.parse(text);
+            if (keyword === "ccv3") return card;
+            if (!v2) v2 = card;
           } catch { /* next chunk */ }
         }
       }
@@ -52,7 +67,7 @@ function extractCardFromPng(bytes) {
     off += 12 + len;
     if (type === "IEND") break;
   }
-  return null;
+  return v2;
 }
 
 // ---------- normalizers ----------
@@ -104,44 +119,10 @@ const entryBase64 = (e) =>
  *  "ccv3" JSON) — mirrors what the browser-side importer does with .png
  *  cards, so backup zips with PNG characters import fully plugin-side. */
 function cardFromPngBase64(b64) {
-  try {
-    const bin = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
-    if (bin.length < 8 || bin[0] !== 0x89 || bin[1] !== 0x50) return null;
-    let off = 8;
-    const td = new TextDecoder();
-    while (off + 12 <= bin.length) {
-      const len = (bin[off] << 24) | (bin[off + 1] << 16) | (bin[off + 2] << 8) | bin[off + 3];
-      const type = String.fromCharCode(bin[off + 4], bin[off + 5], bin[off + 6], bin[off + 7]);
-      if (type === "tEXt" || type === "iTXt") {
-        const body = bin.subarray(off + 8, off + 8 + len);
-        const nul = body.indexOf(0);
-        if (nul > 0) {
-          const keyword = td.decode(body.subarray(0, nul));
-          let payload = body.subarray(nul + 1);
-          if (type === "iTXt") {
-            // skip compression flag(1) + method(1) + lang NUL + translated NUL
-            let q = nul + 1 + 2;
-            q = body.indexOf(0, q) + 1;
-            q = body.indexOf(0, q) + 1;
-            payload = body.subarray(q);
-          }
-          if (keyword === "chara" || keyword === "ccv3") {
-            const text = td.decode(payload);
-            const json = JSON.parse(keyword === "chara" ? atob(text) : text);
-            return json;
-          }
-        }
-      }
-      if (type === "IEND") break;
-      off += 12 + len;
-    }
-  } catch {}
-  return null;
+  try { return extractCardFromPng(new Uint8Array(b64ToBytes(b64))); } catch { return null; }
 }
 
-/** Fields the normalizer owns; everything else on the card's data object is
- *  copied verbatim (the card spec forbids destroying unknown fields, and v3
- *  additions like nickname/assets/group_only_greetings must survive). */
+
 const CARD_KNOWN_FIELDS = new Set([
   "name", "description", "personality", "scenario", "first_mes", "mes_example",
   "alternate_greetings", "creator_notes", "creatorcomment", "tags", "system_prompt",
@@ -534,8 +515,92 @@ function normalizeChatLines(raw) {
 // "not available in your country" page — present as a browser
 const BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 
+const DATACAT_BASE = "https://datacat.run";
+const DATACAT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+
+function datacatRoute(req, host) {
+  const b = req.body && typeof req.body === "object" ? req.body : {};
+  if (!host.net) return { status: 503, json: { error: "network permission not granted" } };
+  if (req.path === "/marketplace/detail" && !DATACAT_ID.test(String(b.id || ""))) {
+    return { status: 400, json: { error: "bad listing id" } };
+  }
+  const headers = { "user-agent": BROWSER_UA, accept: "application/json", origin: DATACAT_BASE, referer: DATACAT_BASE + "/" };
+  const results = host.net.results;
+  // Anonymous sessions are request-scoped and never sent to the app frame.
+  if (!Object.keys(results).length) {
+    host.net.request("identify", {
+      url: DATACAT_BASE + "/api/liberator/identify", method: "POST",
+      body: { deviceToken: "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => { const n = Math.floor(Math.random() * 16); return (c === "x" ? n : (n & 3) | 8).toString(16); }) }, headers, json: true, maxBytes: 128 * 1024,
+    });
+    return { __llmPending: true };
+  }
+  if (results.identify && !results.datacat) {
+    const token = results.identify.ok && results.identify.json?.sessionToken;
+    if (typeof token !== "string" || !token) return { status: 502, json: { error: "Datacat session unavailable" } };
+    headers["X-Session-Token"] = token;
+    const page = Math.max(1, Math.min(1000, Math.floor(Number(b.page) || 1)));
+    const first = Math.max(1, Math.min(50, Math.floor(Number(b.first) || 24)));
+    let path;
+    if (req.path === "/marketplace/tags") path = "/api/tags/faceted?mode=recent&minTotalTokens=0";
+    else if (req.path === "/marketplace/detail") path = "/api/characters/" + encodeURIComponent(b.id);
+    else {
+      const qs = new URLSearchParams({ limit: String(first), offset: String((page - 1) * first), summary: "1", minTotalTokens: String(Math.max(0, Math.min(1000000, Math.floor(Number(b.minTokens) || 0)))) });
+      const search = String(b.search || "").trim().slice(0, 120);
+      if (search) qs.set("search", search);
+      if (b.sort === "score") qs.set("sortBy", "score");
+      const ids = (Array.isArray(b.tagIds) ? b.tagIds : []).filter((id) => Number.isInteger(id) && id > 0).slice(0, 12);
+      // The catalog's rating tags filter before pagination, preserving totals.
+      if (b.nsfw === false && !ids.includes(1)) ids.push(1);
+      else if (b.nsfwOnly === true && !ids.includes(2)) ids.push(2);
+      if (ids.length) qs.set("tagIds", ids.join(","));
+      path = "/api/characters/recent-public?" + qs.toString();
+    }
+    host.net.request("datacat", { url: DATACAT_BASE + path, headers, json: true, maxBytes: (req.path === "/marketplace/tags" ? 12 : 5) * 1024 * 1024 });
+    return { __llmPending: true, stash: { page, first } };
+  }
+  const r = results.datacat;
+  const data = r?.ok && r.json?.success === true ? r.json : null;
+  if (!data) return { status: 502, json: { error: "Datacat request failed (" + (r?.status || r?.error || "invalid response") + ")" } };
+  if (req.path === "/marketplace/tags") {
+    if (!Array.isArray(data.tags)) return { status: 502, json: { error: "Invalid Datacat tags" } };
+    return { status: 200, json: { tags: data.tags.filter((t) => Number.isInteger(t.id) && typeof t.name === "string").sort((a, b) => Number(b.count) - Number(a.count)).slice(0, 2000).map((t) => ({ id: t.id, tag: t.name, n: Number(t.count) || 0 })) } };
+  }
+  const clip = (v, limit) => typeof v === "string" ? v.slice(0, limit) : "";
+  if (req.path === "/marketplace/detail") {
+    const c = data.character;
+    if (!c || typeof c !== "object") return { status: 502, json: { error: "Invalid Datacat character" } };
+    const d = c.chara_card_v2_json?.data || {};
+    const book = d.character_book;
+    return { status: 200, json: {
+      source: "datacat", id: b.id,
+      greeting: clip(d.first_mes || c.first_message, 16000),
+      alternateGreetings: (Array.isArray(d.alternate_greetings) ? d.alternate_greetings : Array.isArray(c.alternate_greetings) ? c.alternate_greetings : []).filter((g) => typeof g === "string").slice(0, 40).map((g) => g.slice(0, 16000)),
+      personality: clip(d.description || c.personality, 24000), scenario: clip(d.scenario || c.scenario, 8000),
+      exampleDialogs: clip(d.mes_example, 16000), creatorNotes: clip(d.creator_notes || c.description, 8000),
+      systemPrompt: clip(d.system_prompt, 8000), postHistoryInstructions: clip(d.post_history_instructions, 8000),
+      lorebookEntries: book ? (Array.isArray(book.entries) ? book.entries.length : Object.keys(book.entries || {}).length) : 0,
+    } };
+  }
+  if (!Array.isArray(data.characters) || !Number.isFinite(data.totalCount)) return { status: 502, json: { error: "Invalid Datacat search results" } };
+  const safeAvatar = (v) => typeof v === "string" && /^https:\/\//i.test(v) ? v : null;
+  const metric = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+  const listings = data.characters.filter((c) => DATACAT_ID.test(String(c.characterId || c.character_id || ""))).map((c) => ({
+    id: c.characterId || c.character_id, name: clip(c.name, 500), creator: clip(c.creatorName || c.creator_name, 200),
+    tagline: "", description: clip(c.description, 12000),
+    topics: (Array.isArray(c.tags) ? c.tags : Array.isArray(c.custom_tags) ? c.custom_tags : []).map((t) => typeof t === "string" ? t : t.name).filter((t) => typeof t === "string"),
+    downloads: null, favorites: metric(c.stats?.favoritesCount?.favoritesCount),
+    tokens: metric(c.token_counts?.total_tokens), rating: null, ratingCount: null,
+    chats: metric(c.stats?.chat), messages: metric(c.stats?.message),
+    nsfw: c.isNsfw === true || c.is_nsfw === true,
+    avatar: safeAvatar(c.avatar) || (typeof c.avatar === "string" && /^[\w.-]+$/.test(c.avatar) ? "https://ella.janitorai.com/bot-avatars/" + c.avatar : null),
+    maxRes: safeAvatar(c.avatarVariantUrls?.hero || c.avatar_variant_urls?.hero), createdAt: c.createdAt || c.created_at || null,
+  }));
+  return { status: 200, json: { source: "datacat", count: data.totalCount, page: req.stash.page, first: req.stash.first, results: listings } };
+}
+
 export function handleRoute(req, host) {
   if (req.method !== "POST") return null;
+  if (req.path.startsWith("/marketplace/") && req.body?.source === "datacat" && ["/marketplace/search", "/marketplace/detail", "/marketplace/tags"].includes(req.path)) return datacatRoute(req, host);
   if (req.path !== "/import/batch" && req.path !== "/import/zip" && req.path !== "/import/url" && req.path !== "/marketplace/search" && req.path !== "/marketplace/detail") return null;
   // ---------- Marketplace search (chub.ai today; source id keeps the
   // client shape ready for more storefronts) ----------
@@ -815,6 +880,8 @@ export function handleRoute(req, host) {
   // Hoisted so the /import/url handler above can call it before this line.
   function writeCard(card) {
     const id = uid(slug(card.name), "characters");
+    const importedAt = Date.now();
+    card.studio = { ...card.studio, createdAt: card.studio?.createdAt || importedAt, importedAt };
     writeJson("characters/" + id + "/card.json", card);
     summary.characters.push(id);
     // regex scripts a card carries run for that character only

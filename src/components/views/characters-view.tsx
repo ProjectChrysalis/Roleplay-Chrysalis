@@ -30,8 +30,7 @@ import { buildCardPng, downloadCardPng } from '@/lib/png-card'
 import { downloadJson } from '@/lib/interop'
 import { CharacterEditor } from '@/components/views/character-editor'
 import { CreateGroupDialog } from '@/components/chat/create-group-dialog'
-
-type SortKey = 'az' | 'newest' | 'oldest' | 'favorites' | 'recent' | 'chats' | 'tokens' | 'random'
+import { characterBrowser, sortCharacters, type CharacterSort } from '@/lib/character-browser'
 
 /** chub card links map to the full-resolution card image; the app's img
  *  route streams it through the engine (the sandboxed frame cannot fetch
@@ -68,8 +67,10 @@ export function CharactersView() {
   const tags = useApp((s) => s.tags)
 
   const [query, setQuery] = useState('')
-  const [grid, setGrid] = useState(true)
-  const [sort, setSort] = useState<SortKey>('recent')
+  const updateSettings = useApp((s) => s.updateSettings)
+  const { grid, sort } = characterBrowser(settings.characterBrowser)
+  const setGrid = (grid: boolean) => updateSettings({ characterBrowser: { grid, sort } })
+  const setSort = (sort: CharacterSort) => { updateSettings({ characterBrowser: { grid, sort } }); setPage(0) }
   const [tagFilter, setTagFilter] = useState<string[]>([])
   const [batchMode, setBatchMode] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
@@ -172,22 +173,11 @@ export function CharactersView() {
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase()
-    let list = characters.filter((c) =>
+    const list = characters.filter((c) =>
       (!q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
       (tagFilter.every((t) => c.tags.includes(t))),
     )
-    const chatCount = (id: string) => chats.filter((ch) => ch.characterId === id).length
-    switch (sort) {
-      case 'az': list = [...list].sort((a, b) => a.name.localeCompare(b.name)); break
-      case 'newest': list = [...list].sort((a, b) => b.createdAt - a.createdAt); break
-      case 'oldest': list = [...list].sort((a, b) => a.createdAt - b.createdAt); break
-      case 'favorites': list = [...list].sort((a, b) => Number(b.favorite) - Number(a.favorite)); break
-      case 'recent': list = [...list].sort((a, b) => b.lastChatAt - a.lastChatAt); break
-      case 'chats': list = [...list].sort((a, b) => chatCount(b.id) - chatCount(a.id)); break
-      case 'tokens': list = [...list].sort((a, b) => estimateTokens(b.description) - estimateTokens(a.description)); break
-      case 'random': list = [...list].sort(() => Math.random() - 0.5); break
-    }
-    return list
+    return sortCharacters(list, chats, sort)
   }, [characters, chats, query, sort, tagFilter])
 
   const favorites = characters.filter((c) => c.favorite)
@@ -227,14 +217,15 @@ export function CharactersView() {
           <Input value={query} onChange={(e) => { setQuery(e.target.value); setPage(0) }} placeholder="Search characters…" className="h-8 pl-8 text-sm" aria-label="Search characters" />
         </div>
         <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
-          <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+          <Select value={sort} onValueChange={(v) => setSort(v as CharacterSort)}>
             <SelectTrigger className="h-8 w-32 text-xs" aria-label="Sort characters">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="recent">Recent</SelectItem>
+              <SelectItem value="recent">Recently chatted</SelectItem>
               <SelectItem value="az">A–Z</SelectItem>
               <SelectItem value="newest">Newest</SelectItem>
+              <SelectItem value="imported">Recently imported</SelectItem>
               <SelectItem value="oldest">Oldest</SelectItem>
               <SelectItem value="favorites">Favorites</SelectItem>
               <SelectItem value="chats">Most chats</SelectItem>

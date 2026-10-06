@@ -1,6 +1,6 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ImgHTMLAttributes } from 'react'
-import { MagnifyingGlass, Storefront, DownloadSimple, CircleNotch, ArrowSquareOut, Check, Heart, X, CaretLeft, CaretRight, BookOpenText, BookBookmark, User, Tag, Plus, SlidersHorizontal, Fire } from '@phosphor-icons/react'
+import { MagnifyingGlass, Storefront, DownloadSimple, CircleNotch, ArrowSquareOut, Check, Heart, X, CaretLeft, CaretRight, BookOpenText, BookBookmark, User, Tag, Plus, SlidersHorizontal, Fire, Chats } from '@phosphor-icons/react'
 import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -16,8 +16,7 @@ import { useApp } from '@/lib/store'
 import { DEFAULT_AVATAR, cn } from '@/lib/utils'
 import { j, proxyUrl, downscaleRemoteImage } from '@/lib/engine'
 
-/** One marketplace listing, normalized by the plugin from whatever the
- *  source returns — `id` is the "user/slug" full path (download URL + dedupe). */
+/** Listing IDs are source-specific: a path or a character UUID. */
 type MarketplaceItem = {
   id: string
   name: string
@@ -25,13 +24,13 @@ type MarketplaceItem = {
   tagline: string
   description: string
   topics: string[]
-  downloads: number
-  favorites: number
-  tokens: number
-  rating: number
-  ratingCount: number
-  chats: number
-  messages: number
+  downloads: number | null
+  favorites: number | null
+  tokens: number | null
+  rating: number | null
+  ratingCount: number | null
+  chats: number | null
+  messages: number | null
   nsfw: boolean
   avatar: string | null
   maxRes: string | null
@@ -56,11 +55,10 @@ type MarketplaceDetail = {
  *  search term narrows the pool before any ordering applies, so there is no
  *  separate relevance mode. "Trending" is deliberately absent: it is not an
  *  ordering but a different, much smaller pool, so it gets its own switch. */
-const SORTS = ['downloads', 'rating', 'newest', 'updated', 'tokens', 'name', 'random'] as const
+const SORTS = ['downloads', 'rating', 'newest', 'updated', 'tokens', 'name', 'random', 'score'] as const
 type SortKey = (typeof SORTS)[number]
-/** Sources the engine plugin knows. Chub only for now — adding one later is
- *  an option here + a branch in plugins/studio-import. */
-const SOURCES = [{ value: 'chub', label: 'Chub' }] as const
+/** Sources supported by the marketplace plugin. */
+const SOURCES = [{ value: 'chub', label: 'Chub' }, { value: 'datacat', label: 'Datacat' }] as const
 const PAGE_SIZE = 24
 const MAX_TAGS = 6
 
@@ -150,12 +148,13 @@ function loadBrowse(): Browse {
     const raw = sessionStorage.getItem(BROWSE_KEY)
     if (!raw) return NO_BROWSE
     const p = JSON.parse(raw) as Partial<Browse>
+    const source = SOURCES.some((s) => s.value === p.source) ? p.source as Browse['source'] : NO_BROWSE.source
     return {
-      source: SOURCES.some((s) => s.value === p.source) ? (p.source as Browse['source']) : NO_BROWSE.source,
+      source,
       query: str(p.query),
       applied: str(p.applied),
-      sort: SORTS.includes(p.sort as SortKey) ? (p.sort as SortKey) : NO_BROWSE.sort,
-      trending: p.trending === true,
+      sort: source === 'datacat' ? (p.sort === 'score' ? 'score' : 'newest') : SORTS.includes(p.sort as SortKey) && p.sort !== 'score' ? p.sort as SortKey : NO_BROWSE.sort,
+      trending: source === 'chub' && p.trending === true,
       tags: Array.isArray(p.tags) ? p.tags.filter((t): t is string => typeof t === 'string').slice(0, MAX_TAGS) : [],
       tagsMode: p.tagsMode === 'any' ? 'any' : 'all',
       creator: typeof p.creator === 'string' ? p.creator : null,
@@ -251,7 +250,20 @@ export function MarketplaceView() {
   const [tagQuery, setTagQuery] = useState('')
   /** Tag vocabulary bootstrapped from the results the user has actually seen
    *  (chub has no tag-list endpoint) — ranked by how often they appeared. */
-  const [tagVocab, setTagVocab] = useState<{ tag: string; n: number }[]>([])
+  const [tagVocab, setTagVocab] = useState<{ tag: string; n: number; id?: number }[]>([])
+  const [tagsError, setTagsError] = useState<string | null>(null)
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    let live = true
+    setTagVocab([])
+    setTagsError(null)
+    if (source === 'datacat') {
+      j<{ tags: { tag: string; n: number; id: number }[] }>('/marketplace/tags', { method: 'POST', body: JSON.stringify({ source }) })
+        .then((r) => { if (live) setTagVocab(r.tags) })
+        .catch((e: Error) => { if (live) setTagsError(e.message) })
+    }
+    return () => { live = false }
+  }, [source, retry])
   const [creator, setCreator] = useState<string | null>(restored.creator)
   const [filters, setFilters] = useState<Filters>(() => loadFilters())
   const [filtersOpen, setFiltersOpen] = useState(false)
@@ -316,21 +328,24 @@ export function MarketplaceView() {
     if (el && restored.scrollTop > 0) el.scrollTop = restored.scrollTop
   }, [loading, items, restored.scrollTop])
 
-  // server-side search — the engine plugin fetches gateway.chub.ai (no CORS,
-  // browser UA, allowlisted host)
+  const tagIds = tags.map((t) => tagVocab.find((v) => v.tag === t)?.id).filter((id) => id !== undefined).join(',')
+
+  // Catalog requests run through the plugin's allowlisted network access.
   useEffect(() => {
     const id = ++reqId.current
     setLoading(true)
     setError(null)
     j<SearchResponse>('/marketplace/search', {
       method: 'POST',
-      body: JSON.stringify({ source, search: applied, sort, trending, page, first: PAGE_SIZE, tags, tagsMode, ...filterBody(filters), ...(creator ? { creator } : {}) }),
+      body: JSON.stringify(source === 'datacat'
+        ? { source, search: applied, sort: sort === 'score' ? 'score' : 'newest', page, first: PAGE_SIZE, tagIds: tagIds ? tagIds.split(',').map(Number) : [], nsfw: filters.maturity !== 'safe', nsfwOnly: filters.maturity === 'only', minTokens: filters.minTokens }
+        : { source, search: applied, sort: sort === 'score' ? 'downloads' : sort, trending, page, first: PAGE_SIZE, tags, tagsMode, ...filterBody(filters), ...(creator ? { creator } : {}) }),
     })
       .then((r) => {
         if (id !== reqId.current) return // stale response (params changed mid-flight)
         setItems(r.results)
         setCount(r.count)
-        setTagVocab((prev) => {
+        if (source === 'chub') setTagVocab((prev) => {
           const by = new Map(prev.map((v) => [v.tag, v.n]))
           for (const it of r.results) for (const t of it.topics) by.set(t, (by.get(t) ?? 0) + 1)
           return [...by.entries()]
@@ -346,11 +361,13 @@ export function MarketplaceView() {
         setError(String((e as Error).message ?? e))
       })
       .finally(() => { if (id === reqId.current) setLoading(false) })
-  }, [source, applied, sort, trending, page, tags, tagsMode, creator, filters])
+    return () => { reqId.current++ }
+  }, [source, applied, sort, trending, page, tags, tagsMode, creator, filters, retry, source === 'datacat' ? tagIds : null])
 
   // full card definition loads when a listing is opened for preview
   useEffect(() => {
     if (!detail) return
+    let live = true
     setDetailData(null)
     setDetailError(null)
     setGreetingIdx(0)
@@ -359,9 +376,10 @@ export function MarketplaceView() {
       method: 'POST',
       body: JSON.stringify({ source, id: detail.id }),
     })
-      .then(setDetailData)
-      .catch((e) => setDetailError(String((e as Error).message ?? e)))
-      .finally(() => setDetailLoading(false))
+      .then((r) => { if (live) setDetailData(r) })
+      .catch((e) => { if (live) setDetailError(String((e as Error).message ?? e)) })
+      .finally(() => { if (live) setDetailLoading(false) })
+    return () => { live = false }
   }, [detail, source])
 
   const pages = Math.max(1, Math.ceil(count / PAGE_SIZE))
@@ -376,7 +394,7 @@ export function MarketplaceView() {
    *  tag. Capped, back to page 1. */
   const toggleTag = (t: string) => {
     const clean = t.trim().slice(0, 60)
-    if (!clean) return
+    if (!clean || (source === 'datacat' && !tagVocab.some((v) => v.tag === clean))) return
     setTags((ts) => (ts.includes(clean) ? ts.filter((x) => x !== clean) : ts.length >= MAX_TAGS ? ts : [...ts, clean]))
     setPage(1)
   }
@@ -410,15 +428,15 @@ export function MarketplaceView() {
   const greetings = detailData ? [detailData.greeting, ...detailData.alternateGreetings].filter((g) => g.trim()) : []
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-x-clip">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-x-clip [overflow-wrap:anywhere]">
       {/* header (search + filters) scrolls WITH the results (mobile keyboard room) */}
-      <ScrollArea ref={scrollRootRef} className="min-h-0 flex-1">
+      <ScrollArea ref={scrollRootRef} className="min-h-0 min-w-0 flex-1">
       <header className="flex flex-col gap-2 border-b border-border px-4 py-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-sm font-semibold">Marketplace</h1>
           {!loading && !error && <Badge variant="secondary">{fmtCount(count)}</Badge>}
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            <Select value={source} onValueChange={(v) => { setSource(v as typeof source); setPage(1) }}>
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5 sm:ml-auto sm:w-auto">
+            <Select value={source} onValueChange={(v) => { setSource(v as typeof source); setTags([]); setCreator(null); setTrending(false); setSort(v === 'datacat' ? 'newest' : 'downloads'); setPage(1); setDetail(null) }}>
               <SelectTrigger className="h-8 w-24 text-xs" aria-label="Marketplace source">
                 <SelectValue />
               </SelectTrigger>
@@ -426,7 +444,7 @@ export function MarketplaceView() {
                 {SOURCES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Button
+            {source === 'chub' && <Button
               variant={trending ? 'secondary' : 'outline'}
               size="sm"
               className="h-8 gap-1.5 text-xs"
@@ -436,12 +454,16 @@ export function MarketplaceView() {
             >
               <Fire className="size-3.5" aria-hidden="true" />
               Trending
-            </Button>
-            <Select value={sort} onValueChange={(v) => { setSort(v as SortKey); setPage(1) }} disabled={trending}>
+            </Button>}
+            <Select value={sort} onValueChange={(v) => { setSort(v as SortKey); setPage(1) }} disabled={source === 'chub' && trending}>
               <SelectTrigger className="h-8 w-32 text-xs" aria-label="Sort marketplace results">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                {source === 'datacat' ? <>
+                  <SelectItem value="newest">Recently added</SelectItem>
+                  <SelectItem value="score">Recommended</SelectItem>
+                </> : <>
                 <SelectItem value="downloads">Most downloaded</SelectItem>
                 <SelectItem value="rating">Top rated</SelectItem>
                 <SelectItem value="newest">Newest</SelectItem>
@@ -449,6 +471,7 @@ export function MarketplaceView() {
                 <SelectItem value="tokens">Longest cards</SelectItem>
                 <SelectItem value="name">A–Z</SelectItem>
                 <SelectItem value="random">Random</SelectItem>
+                </>}
               </SelectContent>
             </Select>
           </div>
@@ -475,6 +498,7 @@ export function MarketplaceView() {
             </Button>
           </form>
           <TagsPicker
+            catalogOnly={source === 'datacat'}
             tags={tags}
             tagsMode={tagsMode}
             vocab={tagVocab}
@@ -486,6 +510,7 @@ export function MarketplaceView() {
             onMode={() => { setTagsMode((m) => (m === 'all' ? 'any' : 'all')); setPage(1) }}
           />
           <FiltersPanel
+            source={source}
             filters={filters}
             open={filtersOpen}
             onOpen={setFiltersOpen}
@@ -518,7 +543,7 @@ export function MarketplaceView() {
                 <X className="size-3" aria-hidden="true" />
               </button>
             ))}
-            {tags.length > 1 && (
+            {source === 'chub' && tags.length > 1 && (
               <button
                 type="button"
                 onClick={() => { setTagsMode((m) => (m === 'all' ? 'any' : 'all')); setPage(1) }}
@@ -537,6 +562,7 @@ export function MarketplaceView() {
             </button>
           </div>
         )}
+        {tagsError && <p className="text-xs text-destructive [overflow-wrap:anywhere]">Tags unavailable: {tagsError} <button type="button" className="underline" onClick={() => setRetry((r) => r + 1)}>Retry</button></p>}
       </header>
 
         {loading ? (
@@ -558,6 +584,7 @@ export function MarketplaceView() {
               <EmptyMedia variant="icon"><Storefront aria-hidden="true" /></EmptyMedia>
               <EmptyTitle>Couldn&apos;t reach {SOURCES.find((s) => s.value === source)?.label}</EmptyTitle>
               <EmptyDescription>{error}</EmptyDescription>
+              <Button variant="outline" size="sm" onClick={() => setRetry((r) => r + 1)}>Retry</Button>
             </EmptyHeader>
           </Empty>
         ) : items.length === 0 ? (
@@ -582,9 +609,9 @@ export function MarketplaceView() {
                   key={item.id}
                   type="button"
                   onClick={() => setDetail(item)}
-                  className="group relative flex flex-col overflow-hidden rounded-lg border border-border bg-card text-left transition-colors hover:border-primary/50"
+                  className="group relative flex min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card text-left transition-colors hover:border-primary/50"
                 >
-                  <span className="relative block">
+                  <span className="relative block min-w-0 w-full">
                     <ProxyImage
                       url={item.avatar}
                       alt={item.name}
@@ -608,23 +635,23 @@ export function MarketplaceView() {
                       </span>
                     )}
                   </span>
-                  <span className="flex flex-col gap-1 p-2.5">
+                  <span className="flex min-w-0 flex-col gap-1 p-2.5">
                     <span className="line-clamp-1 text-sm font-semibold">{item.name}</span>
                     <span className="line-clamp-1 text-[11px] text-muted-foreground">by {item.creator || 'unknown'}</span>
-                    <span className="line-clamp-2 text-xs text-muted-foreground">{item.tagline || item.description}</span>
+                    <span className="line-clamp-2 text-xs text-muted-foreground [overflow-wrap:anywhere]">{item.tagline || item.description}</span>
                     <span className="mt-1 flex flex-wrap gap-1">
-                      {item.topics.slice(0, 3).map((t) => <Badge key={t} variant="secondary" className="text-[10px]">{t}</Badge>)}
+                      {item.topics.slice(0, 3).map((t) => <Badge key={t} variant="secondary" className="max-w-full truncate text-[10px]">{t}</Badge>)}
                     </span>
                     <span className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-                      <span className="flex items-center gap-0.5" title="Downloads"><DownloadSimple className="size-3" aria-hidden="true" />{fmtCount(item.downloads)}</span>
-                      <span className="flex items-center gap-0.5" title="Favorites"><Heart className="size-3" aria-hidden="true" />{fmtCount(item.favorites)}</span>
+                      {(item.downloads ?? item.chats) != null && <span className="flex items-center gap-0.5" title={item.downloads == null ? 'Chats' : 'Downloads'}>{item.downloads == null ? <Chats className="size-3" aria-hidden="true" /> : <DownloadSimple className="size-3" aria-hidden="true" />}{fmtCount((item.downloads ?? item.chats)!)}</span>}
+                      {item.favorites != null && <span className="flex items-center gap-0.5" title="Favorites"><Heart className="size-3" aria-hidden="true" />{fmtCount(item.favorites)}</span>}
                     </span>
                   </span>
                 </button>
               ))}
             </div>
             {pages > 1 && (
-              <div className="flex items-center justify-center gap-3 py-3 text-xs text-muted-foreground">
+              <div className="flex flex-wrap items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
                 <Button variant="outline" size="sm" className="h-7" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>Previous</Button>
                 <span>page {page} of {pages}</span>
                 <Button variant="outline" size="sm" className="h-7" disabled={page >= pages} onClick={() => setPage((p) => p + 1)}>Next</Button>
@@ -635,7 +662,7 @@ export function MarketplaceView() {
       </ScrollArea>
 
       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
-        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
+        <DialogContent className="max-h-[85dvh] min-w-0 overflow-x-hidden overflow-y-auto [overflow-wrap:anywhere] sm:max-w-2xl">
           {detail && (
             <>
               <DialogHeader>
@@ -650,19 +677,19 @@ export function MarketplaceView() {
                     <DialogDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                       <button
                         type="button"
-                        onClick={() => { if (detail.creator) { setCreator(detail.creator); setPage(1); setDetail(null) } }}
+                        onClick={() => { if (detail.creator) { if (source === 'datacat') { setQuery(detail.creator); setApplied(detail.creator) } else setCreator(detail.creator); setPage(1); setDetail(null) } }}
                         title={`Browse everything by ${detail.creator}`}
-                        className="inline-flex items-center gap-1 underline-offset-2 hover:underline"
+                        className="inline-flex min-w-0 items-center gap-1 [overflow-wrap:anywhere] underline-offset-2 hover:underline"
                       >
                         <User className="size-3" aria-hidden="true" />by {detail.creator || 'unknown'}
                       </button>
                       {detail.createdAt && <span>{new Date(detail.createdAt).toLocaleDateString()}</span>}
                     </DialogDescription>
                     <span className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                      <span className="flex items-center gap-0.5" title="Downloads"><DownloadSimple className="size-3" aria-hidden="true" />{fmtCount(detail.downloads)}</span>
-                      <span className="flex items-center gap-0.5" title="Favorites"><Heart className="size-3" aria-hidden="true" />{fmtCount(detail.favorites)}</span>
-                      {detail.tokens > 0 && <span title="Chub's token estimate for the card">{fmtCount(detail.tokens)} tok</span>}
-                      {detail.ratingCount > 0 && (
+                      {(detail.downloads ?? detail.chats) != null && <span className="flex items-center gap-0.5" title={detail.downloads == null ? 'Chats' : 'Downloads'}>{detail.downloads == null ? <Chats className="size-3" aria-hidden="true" /> : <DownloadSimple className="size-3" aria-hidden="true" />}{fmtCount((detail.downloads ?? detail.chats)!)}</span>}
+                      {detail.favorites != null && <span className="flex items-center gap-0.5" title="Favorites"><Heart className="size-3" aria-hidden="true" />{fmtCount(detail.favorites)}</span>}
+                      {detail.tokens != null && detail.tokens > 0 && <span title="Source token estimate">{fmtCount(detail.tokens)} tok</span>}
+                      {detail.ratingCount != null && detail.rating != null && detail.ratingCount > 0 && (
                         <span>{detail.rating.toFixed(1)} ★ ({fmtCount(detail.ratingCount)})</span>
                       )}
                     </span>
@@ -720,7 +747,7 @@ export function MarketplaceView() {
                             </span>
                           )}
                         </span>
-                        <div className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md bg-accent/40 px-3 py-2 text-xs leading-5">
+                        <div className="max-h-56 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md bg-accent/40 px-3 py-2 text-xs leading-5">
                           {greetings[greetingIdx]}
                         </div>
                       </section>
@@ -741,16 +768,19 @@ export function MarketplaceView() {
                 )}
               </div>
 
+              {source === 'datacat' && <p className="text-xs text-muted-foreground">Download on Datacat, complete its verification, then import the card file in Characters.</p>}
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <a
-                  href={`https://chub.ai/characters/${detail.id}`}
+                  href={source === 'datacat' ? `https://datacat.run/characters/${detail.id}` : `https://chub.ai/characters/${detail.id}`}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-xs font-medium hover:bg-accent"
                 >
-                  <ArrowSquareOut className="size-3.5" aria-hidden="true" />Open on Chub
+                  <ArrowSquareOut className="size-3.5" aria-hidden="true" />Open on {source === 'datacat' ? 'Datacat' : 'Chub'}
                 </a>
-                {downloaded.has(detail.id) ? (
+                {source === 'datacat' ? (
+                  <Button size="sm" variant="outline" onClick={() => { setDetail(null); setView('characters') }}>Import a card file</Button>
+                ) : downloaded.has(detail.id) ? (
                   <Button size="sm" onClick={() => { setDetail(null); setView('characters') }}>
                     <Check className="size-4" aria-hidden="true" />Open Characters
                   </Button>
@@ -776,7 +806,7 @@ function CardSection({ title, text }: { title: string; text: string }) {
   return (
     <section className="flex flex-col gap-1.5">
       <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h4>
-      <div className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md bg-accent/40 px-3 py-2 text-xs leading-5">
+      <div className="max-h-56 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md bg-accent/40 px-3 py-2 text-xs leading-5">
         {trimmed}
       </div>
     </section>
@@ -787,6 +817,7 @@ function CardSection({ title, text }: { title: string; text: string }) {
  *  results the user has browsed, Enter toggles the exact match or adds the
  *  typed text as a custom tag, click rows to toggle, all/any for multi-tag. */
 function TagsPicker(props: {
+  catalogOnly?: boolean
   tags: string[]
   tagsMode: 'all' | 'any'
   vocab: { tag: string; n: number }[]
@@ -807,7 +838,7 @@ function TagsPicker(props: {
     ...matches.filter((v) => !activeLower.has(v.tag.toLowerCase())),
   ]
   const exactActive = props.tags.find((t) => t.toLowerCase() === q)
-  const custom = q && !exactActive && !props.vocab.some((v) => v.tag.toLowerCase() === q)
+  const custom = !props.catalogOnly && q && !exactActive && !props.vocab.some((v) => v.tag.toLowerCase() === q)
 
   const submitTag = () => {
     if (!q) return
@@ -815,7 +846,8 @@ function TagsPicker(props: {
     // only becomes a custom tag when nothing in the vocabulary matches
     const exact = props.tags.find((t) => t.toLowerCase() === q)
       ?? props.vocab.find((v) => v.tag.toLowerCase() === q)?.tag
-    const target = exact ?? (shown[0]?.tag ?? props.query.trim().replace(/[,]+/g, ' ').trim())
+    const target = exact ?? (shown[0]?.tag ?? (props.catalogOnly ? '' : props.query.trim().replace(/[,]+/g, ' ').trim()))
+    if (!target) return
     props.onToggle(target)
     props.onQuery('')
   }
@@ -849,7 +881,7 @@ function TagsPicker(props: {
             value={props.query}
             onChange={(e) => props.onQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submitTag() } }}
-            placeholder="Type a tag, Enter adds it…"
+            placeholder={props.catalogOnly ? 'Search popular tags…' : 'Type a tag, Enter adds it…'}
             className="h-8 text-sm"
             aria-label="Filter tags"
           />
@@ -857,7 +889,7 @@ function TagsPicker(props: {
         <div className="max-h-72 overflow-y-auto p-1">
           {shown.length === 0 && !custom && (
             <p className="px-2 py-3 text-center text-xs text-muted-foreground">
-              {props.vocab.length === 0 ? 'Loading tags…' : 'No matching tag, type one and press Enter.'}
+              {props.vocab.length === 0 ? 'Loading tags…' : props.catalogOnly ? 'No matching popular tag.' : 'No matching tag, type one and press Enter.'}
             </p>
           )}
           {shown.map((v) => {
@@ -892,7 +924,7 @@ function TagsPicker(props: {
             </button>
           )}
         </div>
-        {props.tags.length > 1 && (
+        {!props.catalogOnly && props.tags.length > 1 && (
           <div className="border-t border-border p-2">
             <Button variant="outline" size="sm" className="h-7 w-full text-xs" onClick={props.onMode}>
               match: {props.tagsMode === 'all' ? 'all tags' : 'any tag'}, tap to switch
@@ -907,6 +939,7 @@ function TagsPicker(props: {
 /** The catalog's narrowing controls. Edits collect in a draft so a
  *  half-typed number never fires a search; Apply commits the whole set. */
 function FiltersPanel(props: {
+  source: 'chub' | 'datacat'
   filters: Filters
   open: boolean
   onOpen: (open: boolean) => void
@@ -914,7 +947,7 @@ function FiltersPanel(props: {
 }) {
   const [draft, setDraft] = useState<Filters>(props.filters)
   const [excludeText, setExcludeText] = useState(props.filters.excludeTags.join(', '))
-  const active = countFilters(props.filters)
+  const active = props.source === 'datacat' ? Number(props.filters.maturity !== 'include') + Number(!!props.filters.minTokens.trim()) : countFilters(props.filters)
   const set = <K extends keyof Filters>(key: K, value: Filters[K]) => setDraft((d) => ({ ...d, [key]: value }))
   const parseTags = (s: string) => s.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 12)
   const apply = () => props.onApply({ ...draft, excludeTags: parseTags(excludeText) })
@@ -983,6 +1016,7 @@ function FiltersPanel(props: {
             </div>
           </div>
 
+          {props.source === 'chub' && <>
           <label className="flex items-center gap-2 text-xs">
             <Checkbox checked={draft.nsfl} onCheckedChange={(v) => set('nsfl', v === true)} />
             Include extreme content
@@ -994,10 +1028,12 @@ function FiltersPanel(props: {
 
           <Separator />
 
+          </>}
           <div className="flex gap-2">
             {num('minTokens', 'Min tokens', 'any')}
-            {num('maxTokens', 'Max tokens', 'any')}
+            {props.source === 'chub' && num('maxTokens', 'Max tokens', 'any')}
           </div>
+          {props.source === 'chub' && <>
           <div className="flex gap-2">
             {num('maxDaysAgo', 'Created within (days)', 'any')}
             {num('minTags', 'Min tags', 'any')}
@@ -1038,6 +1074,7 @@ function FiltersPanel(props: {
               </label>
             ))}
           </div>
+          </>}
         </div>
         <div className="flex gap-2 border-t border-border p-2">
           <Button

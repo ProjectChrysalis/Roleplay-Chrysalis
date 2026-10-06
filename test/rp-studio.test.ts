@@ -2910,3 +2910,90 @@ describe("rp studio: backups from older versions still import", () => {
     expect(lib.tags).toEqual(["keep-me"]);
   }, 30_000);
 });
+
+describe("marketplace Datacat discovery", () => {
+  const id = "3ecff261-ec04-469d-9476-d0275c613962";
+  it("authenticates before searching and applies rating/tags before pagination", async () => {
+    const m = mockHost(undefined, (key, req) => {
+      if (key === "identify") {
+        expect(req.method).toBe("POST");
+        expect(String(req.url)).toBe("https://datacat.run/api/liberator/identify");
+        return { ok: true, json: { success: true, sessionToken: "private-token" } };
+      }
+      const url = new URL(String(req.url));
+      expect((req.headers as Record<string, string>)["X-Session-Token"]).toBe("private-token");
+      expect(url.searchParams.get("offset")).toBe("24");
+      expect(url.searchParams.get("search")).toBe("wizard");
+      expect(url.searchParams.get("tagIds")).toBe("6,1");
+      expect(url.searchParams.get("sortBy")).toBe("score");
+      return { ok: true, json: { success: true, totalCount: 45, characters: [{ characterId: id, name: "Wizard", creatorName: "Author", avatar: "portrait.webp", stats: { chat: 12, message: 90, favoritesCount: { favoritesCount: 7 } }, token_counts: { total_tokens: 1200 } }] } };
+    });
+    const r = await drive(stUrl, { method: "POST", path: "/marketplace/search", body: { source: "datacat", search: "wizard", page: 2, first: 24, nsfw: false, tagIds: [6, -1, "2"], sort: "score" } }, m);
+    expect(r.status).toBe(200);
+    expect(r.__llmPending).toBeUndefined();
+    expect(r.json).toMatchObject({ count: 45, page: 2 });
+    expect((r.json.results as object[])[0]).toMatchObject({ id, chats: 12, favorites: 7, downloads: null, tokens: 1200, avatar: "https://ella.janitorai.com/bot-avatars/portrait.webp" });
+    expect(JSON.stringify(r.json)).not.toContain("private-token");
+  });
+  it("returns tags and full preview fields without requesting a gated download", async () => {
+    const m = mockHost(undefined, (key, req) => {
+      if (key === "identify") return { ok: true, json: { sessionToken: "token" } };
+      expect(String(req.url)).not.toContain("/download");
+      if (String(req.url).includes("/tags/")) return { ok: true, json: { success: true, tags: [{ id: 6, name: "Fantasy", count: 43 }] } };
+      return { ok: true, json: { success: true, character: { chara_card_v2_json: { data: { first_mes: "Hello", description: "Mage", alternate_greetings: ["Hi"], character_book: { entries: [{ content: "Lore" }] } } } } } };
+    });
+    expect((await drive(stUrl, { method: "POST", path: "/marketplace/tags", body: { source: "datacat" } }, m)).json.tags).toEqual([{ id: 6, tag: "Fantasy", n: 43 }]);
+    const previewMock = mockHost(undefined, (key) => key === "identify" ? { ok: true, json: { sessionToken: "token" } } : { ok: true, json: { success: true, character: { chara_card_v2_json: { data: { first_mes: "Hello", description: "Mage", alternate_greetings: ["Hi"], character_book: { entries: [{ content: "Lore" }] } } } } } });
+    const preview = await drive(stUrl, { method: "POST", path: "/marketplace/detail", body: { source: "datacat", id } }, previewMock);
+    expect(preview.json).toMatchObject({ greeting: "Hello", personality: "Mage", alternateGreetings: ["Hi"], lorebookEntries: 1 });
+  });
+  it("rejects invalid ids before networking and surfaces failed or malformed responses", async () => {
+    const m = mockHost();
+    expect((await drive(stUrl, { method: "POST", path: "/marketplace/detail", body: { source: "datacat", id: "../../secret" } }, m)).status).toBe(400);
+    expect(m.netRequests).toHaveLength(0);
+    expect((await drive(stUrl, { method: "POST", path: "/marketplace/search", body: { source: "datacat" } }, m)).status).toBe(502);
+    const broken = mockHost(undefined, (key) => key === "identify" ? { ok: true, json: { sessionToken: "token" } } : { ok: true, json: { success: true, characters: [] } });
+    expect((await drive(stUrl, { method: "POST", path: "/marketplace/search", body: { source: "datacat" } }, broken)).status).toBe(502);
+  });
+  it("records actual import time and preserves other studio fields", async () => {
+    const start = Date.now();
+    const r = await drive(stUrl, { method: "POST", path: "/import/batch", body: { cards: [{ name: "Imported", studio: { createdAt: 100, favorite: true } }] } }, mockHost());
+    const id = (r.json.characters as string[])[0]!;
+    const card = JSON.parse(fs.readFileSync(path.join(root, "characters", id, "card.json"), "utf8"));
+    expect(card.studio.importedAt).toBeGreaterThanOrEqual(start);
+    expect(card.studio.importedAt).toBeLessThanOrEqual(Date.now());
+    expect(card.studio).toMatchObject({ createdAt: 100, favorite: true });
+  });
+});
+
+it("PNG imports decode UTF-8 quotation marks, names and emoji on the backend", async () => {
+  const card = { name: "Élodie 綾", first_mes: "She didn’t say ‘no’. 🙂", description: "Café — 夜" };
+  const text = Buffer.from("chara\0" + Buffer.from(JSON.stringify(card), "utf8").toString("base64"), "ascii");
+  const png = Buffer.alloc(8 + 12 + text.length);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+  png.writeUInt32BE(text.length, 8);
+  png.write("tEXt", 12);
+  text.copy(png, 16);
+  const r = await drive(stUrl, { method: "POST", path: "/import/batch", body: { cards: [{ pngBase64: png.toString("base64") }] } }, mockHost());
+  expect(r.status).toBe(200);
+  const id = (r.json.characters as string[])[0]!;
+  expect(JSON.parse(fs.readFileSync(path.join(root, "characters", id, "card.json"), "utf8"))).toMatchObject(card);
+});
+
+it("PNG imports preserve uncompressed international text chunks", async () => {
+  for (const keyword of ["chara", "ccv3"]) {
+    const card = { name: "Élodie", first_mes: "Hello 🙂" };
+    const json = JSON.stringify(card);
+    const payload = keyword === "chara" ? Buffer.from(json).toString("base64") : json;
+    const text = Buffer.from(keyword + "\0\0\0\0\0" + payload, "utf8");
+    const png = Buffer.alloc(8 + 12 + text.length);
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png);
+    png.writeUInt32BE(text.length, 8);
+    png.write("iTXt", 12);
+    text.copy(png, 16);
+    const r = await drive(stUrl, { method: "POST", path: "/import/batch", body: { cards: [{ pngBase64: png.toString("base64") }] } }, mockHost());
+    expect(r.status).toBe(200);
+    const id = (r.json.characters as string[])[0]!;
+    expect(JSON.parse(fs.readFileSync(path.join(root, "characters", id, "card.json"), "utf8"))).toMatchObject(card);
+  }
+});

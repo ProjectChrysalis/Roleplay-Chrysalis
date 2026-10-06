@@ -48,6 +48,7 @@ export interface Character {
   favorite: boolean
   folderId: ID | null
   createdAt: number
+  importedAt?: number
   lastChatAt: number
   embeddedLorebookId: ID | null
   linkedLorebookIds: ID[]
@@ -607,6 +608,7 @@ export interface ConnectionProfile {
 
 // ── Settings ──
 export interface AppSettings {
+  characterBrowser?: { grid: boolean; sort: import('./character-browser').CharacterSort }
   themeMode: 'dark' | 'light'
   activeThemeId: ID
   displayMode: 'bubbles' | 'flat' | 'minimal' | 'document'

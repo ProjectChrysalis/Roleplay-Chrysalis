@@ -15,6 +15,7 @@ import { uid } from './tokens'
 import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT, GENERATION_TYPES, normalizeCache } from './seed'
 import { DEFAULT_AVATAR, storedMediaUrl } from './utils'
 import { saveFile } from './export'
+import { extractCharaFromPng } from './import-shapes'
 
 // frame URL is /app/<user>/<app>/ (cookieless sandboxed origin)
 export const APP_ID = decodeURIComponent(location.pathname.split('/').filter(Boolean)[2] ?? 'roleplay')
@@ -619,7 +620,8 @@ export function cardToCharacter(card: EngineCard, id: string, lastChatAt = 0): C
     favorite: studio.favorite ?? false,
     folderId: studio.folderId ?? null,
     createdAt: studio.createdAt ?? 0,
-    lastChatAt: studio.lastChatAt ?? lastChatAt,
+    importedAt: studio.importedAt,
+    lastChatAt: Math.max(studio.lastChatAt ?? 0, lastChatAt),
     embeddedLorebookId: studio.embeddedLorebookId ?? null,
     linkedLorebookIds: studio.linkedLorebookIds ?? [],
     colors: studio.colors ?? { name: '', dialogue: '', bubble: '' },
@@ -665,7 +667,7 @@ export function characterToCard(c: Character): EngineCard {
     ...c.cardExtras,
     studio: {
       avatar: c.avatar, altAvatars: c.altAvatars, depthPrompt: c.depthPrompt,
-      favorite: c.favorite, folderId: c.folderId, createdAt: c.createdAt, lastChatAt: c.lastChatAt,
+      favorite: c.favorite, folderId: c.folderId, createdAt: c.createdAt, importedAt: c.importedAt, lastChatAt: c.lastChatAt,
       embeddedLorebookId: c.embeddedLorebookId, linkedLorebookIds: c.linkedLorebookIds,
       colors: c.colors, stats: c.stats, descVariants: c.descVariants,
       personalityVariants: c.personalityVariants, scenarioVariants: c.scenarioVariants,
@@ -1347,47 +1349,7 @@ export function downloadBlob(base64: string, filename: string, mime = 'applicati
   saveFile(new Blob([bytes], { type: mime }), filename)
 }
 
-// ---------- PNG character-card extraction (browser side, own parser) ----------
-function latin1(bytes: Uint8Array, from: number, to: number): string {
-  let s = ''
-  for (let i = from; i < to; i++) s += String.fromCharCode(bytes[i]!)
-  return s
-}
-function b64ToLatin1(b64: string): string {
-  const clean = b64.replace(/[^A-Za-z0-9+/]/g, '')
-  let s = ''
-  for (let i = 0; i < clean.length; i += 4) {
-    const table = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-    const n =
-      (table.indexOf(clean[i]!) << 18) |
-      (table.indexOf(clean[i + 1] ?? 'A') << 12) |
-      ((table.indexOf(clean[i + 2] ?? 'A') & 63) << 6) |
-      (table.indexOf(clean[i + 3] ?? 'A') & 63)
-    s += String.fromCharCode((n >> 16) & 255)
-    if (clean[i + 2] && clean[i + 2] !== '=') s += String.fromCharCode((n >> 8) & 255)
-    if (clean[i + 3] && clean[i + 3] !== '=') s += String.fromCharCode(n & 255)
-  }
-  return s
-}
 export async function extractCardFromPng(file: File): Promise<object | null> {
-  const b = new Uint8Array(await file.arrayBuffer())
-  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
-  for (let i = 0; i < 8; i++) if (b[i] !== sig[i]) return null
-  let off = 8
-  while (off + 8 <= b.length) {
-    const len = (b[off]! << 24) | (b[off + 1]! << 16) | (b[off + 2]! << 8) | b[off + 3]!
-    const type = latin1(b, off + 4, off + 8)
-    if (type === 'tEXt') {
-      const nul = b.indexOf(0, off + 8)
-      if (nul > 0 && nul < off + 8 + len) {
-        const keyword = latin1(b, off + 8, nul)
-        if (keyword === 'ccv3' || keyword === 'chara') {
-          try { return JSON.parse(b64ToLatin1(latin1(b, nul + 1, off + 8 + len))) } catch { /* next chunk */ }
-        }
-      }
-    }
-    off += 12 + len
-    if (type === 'IEND') break
-  }
-  return null
+  const card = await extractCharaFromPng(file)
+  return card && typeof card === 'object' ? card as object : null
 }
