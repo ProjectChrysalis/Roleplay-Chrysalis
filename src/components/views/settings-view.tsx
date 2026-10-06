@@ -1,3 +1,4 @@
+import { importArchiveWithProgress } from "@/lib/archive-import"
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Archive, BookOpen, MagnifyingGlass, Check, DownloadSimple, UploadSimple, Trash, FileCode, FileImage, FileText, Asterisk as RegexIcon } from '@phosphor-icons/react'
@@ -23,7 +24,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { MasterDetail } from "@/components/shell/master-detail"
 import type { AppSettings } from "@/lib/types"
 import { extractCharaFromPng, regexImport } from "@/lib/interop"
-import { downloadBlob, fileToRawBase64, importLorebookFiles, j } from "@/lib/engine"
+import { downloadBlob, importLorebookFiles, j } from "@/lib/engine"
 import { cn } from "@/lib/utils"
 
 type ControlDef =
@@ -376,10 +377,7 @@ function STImportSection() {
           cards.push(json)
         } else if (lower.endsWith(".charx")) {
           // a charx package IS a zip with card.json — the plugin unpacks it
-          const r = await j<Record<string, unknown>>("/import/zip", {
-            method: "POST",
-            body: JSON.stringify({ zipBase64: await fileToRawBase64(file) }),
-          })
+          const r = await importArchiveWithProgress(file)
           const got = (r.characters as string[] | undefined)?.length ?? 0
           if (got) toast.success(`${file.name}: card imported`)
           else toast.error(`${file.name}: no card.json in package`)
@@ -395,7 +393,7 @@ function STImportSection() {
           }
           cards.push(json)
         }
-      } catch { toast.error(`${file.name}: could not parse`) }
+      } catch (e) { if ((e as Error).name !== "AbortError") toast.error(`${file.name}: could not parse`) }
     }
     if (cards.length) {
       try {
@@ -405,7 +403,7 @@ function STImportSection() {
         const nScripts = r.regex?.length ?? 0
         toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? "" : "s"}${nScripts ? `, ${nScripts} regex script${nScripts === 1 ? "" : "s"}` : ""}`)
         await useApp.getState().hydrate()
-      } catch (e) { toast.error(String((e as Error).message ?? e)) }
+      } catch (e) { if ((e as Error).name !== "AbortError") toast.error(String((e as Error).message ?? e)) }
     }
   }
 
@@ -472,16 +470,14 @@ function STImportSection() {
     const f = files?.[0]
     if (!f) return
     try {
-      const r = await j<Record<string, unknown>>("/import/zip", {
-        method: "POST",
-        body: JSON.stringify({ zipBase64: await fileToRawBase64(f) }),
-      })
-      const parts = Object.entries(r)
-        .filter(([, v]) => Array.isArray(v) && v.length)
-        .map(([k, v]) => `${(v as unknown[]).length} ${k}`)
+      const r = await importArchiveWithProgress(f)
+      const parts = Object.entries(r.counts ?? r)
+        .filter(([key, v]) => key !== "errors" && ((typeof v === "number" && v > 0) || (Array.isArray(v) && v.length)))
+        .map(([k, v]) => `${typeof v === "number" ? v : (v as unknown[]).length} ${k}`)
       toast.success(parts.length ? `Imported ${parts.join(", ")}` : "Nothing recognized in that zip")
       await useApp.getState().hydrate()
     } catch (e) {
+      if ((e as Error).name === "AbortError") return
       toast.error(String((e as Error).message ?? e))
     }
   }
@@ -550,24 +546,23 @@ function DataSection() {
       downloadBlob(r.base64, r.filename)
       toast.success("Backup exported", { description: r.filename })
     } catch (e) {
+      if ((e as Error).name === "AbortError") return
       toast.error(String((e as Error).message ?? e))
     } finally { setBusy(false) }
   }
 
-  /** Restore: the zip goes back through the studio-import plugin, which
-   *  re-imports every entry it understands (PNG cards excluded — binary). */
+  /** Restore uses bounded archive batches to keep memory independent of archive size. */
   const handleImport = async (files: FileList | null) => {
     const file = files?.[0]
     if (!file) return
     setBusy(true)
     try {
-      const summary = await j<{ characters: string[]; lorebooks: string[]; presets: string[]; regex: string[]; personas: string[]; chats: string[]; databank?: string[]; errors: string[] }>("/import/zip", {
-        method: "POST", body: JSON.stringify({ zipBase64: await fileToRawBase64(file) }),
-      })
-      const n = summary.characters.length + summary.lorebooks.length + summary.presets.length + summary.regex.length + summary.personas.length + summary.chats.length + (summary.databank?.length ?? 0)
-      toast.success(`Restored ${n} items`, { description: summary.errors.length ? `${summary.errors.length} skipped (incl. PNG cards, import those from Characters → Import)` : undefined })
+      const summary = await importArchiveWithProgress(file)
+      const n = summary.counts ? Object.entries(summary.counts).reduce((total, [key, value]) => total + (key === "errors" ? 0 : value), 0) : summary.characters.length + summary.lorebooks.length + summary.presets.length + summary.regex.length + summary.personas.length + summary.chats.length + summary.databank.length
+      toast.success(`Restored ${n} items`, { description: summary.errors.length ? `${summary.errors.length} skipped` : undefined })
       await hydrate()
     } catch (e) {
+      if ((e as Error).name === "AbortError") return
       toast.error(String((e as Error).message ?? e))
     } finally { setBusy(false) }
   }

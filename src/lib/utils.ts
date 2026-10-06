@@ -11,6 +11,9 @@ export const DEFAULT_AVATAR = `${import.meta.env.BASE_URL}avatar-default.png`
  *  cards, personas and galleries keep their art. Anything else (data: URLs,
  *  /v1/assets, remote) passes through untouched. */
 export function storedMediaUrl(url: string): string {
+  const media = /^\/v1\/apps\/[^/]+\/__media\/([a-f0-9]{64}\.(png|jpeg|webp|gif))$/.exec(url)
+  const app = import.meta.env.BASE_URL.split('/').filter(Boolean)[2]
+  if (media && app) return `/v1/apps/${app}/__media/${media[1]}`
   const m = /^\/app\/[a-z0-9_-]+\/(.+)$/i.exec(url)
   return m ? `${import.meta.env.BASE_URL}${m[1]}` : url
 }

@@ -255,6 +255,23 @@ data/
 └─ personas/<id>.json   user personas
 ```
 
+Card images are stored in `data/__media/<sha256>.<ext>`. Cards, personas and
+other records reference `/v1/apps/<app>/__media/<name>` instead of inline image
+bytes. Image writes deduplicate identical content and remove PNG text metadata.
+The update hook migrates older character cards one at a time; failed migrations
+retain the original card and retry when the library is read. PNG exports carry
+the main image once, while portable JSON and backup exports resolve image refs.
+Keep unknown metadata and timestamps during migration. Never remove shared
+media just because one character was deleted.
+
+Archive imports use the engine's `/__imports` upload jobs: 8 MB raw chunks,
+disk-backed archive indexing, phase-ordered bounded entry batches, progress,
+pause and resume by reselecting the same file. Limits are 32 GB compressed,
+256 GB expanded, one million files, and 64 MB per entry or card package. Large
+entries are reported rather than silently dropped. Temporary name lookups live
+in `data/__lookup/` and are removed after import. Old engines use the legacy
+path only for archives up to 16 MB; larger imports request an engine update.
+
 Characters: alternates, versions, character-wide selection. Exact shapes:
 - `card.studio.descVariants` / `personalityVariants` / `scenarioVariants`:
   `[{ id: "var_…", label, content }]`. The card's base `description` /

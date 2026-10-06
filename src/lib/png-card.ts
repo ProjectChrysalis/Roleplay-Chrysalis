@@ -1,5 +1,6 @@
 import type { EngineCard } from './engine'
 import { saveFile } from './export'
+import { portableMedia } from './media-export'
 
 // PNG character-card EXPORT — the mirror of the tEXt 'chara' importer in
 // engine.ts. Re-encodes the character's avatar as a PNG on a canvas, then
@@ -58,7 +59,11 @@ export async function buildCardPng(imageDataUrl: string, card: EngineCard): Prom
   })
   const base = Uint8Array.from(atob(pngUrl.slice(pngUrl.indexOf(',') + 1)), (c) => c.charCodeAt(0))
 
-  const payload = b64(JSON.stringify(card))
+  const metadata: EngineCard = { ...card, studio: { ...card.studio } }
+  delete metadata.avatar
+  delete metadata.studio!.avatar
+  if (Array.isArray(metadata.assets)) metadata.assets = (metadata.assets as Array<Record<string, unknown>>).map((asset) => asset.type === 'icon' && asset.name === 'main' ? { ...asset, uri: 'ccdefault:' } : asset)
+  const payload = b64(JSON.stringify(await portableMedia(metadata)))
   const text = latin1Bytes('chara\0' + payload)
   const chunk = new Uint8Array(12 + text.length)
   const dv = new DataView(chunk.buffer)

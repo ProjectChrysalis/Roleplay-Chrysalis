@@ -1,3 +1,4 @@
+import { importArchiveWithProgress } from "@/lib/archive-import"
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Check, Flag, GitBranch, ChatCenteredText, PencilSimple, Trash, ArrowElbowDownRight, BookmarkSimple, FileText, FileCode, UploadSimple, BoxArrowUp } from '@phosphor-icons/react'
@@ -13,7 +14,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { useApp } from "@/lib/store"
 import { saveFile } from "@/lib/export"
-import { fileToRawBase64, j } from "@/lib/engine"
+import { j } from "@/lib/engine"
 import type { Chat, ID } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -333,16 +334,13 @@ export function ManageChatsDialog({
     const f = files?.[0]
     if (!f) return
     try {
-      const r = await j<Record<string, unknown>>("/import/zip", {
-        method: "POST",
-        body: JSON.stringify({ zipBase64: await fileToRawBase64(f) }),
-      })
-      const parts = Object.entries(r)
-        .filter(([, v]) => Array.isArray(v) && v.length)
-        .map(([k, v]) => `${(v as unknown[]).length} ${k}`)
+      const r = await importArchiveWithProgress(f)
+      const parts = Object.entries(r.counts ?? r)
+        .filter(([key, v]) => key !== "errors" && ((typeof v === "number" && v > 0) || (Array.isArray(v) && v.length)))
+        .map(([k, v]) => `${typeof v === "number" ? v : (v as unknown[]).length} ${k}`)
       toast.success(parts.length ? `Imported ${parts.join(", ")}` : "Nothing recognized in that zip")
       await hydrate()
-    } catch (e) { toast.error(String((e as Error).message ?? e)) }
+    } catch (e) { if ((e as Error).name !== "AbortError") toast.error(String((e as Error).message ?? e)) }
   }
 
   // Build root list + fork tree for this character

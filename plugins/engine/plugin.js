@@ -1948,6 +1948,26 @@ export function onAppUpdate(ctx, host) {
   const fsx = host.fs;
   const from = ctx && typeof ctx.from === "string" ? ctx.from : "0.0.0";
   const done = [];
+  if (fsx.media && olderThan(from, "4.20.0")) {
+    let ids = [];
+    try { ids = fsx.list("characters"); } catch { /* no saved cards */ }
+    let migrated = 0, deferred = 0;
+    const startedAt = Date.now();
+    for (const [index, id] of ids.entries()) {
+      if (Date.now() - startedAt > 5000) { deferred += ids.length - index; break; }
+      const rel = "characters/" + id + "/card.json";
+      const card = readJsonFile(fsx, rel);
+      if (!card) continue;
+      try {
+        const stored = storeMedia(card, fsx);
+        if (JSON.stringify(stored) === JSON.stringify(card)) continue;
+        writeJsonFile(fsx, rel, stored);
+        migrated++;
+      } catch { deferred++; }
+    }
+    if (migrated) done.push("character media: " + migrated);
+    if (deferred && host.log) host.log("Character media migration deferred for " + deferred + " cards. Original cards were retained.");
+  }
   if (olderThan(from, "4.18.2")) {
     let files = [];
     try { files = fsx.list("presets").filter((f) => f.endsWith(".json")); } catch { files = []; }
@@ -1993,6 +2013,29 @@ export function onAppUpdate(ctx, host) {
   return { upgraded: done };
 }
 
+function storeMedia(value, fsx) {
+  if (!fsx.media) return value;
+  if (typeof value === "string") return /^data:image\/(png|jpeg|webp|gif);base64,/.test(value) ? fsx.media(value) : value;
+  if (Array.isArray(value)) return value.map((item) => storeMedia(item, fsx));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) out[key] = storeMedia(item, fsx);
+  if (out.studio && out.studio.avatar === out.avatar) delete out.studio.avatar;
+  return out;
+}
+
+function portableMedia(value, fsx) {
+  if (typeof value === "string") {
+    const match = /^\/v1\/apps\/[^/]+\/__media\/([a-f0-9]{64}\.(png|jpeg|webp|gif))$/.exec(value);
+    return match ? "data:image/" + match[2] + ";base64," + fsx.readBase64("__media/" + match[1]) : value;
+  }
+  if (Array.isArray(value)) return value.map((item) => portableMedia(item, fsx));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) out[key] = portableMedia(item, fsx);
+  return out;
+}
+
 export function handleRoute(req, host) {
   const fsx = host.fs;
   const seg = req.path.split("?")[0].split("/").filter(Boolean);
@@ -2007,7 +2050,7 @@ export function handleRoute(req, host) {
     return err(400, "invalid id");
   }
   const readJson = (rel, fb) => { try { return JSON.parse(fsx.read(rel)); } catch { return fb; } };
-  const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(v, null, 2) + "\n");
+  const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(storeMedia(v, fsx), null, 2) + "\n");
   const body = () => (req.body && typeof req.body === "object" ? req.body : {});
   const touch = (meta) => { meta.updatedAt = Date.now(); return meta; };
 
@@ -2057,14 +2100,22 @@ export function handleRoute(req, host) {
       const out = [];
       for (const cid of ids) {
         const c = readJson("characters/" + cid + "/card.json", null);
-        if (c) out.push({ ...c, id: cid, name: c.name, avatar: c.avatar || null, tags: c.tags || [], version: c.spec || "chara_card_v2" });
+        if (c) {
+          let stored = c;
+          try {
+            const migrated = storeMedia(c, fsx);
+            if (JSON.stringify(migrated) !== JSON.stringify(c)) writeJson("characters/" + cid + "/card.json", migrated);
+            stored = migrated;
+          } catch { /* original card remains readable until migration can finish */ }
+          out.push({ ...stored, id: cid, name: c.name, avatar: stored.avatar || null, tags: c.tags || [], version: c.spec || "chara_card_v2" });
+        }
       }
       return ok({ characters: out });
     }
     if (!id) return err(400, "character id required");
     if (req.method === "GET") {
       const card = readJson("characters/" + id + "/card.json", null);
-      return card ? ok({ ...card, id }) : err(404, "not found");
+      return card ? ok({ ...(op === "portable" ? portableMedia(card, fsx) : card), id }) : err(404, "not found");
     }
     if (req.method === "PUT") {
       const b = body();
@@ -2294,7 +2345,7 @@ export function handleRoute(req, host) {
         const card = readJson("characters/" + cid + "/card.json", null);
         if (!card) continue;
         const file = uname(slug(card.name || cid), ".json");
-        files.push({ name: "characters/" + file, text: JSON.stringify(card, null, 2) });
+        files.push({ name: "characters/" + file, text: JSON.stringify(portableMedia(card, fsx), null, 2) });
         chars.push({ id: cid, slug: file.replace(/\.json$/, ""), name: card.name });
       }
     } catch {}
@@ -2520,7 +2571,7 @@ export function handleRoute(req, host) {
       }, null, 2),
     });
     files.push({ name: "library.json", text: JSON.stringify(readJson("library.json", {}), null, 2) });
-    return ok({ filename: "studio-backup-" + new Date().toISOString().slice(0, 10) + ".zip", base64: buildZip(files) });
+    return ok({ filename: "studio-backup-" + new Date().toISOString().slice(0, 10) + ".zip", base64: buildZip(files.map((file) => { if (!/\.json$/.test(file.name)) return file; try { return { ...file, text: JSON.stringify(portableMedia(JSON.parse(file.text), fsx)) }; } catch { return file; } })) });
   }
 
     // translate: LLM or provider-proxy translation (message menu, composer).

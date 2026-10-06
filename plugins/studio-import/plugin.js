@@ -1,14 +1,7 @@
 /**
  * Studio Import — clean-room data import against public file formats.
- * Two entry points:
- *   POST /import/batch { cards?, worldInfo?, presets?, regex?, personas?, themes?, chats? }
- *     The UI cracks archives open in the browser (it can see PNG binaries,
- *     the sandbox cannot) and posts parsed JSON here.
- *   POST /import/zip   { zipBase64 }
- *     Text-entry archives (worlds, presets, regex, personas, chats, JSON
- *     cards) handled plugin-side via the kernel zip service; PNG binaries are
- *     reported for the /import/batch path.
- * Zero external code — formats from public documentation only.
+ * Parsed files use /import/batch. Archives use /import/zip with bounded
+ * entry batches supplied by the engine's file-backed upload service.
  */
 
 // ---------- PNG card extraction (own parser) ----------
@@ -103,7 +96,7 @@ const ROOT_FILES = new Set(["card.json", "settings.json", "personas.json", "libr
 function normalizeEntryName(raw) {
   const segs = String(raw).split("/").filter((s) => s && s !== ".");
   for (let i = 0; i < segs.length - 1; i++) {
-    if (COLLECTION_DIRS.has(segs[i].toLowerCase())) return segs.slice(i).join("/");
+    if (COLLECTION_DIRS.has(segs[i].toLowerCase())) return [segs[i].toLowerCase() === "user settings" ? "User Settings" : segs[i].toLowerCase(), ...segs.slice(i + 1)].join("/");
   }
   const base = segs[segs.length - 1] || String(raw);
   return ROOT_FILES.has(base.toLowerCase()) ? base : String(raw);
@@ -164,16 +157,17 @@ function normalizeCard(raw, avatarDataUrl) {
 function resolveCardAssets(card, assetDict, sourceAvatar) {
   const out = { avatar: null, expressions: [] };
   const assets = Array.isArray(card && card.assets) ? card.assets : [];
-  const MAX_AVATAR = 900 * 1024;
-  const MAX_EMOTION = 700 * 1024;
+  const MAX_AVATAR = 90 * 1024 * 1024;
+  const MAX_EMOTION = 90 * 1024 * 1024;
   for (const a of assets) {
     if (!a || typeof a !== "object" || typeof a.uri !== "string") continue;
     let url = null;
     if (a.uri.startsWith("__asset:") || a.uri.startsWith("embeded://")) {
       const b64 = assetDict[a.uri.replace(/^(?:__asset:|embeded:\/\/)/, "")];
-      if (b64) url = "data:image/" + (a.ext === "webp" ? "webp" : a.ext === "jpeg" || a.ext === "jpg" ? "jpeg" : "png") + ";base64," + b64;
+      if (b64 && b64.startsWith("/v1/apps/")) url = b64;
+      else if (b64) url = "data:image/" + (a.ext === "webp" ? "webp" : a.ext === "jpeg" || a.ext === "jpg" ? "jpeg" : "png") + ";base64," + b64;
     } else if (a.uri === "ccdefault:") {
-      url = sourceAvatar && sourceAvatar.startsWith("data:") ? sourceAvatar : null;
+      url = typeof sourceAvatar === "string" ? sourceAvatar : null;
     } else if (a.uri.startsWith("data:")) {
       url = a.uri;
     }
@@ -598,10 +592,21 @@ function datacatRoute(req, host) {
   return { status: 200, json: { source: "datacat", count: data.totalCount, page: req.stash.page, first: req.stash.first, results: listings } };
 }
 
+function storeMedia(value, fsx) {
+  if (!fsx.media) return value;
+  if (typeof value === "string") return /^data:image\/(png|jpeg|webp|gif);base64,/.test(value) ? fsx.media(value) : value;
+  if (Array.isArray(value)) return value.map((item) => storeMedia(item, fsx));
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) out[key] = storeMedia(item, fsx);
+  if (out.studio && out.studio.avatar === out.avatar) delete out.studio.avatar;
+  return out;
+}
+
 export function handleRoute(req, host) {
   if (req.method !== "POST") return null;
   if (req.path.startsWith("/marketplace/") && req.body?.source === "datacat" && ["/marketplace/search", "/marketplace/detail", "/marketplace/tags"].includes(req.path)) return datacatRoute(req, host);
-  if (req.path !== "/import/batch" && req.path !== "/import/zip" && req.path !== "/import/url" && req.path !== "/marketplace/search" && req.path !== "/marketplace/detail") return null;
+  if (req.path !== "/import/batch" && req.path !== "/import/zip" && req.path !== "/import/url" && req.path !== "/import/finish" && req.path !== "/marketplace/search" && req.path !== "/marketplace/detail") return null;
   // ---------- Marketplace search (chub.ai today; source id keeps the
   // client shape ready for more storefronts) ----------
   // gateway.chub.ai/search is the catalog the chub frontend itself queries —
@@ -776,9 +781,10 @@ export function handleRoute(req, host) {
   }
 
   const fsx = host.fs;
-  const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(v, null, 2) + "\n");
+  const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(storeMedia(v, fsx), null, 2) + "\n");
   const readJson = (rel, fb) => { try { return JSON.parse(fsx.read(rel)); } catch { return fb; } };
   const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], databank: [], errors: [] };
+  let characterNames = null;
   const used = new Set();
   // Id collision guard: dedupes within THIS import batch AND against what
   // already exists on disk — re-importing the same card must never silently
@@ -884,6 +890,8 @@ export function handleRoute(req, host) {
     card.studio = { ...card.studio, createdAt: card.studio?.createdAt || importedAt, importedAt };
     writeJson("characters/" + id + "/card.json", card);
     summary.characters.push(id);
+    if (req.body?.importId && fsx.lookup) { fsx.lookup(req.body.importId + "_characters", String(card.name).toLowerCase(), id); fsx.lookup(req.body.importId + "_characters", slug(card.name), id); }
+    if (characterNames) characterNames.set(String(card.name).toLowerCase(), id);
     // regex scripts a card carries run for that character only
     const embedded = card.extensions && Array.isArray(card.extensions.regex_scripts) ? card.extensions.regex_scripts : [];
     embedded.forEach((raw, i) => {
@@ -930,15 +938,22 @@ export function handleRoute(req, host) {
   }
   // Ids are re-minted on the way in, so anything that pointed at an id in the
   // backup has to be re-pointed by NAME. These record what each name became.
-  const bookIdByName = new Map();
-  const presetIdByName = new Map();
-  const personaIdByName = new Map();
+  const importId = /^[a-f0-9-]{36}$/.test(String(req.body?.importId || "")) ? req.body.importId : null;
+  const lookup = (collection) => importId && fsx.lookup ? { get: (key) => fsx.lookup(importId + "_" + collection, key), set: (key, value) => fsx.lookup(importId + "_" + collection, key, value) } : new Map();
+  const bookIdByName = lookup("books");
+  const presetIdByName = lookup("presets");
+  const personaIdByName = lookup("personas");
+  const groupIdByName = lookup("groups");
+
   const charIdByName = () => {
+    if (importId && fsx.lookup) return lookup("characters");
+    if (characterNames) return characterNames;
     const m = new Map();
+    characterNames = m;
     try {
       for (const cid of fsx.list("characters")) {
         const card = readJson("characters/" + cid + "/card.json", null);
-        if (card && card.name) m.set(String(card.name).toLowerCase(), cid);
+        if (card && card.name) { m.set(String(card.name).toLowerCase(), cid); m.set(slug(card.name), cid); }
       }
     } catch {}
     return m;
@@ -1122,11 +1137,19 @@ export function handleRoute(req, host) {
     return { status: 200, json: summary };
   }
 
-  // ---------- plugin-side zip (text entries only) ----------
+  if (req.path === "/import/finish") {
+    const id = String(req.body?.importId || "");
+    if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
+    for (const collection of ["characters", "books", "presets", "personas", "groups"]) fsx.remove("__lookup/" + id + "_" + collection);
+    return { status: 200, json: { ok: true } };
+  }
+
+  // ---------- bounded archive entries ----------
   if (req.path === "/import/zip") {
     const rawEntries = host.zip.entries();
     const entries = {};
     const names = Object.keys(rawEntries);
+    const originalNames = {};
     const isText = (v) => typeof v === "string";
 
     // Foreign backup layouts normalize to our tree first. The old rule matched
@@ -1139,7 +1162,7 @@ export function handleRoute(req, host) {
     for (const raw of names) {
       if (raw.endsWith(".charx")) continue; // handled as files, not zips
       const name = normalizeEntryName(raw);
-      if (entries[name] === undefined) entries[name] = rawEntries[raw];
+      if (entries[name] === undefined) { entries[name] = rawEntries[raw]; originalNames[name] = raw; }
     }
 
     // charx package: card.json at the root + assets/ entries the card
@@ -1150,6 +1173,7 @@ export function handleRoute(req, host) {
         for (const name of Object.keys(entries)) {
           const b64 = entryBase64(entries[name]);
           if (b64) assetDict[name] = b64;
+          else if (entries[name]?.__image__ && host.zip.image) assetDict[name] = host.zip.image(originalNames[name]).url;
         }
         const parsed = JSON.parse(entries["card.json"]);
         const card = normalizeCard(parsed);
@@ -1176,7 +1200,7 @@ export function handleRoute(req, host) {
     // The flat {name: description} map is the lowest common denominator; skip
     // it when the zip also carries full persona records, or every persona
     // would be imported twice — once whole, once as a bare name.
-    const hasFullPersonas = Object.keys(entries).some((n) => n.startsWith("personas/") && n.endsWith(".json"));
+    const hasFullPersonas = (Number(req.body?.collections?.["personas/"]) > 0) || Object.keys(entries).some((n) => n.startsWith("personas/") && n.endsWith(".json"));
     for (const flat of ["User Settings/personas.json", "personas.json"]) {
       if (hasFullPersonas || !isText(entries[flat])) continue;
       try {
@@ -1212,11 +1236,27 @@ export function handleRoute(req, host) {
     };
     const orderedNames = Object.keys(entries).sort((a, b) => phaseOf(a) - phaseOf(b) || (a < b ? -1 : a > b ? 1 : 0));
     for (const name of orderedNames) {
+      if (entries[name]?.error) { summary.errors.push(name + ": " + entries[name].error); continue; }
       // A card PNG lives in characters/, or loose at the root when someone
       // zipped a pile of cards. Anywhere else (persona and user avatars,
       // backgrounds, sprites) a .png is just a picture — reading it as a
       // failed card would bury the real errors in noise.
       if (name.endsWith(".png") && (name.startsWith("characters/") || !name.includes("/"))) {
+        if (entries[name]?.__image__ && host.zip.image) {
+          try {
+            const image = host.zip.image(originalNames[name]);
+            let rawCard = null;
+            for (const key of ["ccv3", "chara"]) {
+              const payload = image.metadata[key];
+              if (!payload) continue;
+              try { rawCard = JSON.parse(payload.trimStart().startsWith("{") ? payload : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)))); break; } catch { /* try the next metadata field */ }
+            }
+            const card = rawCard && normalizeCard(rawCard);
+            if (card) { card.avatar = image.url; writeCardWithBook(card, rawCard, null, image.url); }
+            else if (name.startsWith("characters/")) summary.errors.push("png card without embedded data: " + name);
+          } catch (error) { summary.errors.push("png card failed: " + name + ": " + String(error.message || error)); }
+          continue;
+        }
         const b64 = entryBase64(entries[name]);
         if (b64) {
           const rawCard = cardFromPngBase64(b64);
@@ -1277,22 +1317,17 @@ export function handleRoute(req, host) {
           const g = JSON.parse(entries[name]);
           // characters were re-created under name-derived ids — remap each
           // member by original id first, then by the exported _memberNames
-          const memberIds = (g.memberIds || []).map((mid, i) => {
-            if (fsx.list("characters").includes(mid)) return mid;
-            const nm = (g._memberNames || [])[i];
-            if (!nm) return null;
-            try {
-              for (const cid of fsx.list("characters")) {
-                const card = readJson("characters/" + cid + "/card.json", null);
-                if (card && card.name === nm) return cid;
-              }
-            } catch {}
-            return null;
-          }).filter(Boolean);
+          const resolvedMembers = (g.memberIds || g.members || []).map((mid, i) => {
+            if (taken("characters/" + mid + "/card.json")) return mid;
+            const nm = (g._memberNames || [])[i] || String(mid).replace(/\.png$/i, "");
+            return nm ? charIdByName().get(lower(nm)) || charIdByName().get(slug(nm)) || null : null;
+          });
+          const memberIds = resolvedMembers.filter(Boolean);
           // the id lands in the write path: slug it like every other collection
           // so a crafted backup cannot climb out of groups/
-          const gid = typeof g.id === "string" && g.id ? slug(g.id) : uid(slug(g.name || "group"), "groups");
-          writeJson("groups/" + gid + ".json", { id: gid, name: g.name || gid, memberIds, mode: g.mode || "natural", mutedIds: g.mutedIds || [] });
+          const gid = uid(slug(g.name || g.id || "group"), "groups");
+          writeJson("groups/" + gid + ".json", { ...g, id: gid, name: g.name || gid, memberIds, mode: g.mode || "natural", mutedIds: (g.mutedIds || []).map((mid) => { const index = (g.memberIds || g.members || []).indexOf(mid); return index >= 0 ? resolvedMembers[index] : null; }).filter(Boolean) });
+          for (const key of [g.name, g.id, g.chat_id, gid]) if (key) { groupIdByName.set(lower(key), gid); groupIdByName.set(slug(key), gid); }
           summary.groups.push(gid);
         } catch { summary.errors.push("group failed: " + name); }
         continue;
@@ -1326,11 +1361,11 @@ export function handleRoute(req, host) {
         } catch { summary.errors.push("preset failed: " + name); }
         continue;
       }
-      if (name.startsWith("chats/") && name.endsWith(".jsonl") && isText(entries[name])) {
+      if ((name.startsWith("chats/") || name.startsWith("group chats/")) && name.endsWith(".jsonl") && isText(entries[name])) {
         try {
           const parts = name.split("/");
-          const character = parts[1] || "";
-          const file = (parts[2] || "chat").replace(/\.jsonl$/i, "");
+          const character = (parts[1] || "").replace(/\.jsonl$/i, "");
+          const file = (parts[2] || parts[1] || "chat").replace(/\.jsonl$/i, "");
           const lines = entries[name].split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
           const n = normalizeChatLines({ character, file, lines });
           // sidecars our own backups write next to the transcript: everything
@@ -1345,17 +1380,11 @@ export function handleRoute(req, host) {
             } catch { /* a bad vault is not worth failing the chat over */ }
           }
           if (n) {
-            let characterId = null;
-            try {
-              for (const cid of fsx.list("characters")) {
-                const card = readJson("characters/" + cid + "/card.json", null);
-                if (card && card.name.toLowerCase() === character.toLowerCase()) { characterId = cid; break; }
-              }
-            } catch {}
+            const characterId = charIdByName().get(lower(character)) || null;
             // folder didn't match a card → it's a group chat (folder is the
             // group name slug, or the group id slug from older exports)
-            let groupId = null;
-            if (!characterId) {
+            let groupId = groupIdByName.get(lower(character)) || groupIdByName.get(slug(character)) || null;
+            if (!characterId && !groupId) {
               try {
                 for (const gf of fsx.list("groups").filter((x) => x.endsWith(".json"))) {
                   const gr = readJson("groups/" + gf, null);
@@ -1371,19 +1400,13 @@ export function handleRoute(req, host) {
             // punctuation); the sidecar has the real one, so only fall back
             // to un-slugging when there is no sidecar to read
             if (saved && typeof saved.title === "string" && saved.title.trim()) n.title = saved.title;
-            else if (ownerName) n.title = ownerName + " — " + unslugTitle(file);
+            else if (ownerName) n.title = ownerName + ": " + unslugTitle(file);
             // group message attribution: engine ids changed on restore —
             // remap each msg.charId by id, then by the speaker name
             if (groupId) {
-              const byId = new Map(), byName = new Map();
-              try {
-                for (const cid of fsx.list("characters")) {
-                  const card = readJson("characters/" + cid + "/card.json", null);
-                  if (card) { byId.set(cid, cid); byName.set(card.name.toLowerCase(), cid); }
-                }
-              } catch {}
+              const byName = charIdByName();
               for (const m of n.msgs) {
-                if (m.charId && byId.has(m.charId)) continue;
+                if (m.charId && taken("characters/" + m.charId + "/card.json")) continue;
                 m.charId = (m.name && byName.get(String(m.name).toLowerCase())) || null;
               }
             }

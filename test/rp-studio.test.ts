@@ -2255,7 +2255,7 @@ describe("rp studio: backup import stays inside its collections", () => {
     (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => 1 };
     const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
     expect(fs.existsSync(path.join(root, "tools", "pwned.json")), `wrote outside groups/: ${JSON.stringify(r.json)}`).toBe(false);
-    expect(fs.existsSync(path.join(root, "groups", "tools-pwned.json"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "groups", "normal-group.json"))).toBe(true);
   }, 30_000);
 });
 
@@ -2996,4 +2996,31 @@ it("PNG imports preserve uncompressed international text chunks", async () => {
     const id = (r.json.characters as string[])[0]!;
     expect(JSON.parse(fs.readFileSync(path.join(root, "characters", id, "card.json"), "utf8"))).toMatchObject(card);
   }
+});
+
+it("upgrades card media without changing metadata and can safely retry or defer a card", async () => {
+  const mod = await import(engineUrl);
+  const m = mockHost();
+  const avatar = "data:image/png;base64,aW1hZ2U=";
+  const card = { name: "Aria", description: "Keep me", avatar, studio: { avatar, favorite: true, importedAt: 123, gallery: [{ url: avatar }], unknownField: { saved: true } }, extensions: { custom: "Keep this too" } };
+  const rel = "characters/aria/card.json";
+  m.host.fs.write(rel, JSON.stringify(card));
+  const url = "/v1/apps/roleplay/__media/" + "a".repeat(64) + ".png";
+  Object.assign(m.host.fs, { media: () => url });
+  expect(mod.onAppUpdate({ from: "4.19.0", to: "4.20.0" }, m.host).upgraded).toContain("character media: 1");
+  const stored = JSON.parse(m.host.fs.read(rel));
+  expect(stored.avatar).toBe(url);
+  expect(stored.studio.avatar).toBeUndefined();
+  expect(stored.studio.gallery[0].url).toBe(url);
+  expect(stored.description).toBe("Keep me");
+  expect(stored.studio.importedAt).toBe(123);
+  expect(stored.studio.favorite).toBe(true);
+  expect(stored.studio.unknownField).toEqual({ saved: true });
+  expect(stored.extensions).toEqual(card.extensions);
+  expect(mod.onAppUpdate({ from: "4.19.0", to: "4.20.0" }, m.host).upgraded).toEqual([]);
+  m.host.fs.write(rel, JSON.stringify(card));
+  Object.assign(m.host.fs, { media: () => { throw new Error("disk full"); } });
+  expect(mod.onAppUpdate({ from: "4.19.0", to: "4.20.0" }, m.host).upgraded).toEqual([]);
+  expect(JSON.parse(m.host.fs.read(rel))).toEqual(card);
+  expect(mod.handleRoute({ method: "GET", path: "/characters", body: null }, m.host).json.characters[0].avatar).toBe(avatar);
 });

@@ -305,9 +305,10 @@ export function CharactersView() {
         {batchMode && selected.length > 0 && (
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             <span className="text-xs text-muted-foreground">{selected.length} selected</span>
-            <Button variant="outline" size="sm" className="h-6 text-xs" onClick={() => {
+            <Button variant="outline" size="sm" className="h-6 text-xs" onClick={async () => {
               const picked = characters.filter((c) => selected.includes(c.id) && !c.isGroup)
-              downloadJson(picked.map((c) => characterToCard(c)), `characters-${picked.length}`)
+              try { await downloadJson(picked.map((c) => characterToCard(c)), `characters-${picked.length}`) }
+              catch (error) { toast.error((error as Error).message); return }
               setSelected([])
               toast.success(`Exported ${picked.length} card${picked.length === 1 ? '' : 's'} as JSON`)
             }}>

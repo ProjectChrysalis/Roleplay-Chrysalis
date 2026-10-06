@@ -192,12 +192,14 @@ export class ApiError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status }
 }
 
-export async function j<T>(path: string, init?: RequestInit & { body?: string; signal?: AbortSignal }): Promise<T> {
+export async function j<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
+  const headers = new Headers(init?.headers)
+  if (!headers.has('content-type')) headers.set('content-type', 'application/json')
   try {
     res = await fetch(API + path, {
       ...init,
-      headers: { 'content-type': 'application/json', ...init?.headers },
+      headers,
     })
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e
@@ -666,7 +668,7 @@ export function characterToCard(c: Character): EngineCard {
     // preserved unknown card-spec fields go back where they came from
     ...c.cardExtras,
     studio: {
-      avatar: c.avatar, altAvatars: c.altAvatars, depthPrompt: c.depthPrompt,
+      altAvatars: c.altAvatars, depthPrompt: c.depthPrompt,
       favorite: c.favorite, folderId: c.folderId, createdAt: c.createdAt, importedAt: c.importedAt, lastChatAt: c.lastChatAt,
       embeddedLorebookId: c.embeddedLorebookId, linkedLorebookIds: c.linkedLorebookIds,
       colors: c.colors, stats: c.stats, descVariants: c.descVariants,
@@ -1352,4 +1354,65 @@ export function downloadBlob(base64: string, filename: string, mime = 'applicati
 export async function extractCardFromPng(file: File): Promise<object | null> {
   const card = await extractCharaFromPng(file)
   return card && typeof card === 'object' ? card as object : null
+}
+
+export interface ArchiveSummary {
+  characters: string[]; groups: string[]; lorebooks: string[]; presets: string[]; regex: string[];
+  personas: string[]; themes: string[]; chats: string[]; databank: string[]; errors: string[];
+  counts?: Record<string, number>;
+}
+
+/** The selected File stays on disk; only one upload chunk and one import batch are in flight. */
+export async function importArchive(file: File, progress?: (stage: string, done: number, total: number) => void, signal?: AbortSignal): Promise<ArchiveSummary> {
+  const chunkBytes = 8 * 1024 * 1024
+  const samples = await Promise.all([file.slice(0, 65536), file.slice(Math.max(0, file.size - 65536))].map(async (part) => new Uint8Array(await part.arrayBuffer())))
+  const fingerprint = samples.map((bytes) => { let hash = 2166136261; for (const byte of bytes) hash = Math.imul(hash ^ byte, 16777619); return (hash >>> 0).toString(16) }).join(':')
+  const key = `archive-import:${file.name}:${file.size}:${file.lastModified}:${fingerprint}`
+  type State = { id: string; uploaded: number; size: number; status: string; cursor: number; files: number; error?: string; errors?: string[]; counts?: Record<string, number> }
+  let state: State | null = null
+  try { const id = localStorage.getItem(key); if (id) state = await j<State>(`/__imports/${id}`) } catch { /* expired upload */ }
+  if (!state || state.status === 'failed') {
+    try {
+      state = await j<State>('/__imports/new', { method: 'POST', body: JSON.stringify({ name: file.name, size: file.size, collections: ['characters/', 'worlds/', 'lorebooks/', 'presets/', 'openai settings/', 'textgen settings/', 'User Settings/', 'settings.json', 'personas.json', 'extensions/regex/', 'regex/', 'personas/', 'groups/', 'chats/', 'group chats/', 'databank/', 'library.json'] }) })
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      if (file.size > 16 * 1024 * 1024) throw new Error('Update the engine to import large archives');
+      return j<ArchiveSummary>('/import/zip', { method: 'POST', body: JSON.stringify({ zipBase64: await fileToRawBase64(file) }) });
+    }
+  }
+  try { localStorage.setItem(key, state.id) } catch { /* resume unavailable */ }
+  const summary: ArchiveSummary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], databank: [], errors: state.errors ?? [] }
+  const check = () => { if (signal?.aborted) throw new DOMException('Import cancelled', 'AbortError') }
+  while (state.uploaded < file.size) {
+    check()
+    progress?.('Uploading', state.uploaded, file.size)
+    const part = file.slice(state.uploaded, state.uploaded + chunkBytes)
+    state = await j<State>(`/__imports/${state.id}?offset=${state.uploaded}`, { method: 'PUT', body: part, headers: { 'Content-Type': 'application/octet-stream' } })
+  }
+  while (state.status === 'indexing') {
+    check()
+    progress?.('Indexing', state.files, 0)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    state = await j<State>(`/__imports/${state.id}`)
+  }
+  if (state.status !== 'ready') throw new Error(state.error || 'Archive is not ready')
+  while (state.cursor < state.files) {
+    check()
+    progress?.('Importing', state.cursor, state.files)
+    const result = await j<{ cursor: number; summary: Record<string, unknown>; counts: Record<string, number> }>(`/__imports/${state.id}/batch`, { method: 'POST', body: JSON.stringify({ cursor: state.cursor, route: '/import/zip' }) })
+    if (result.cursor <= state.cursor) throw new Error('Import made no progress')
+    state.cursor = result.cursor
+    summary.counts = result.counts
+    for (const [key, values] of Object.entries(result.summary)) if (Array.isArray(values) && key in summary) {
+      const target = summary[key as keyof Omit<ArchiveSummary, 'counts'>] as string[];
+      target.push(...(key === 'errors' ? values.slice(0, Math.max(0, 1000 - target.length)) : values) as string[]);
+    }
+  }
+  summary.counts ??= state.counts
+  progress?.('Imported', state.files, state.files)
+  progress?.('Saving history', state.files, state.files)
+  await j(`/__imports/${state.id}/finish`, { method: 'POST', body: JSON.stringify({ route: '/import/finish' }) })
+  await j(`/__imports/${state.id}`, { method: 'DELETE' })
+  try { localStorage.removeItem(key) } catch { /* storage unavailable */ }
+  return summary
 }
