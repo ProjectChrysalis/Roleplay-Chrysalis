@@ -1,5 +1,6 @@
 
 import { useEffect, useState } from 'react'
+import { publishAgentContext } from '@/lib/agent-context'
 import { CircleNotch } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Toaster } from '@/components/ui/sonner'
@@ -43,6 +44,7 @@ export function AppShell() {
   const isDesktop = useIsDesktop()
 
   useEffect(() => setMounted(true), [])
+  useEffect(() => { publishAgentContext(); return useApp.subscribe(publishAgentContext) }, [])
 
   // Desktop invariant: the page behind is always home/chats/chat. A persisted
   // drawer-section view (or a mobile session resized wide) becomes a drawer.

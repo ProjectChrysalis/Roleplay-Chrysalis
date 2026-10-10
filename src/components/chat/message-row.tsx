@@ -1,6 +1,7 @@
+import { focusAgentContext } from '@/lib/agent-context'
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { CaretDown, PencilSimple, Copy, Trash, ArrowsClockwise, Translate, SpeakerHigh, Ghost, GitBranch, BookmarkSimple, Eye, CaretLeft, CaretRight, Info, Scan, Brain, DotsThree, CircleNotch, Square, ArrowsOut, Wrench, ArrowUp, ArrowDown } from '@phosphor-icons/react'
+import { CaretDown, PencilSimple, Copy, Trash, ArrowsClockwise, Translate, SpeakerHigh, Ghost, GitBranch, BookmarkSimple, Eye, CaretLeft, CaretRight, Info, Scan, Brain, DotsThree, CircleNotch, Square, ArrowsOut, Wrench, ArrowUp, ArrowDown, Paperclip } from '@phosphor-icons/react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -95,6 +96,32 @@ type LiveNode =
   | { type: 'think'; text: string; ms?: number }
   | { type: 'tool'; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean }
 
+function ThinkingActions({ text, onEdit, onRemove }: {
+  text: string
+  onEdit?: () => void
+  onRemove?: () => void
+}) {
+  return (
+    <div className="flex items-center justify-end gap-1 border-b border-border px-1 py-0.5">
+      <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2 text-xs text-muted-foreground" aria-label="Copy thinking" onClick={() => { void copyText(text).then(ok => { if (ok) toast.success('Reasoning copied'); else toast.error('Copy failed') }) }}>
+        <Copy className="size-3.5" aria-hidden="true" />
+        Copy
+      </Button>
+      {(onEdit || onRemove) && (
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="size-8 text-muted-foreground" aria-label="Thinking actions"><DotsThree aria-hidden="true" /></Button>} />
+          <DropdownMenuContent align="end">
+            <DropdownMenuGroup>
+              {onEdit && <DropdownMenuItem onClick={onEdit}><PencilSimple className="size-4" aria-hidden="true" />Edit thinking</DropdownMenuItem>}
+              {onRemove && <DropdownMenuItem variant="destructive" onClick={onRemove}><Trash className="size-4" aria-hidden="true" />Remove all thinking</DropdownMenuItem>}
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
+  )
+}
+
 // one thinking segment, in sequence: renders where the thinking happened
 // (before a tool call, between tool and text, wherever) instead of hoisted
 // above the whole message. While live it sticks to the newest line unless
@@ -146,29 +173,6 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit, onRemove }: {
             </button>
           }
         />
-        {onEdit && !editing && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="size-6 shrink-0 text-muted-foreground"
-            aria-label="Edit thinking"
-            onClick={() => { setDraft(text); setEditing(true) }}
-          >
-            <PencilSimple className="size-3" aria-hidden="true" />
-          </Button>
-        )}
-        {onRemove && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="size-6 shrink-0 text-muted-foreground"
-            aria-label="Remove thinking"
-            title="Remove all thinking from this reply"
-            onClick={onRemove}
-          >
-            <Trash className="size-3" aria-hidden="true" />
-          </Button>
-        )}
       </div>
       <CollapsibleContent>
         {editing ? (
@@ -188,12 +192,15 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit, onRemove }: {
             </div>
           </div>
         ) : (
-          <div
-            ref={(el) => { boxRef.current = el; trapWheel(el) }}
-            onScroll={onScroll}
-            className="think-text mt-1 max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-2 text-xs italic text-muted-foreground"
-          >
-            <Markdown content={text} />
+          <div className="mt-1 overflow-hidden rounded-md border border-border bg-muted/30">
+            {!live && <ThinkingActions text={text} onEdit={onEdit ? () => { setDraft(text); setEditing(true) } : undefined} onRemove={onRemove} />}
+            <div
+              ref={(el) => { boxRef.current = el; trapWheel(el) }}
+              onScroll={onScroll}
+              className="think-text max-h-64 overflow-y-auto p-2 text-xs italic text-muted-foreground"
+            >
+              <Markdown content={text} />
+            </div>
           </div>
         )}
       </CollapsibleContent>
@@ -603,12 +610,6 @@ export const MessageRow = memo(function MessageRow({
             {message.hidden ? <Eye className="size-4" aria-hidden="true" /> : <Ghost className="size-4" aria-hidden="true" />}
             {message.hidden ? 'Unhide from AI' : 'Hide from AI'}
           </DropdownMenuItem>
-          {!isUser && !isStreamingThis && swipe?.hasThinking && (
-            <DropdownMenuItem onClick={() => removeThinking(chat.id, message.id)}>
-              <Trash className="size-3.5" />
-              Remove thinking
-            </DropdownMenuItem>
-          )}
           <DropdownMenuItem onClick={() => setPeekOpen(true)}>
             <Scan className="size-4" aria-hidden="true" />
             Prompt peek
@@ -637,6 +638,10 @@ export const MessageRow = memo(function MessageRow({
               Summarize everything above
             </DropdownMenuItem>
           )}
+          <DropdownMenuItem onClick={() => { focusAgentContext({ kind: 'message', id: message.id, chatId: chat.id }); toast.info('Message selected for agent context') }}>
+            <Paperclip className="size-4" aria-hidden="true" />
+            Use as agent context
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => moveMessage(chat.id, message.id, -1)}>
             <ArrowUp className="size-4" aria-hidden="true" />
             Move up
@@ -877,27 +882,6 @@ export const MessageRow = memo(function MessageRow({
                     </button>
                   }
                 />
-                {!reasonEditing && (
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="size-6 shrink-0 text-muted-foreground"
-                    aria-label="Edit thinking"
-                    onClick={() => { setReasonDraft(swipe.reasoning ?? ''); setReasonEditing(true) }}
-                  >
-                    <PencilSimple className="size-3" aria-hidden="true" />
-                  </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="size-6 shrink-0 text-muted-foreground"
-                  aria-label="Remove thinking"
-                  title="Remove all thinking from this reply"
-                  onClick={() => { removeThinking(chat.id, message.id); setReasonEditing(false) }}
-                >
-                  <Trash className="size-3" aria-hidden="true" />
-                </Button>
               </div>
               <CollapsibleContent>
                 {reasonEditing ? (
@@ -915,10 +899,14 @@ export const MessageRow = memo(function MessageRow({
                     </div>
                   </div>
                 ) : (
-                  <div ref={trapWheel} className="think-text mt-1 max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-2 text-xs italic text-muted-foreground">
-                    <Markdown content={swipe.reasoning} />
-                    <div className="mt-1 flex gap-1">
-                      <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => { void copyText(swipe.reasoning ?? '').then(ok => { if (ok) toast.success('Reasoning copied'); else toast.error('Copy failed') }) }}>Copy</Button>
+                  <div className="mt-1 overflow-hidden rounded-md border border-border bg-muted/30">
+                    <ThinkingActions
+                      text={swipe.reasoning}
+                      onEdit={() => { setReasonDraft(swipe.reasoning ?? ''); setReasonEditing(true) }}
+                      onRemove={() => { removeThinking(chat.id, message.id); setReasonEditing(false) }}
+                    />
+                    <div ref={trapWheel} className="think-text max-h-64 overflow-y-auto p-2 text-xs italic text-muted-foreground">
+                      <Markdown content={swipe.reasoning} />
                     </div>
                   </div>
                 )}

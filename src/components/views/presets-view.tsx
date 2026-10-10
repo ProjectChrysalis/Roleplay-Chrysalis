@@ -1,3 +1,4 @@
+import { focusAgentContext } from '@/lib/agent-context'
 
 import { useEffect, useRef, useState } from 'react'
 import { SlidersHorizontal, Plus, Copy, Trash, Lock, SealCheck, Eye, CaretDown, DownloadSimple, UploadSimple, ArrowsOut, X, GitDiff, Books as LibraryIcon, DotsSixVertical, Star, DotsThreeVertical, PencilSimple } from '@phosphor-icons/react'
@@ -82,6 +83,7 @@ export function PresetsView() {
     ? activePresetId
     : (presets.find((p) => p.isDefault)?.id ?? null)
   const [selectedId, setSelectedId] = useState(__focus ?? activeId ?? presets[0]?.id ?? null)
+  useEffect(() => { if (selectedId) focusAgentContext({ kind: 'preset', id: selectedId }); return () => focusAgentContext(null) }, [selectedId])
   const [detailOpen, setDetailOpen] = useState(false)
   const [peekOpen, setPeekOpen] = useState(false)
   const [confirm, confirmDialog] = useConfirm()

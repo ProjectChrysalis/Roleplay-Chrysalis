@@ -14,6 +14,12 @@ items in one call. Its editor preserves fields and checks inspected revisions.
 Preset helpers also synchronize portable/editor values; chat helpers preserve
 inactive swipes and generation metadata. Structural chat actions use app routes.
 
+The app publishes its current entity IDs to the shell for explicit attachment
+in agent Settings. Use as agent context sits near the bottom of the message menu,
+above the move controls with a paperclip icon, and selects that message and its active swipe. Preset
+focus follows the selected preset. The attachment preview shows its type and name. Attached
+selection is evidence, not permission, and is consumed by the next message.
+
 For creation or unfamiliar fields, consult `data/_catalog.json`: entity paths, routes, complete templates, and
 source types. Read only the matching section of `data/_EDITING.md` for field meanings,
 paired representations, bindings, and safe writes. Copy `data/_templates/_<kind>.json` to a new
@@ -106,7 +112,9 @@ the popup position, defaulting to bottom-center.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
 to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
 
-Thinking controls can remove all saved thinking from the displayed reply, including
+Expanded thinking panels have a Copy button and an actions menu above the scrollable
+text. Edit thinking and Remove all thinking live in that menu; collapsed panels
+show only the disclosure label. Thinking controls remove all saved thinking from the displayed reply, including
 interleaved thinking parts, without changing text or tool results. Presets choose
 Thinking history: preserve (default) replays native assistant/tool sequences and
 signatures on the same provider, API and model; individual sends reply text only.
