@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { SlidersHorizontal, Plus, Copy, Trash, Lock, SealCheck, Eye, CaretDown, DownloadSimple, UploadSimple, ArrowsOut, X, GitDiff, Books as LibraryIcon, DotsSixVertical, Star, DotsThreeVertical, PencilSimple } from '@phosphor-icons/react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -27,6 +27,8 @@ import { MasterDetail } from '@/components/shell/master-detail'
 import { PresetDiffDialog } from '@/components/presets/preset-diff-dialog'
 import { ShapingPanel } from '@/components/presets/shaping-panel'
 import { PromptPeekDialog } from '@/components/chat/prompt-peek-dialog'
+
+const toast = createToast('presets')
 
 const triggerOptions = ['normal', 'continue', 'impersonate', 'swipe', 'regenerate', 'quiet']
 

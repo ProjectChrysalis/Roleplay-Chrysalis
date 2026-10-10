@@ -11,7 +11,8 @@
 // (app_stream) and render live. Stop aborts the request.
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { toast } from 'sonner'
+import { saves } from './save-queue'
+import { createToast, configureNotifications, type NotificationArea } from '@/lib/notifications'
 import type {
   Character, Chat, Message, Persona, Preset, Lorebook, QuickReplySet, RegexScript,
   Connection, Extension, ThemePreset, BackgroundItem, Tag, Folder, AppSettings,
@@ -26,7 +27,7 @@ import { DEFAULT_AVATAR } from './utils'
 import {
   j, fetchModels, fetchEngineConnections, fetchBootstrap, connectStreams, ApiError, reloadWithReason,
   cardToCharacter, characterToCard, groupToCharacter,
-  engineChatToUI, chatPatchOf,
+  engineChatToUI, engineMessageToUI, chatPatchOf,
   type EngineChatMeta, type EngineMessage, type EngineConnectionInfo,
   enginePersonaToUI, presetToEngine, enginePresetToUI,
   lorebookToEngine, engineLorebookToUI, regexToEngine, engineRegexToUI,
@@ -34,6 +35,16 @@ import {
 import { MOBILE_BREAKPOINT } from '@/hooks/use-mobile'
 import { buildImagePrompt, generateImage, postPicture, type GeneratedImage } from './image-gen'
 import { presetImport, regexImport } from './import-shapes'
+
+const toast = createToast('chat')
+const shortcutsToast = createToast('shortcuts')
+const imagesToast = createToast('images')
+const charactersToast = createToast('characters')
+const lorebooksToast = createToast('lorebooks')
+const memoryToast = createToast('memory')
+const presetsToast = createToast('presets')
+const regexToast = createToast('regex')
+const settingsToast = createToast('settings')
 
 export type ViewKey =
   | 'home' | 'chats' | 'characters' | 'marketplace' | 'personas' | 'presets' | 'lorebooks'
@@ -149,6 +160,7 @@ interface AppState {
   editMessage: (chatId: ID, messageId: ID, content: string) => void
   /** edit the model's thinking on its own, without touching the reply text */
   editReasoning: (chatId: ID, messageId: ID, text: string) => void
+  removeThinking: (chatId: ID, messageId: ID) => void
   /** edit one think segment of a tool-using reply */
   editThinkPart: (chatId: ID, messageId: ID, partIndex: number, text: string) => void
   deleteMessage: (chatId: ID, messageId: ID, mode?: 'this' | 'above' | 'below') => void
@@ -258,7 +270,6 @@ let stopStreams: (() => void) | null = null
  *  stream is connected; Stop calls it so the frozen bytes include the tail
  *  that had not been flushed yet. */
 let flushStreamDeltas: (() => void) | null = null
-let uiSyncTimer: ReturnType<typeof setTimeout> | undefined
 /** single-flight + trailing queue for hydrate: concurrent hydrates interleave
  *  their set() calls, so a look_changed burst (our own writes echo back from
  *  the engine) can briefly revert optimistic local mutations */
@@ -344,6 +355,7 @@ export const useApp = create<AppState>()(
       hydrate: async () => {
         if (hydrateRunning) { hydrateQueued = true; return }
         hydrateRunning = true
+        await saves.settled()
         const seqAtStart = mutateSeq
         try {
         // First boot shows the loading screen; RE-hydrates (look_changed
@@ -588,8 +600,8 @@ export const useApp = create<AppState>()(
           // library.json — the local collections, agent-editable in ONE file
           const lib = library as Partial<Pick<AppState, 'qrSets' | 'themes' | 'backgrounds' | 'tags' | 'folders' | 'connectionProfiles'>>
           if (Object.keys(lib).length) {
+            libraryOnDisk = JSON.stringify(Object.fromEntries(LIB_KEYS.map((k) => [k, lib[k] ?? get()[k]])))
             set((s) => ({ ...s, ...lib }))
-            libraryOnDisk = JSON.stringify(lib) // echo guard: this IS the disk content
           } else {
             // first boot: materialize data/library.json so agents find every
             // collection on disk from the start
@@ -743,7 +755,7 @@ export const useApp = create<AppState>()(
             : String((e as Error).message ?? e)
           // a failed REFRESH keeps the data already on screen: only the first
           // boot has nothing to show but the error
-          if (get().boot === 'ready') toast.error(`Couldn't refresh: ${msg}`)
+          if (get().boot === 'ready') settingsToast.error(`Couldn't refresh: ${msg}`)
           else set({ boot: 'error', bootError: msg })
         }
         } finally {
@@ -753,6 +765,7 @@ export const useApp = create<AppState>()(
       },
 
       refreshLorebooks: async () => {
+        await saves.settled()
         const seqAtStart = mutateSeq
         try {
           const res = await j<{ items: Record<string, unknown>[] }>('/lorebooks')
@@ -791,6 +804,7 @@ export const useApp = create<AppState>()(
       ensureChatMessages: async (chatId) => {
         const chat = get().chats.find((c) => c.id === chatId)
         if (!chat || chat.messages.length > 0) return
+        await saves.settled()
         const seqAtStart = mutateSeq
         try {
           const r = await j<{ meta: EngineChatMeta; messages: EngineMessage[] }>(`/chats/${encodeURIComponent(chatId)}`)
@@ -826,10 +840,7 @@ export const useApp = create<AppState>()(
         // data/settings.json (`ui` key) so agents can read AND edit it on
         // disk — open clients pick agent edits up via look_changed → hydrate
         const ui = get().settings
-        clearTimeout(uiSyncTimer)
-        uiSyncTimer = setTimeout(() => {
-          writeThrough('settings', j('/settings', { method: 'PUT', body: JSON.stringify({ ui }) }))
-        }, 500)
+        writeThrough('settings', 'settings', saves.replace('/settings:ui', () => j('/settings', { method: 'PUT', body: JSON.stringify({ ui }) })))
       },
 
       // ─────────────────────────────────────────── generation (real, streamed) ──
@@ -933,15 +944,17 @@ export const useApp = create<AppState>()(
           const mySeq = (swipeReqs.get(messageId) ?? 0) + 1
           swipeReqs.set(messageId, mySeq)
           try {
-            const r = await j<{ message: { text?: string }; swipe: number; count: number }>(
+            await saves.settled()
+            const r = await j<{ message: EngineMessage; swipe: number; count: number }>(
               `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/swipe`,
               { method: 'POST', body: JSON.stringify({ index }) },
             )
             if (swipeReqs.get(messageId) !== mySeq) return
+            const restored = engineMessageToUI(r.message)
             set((s) => ({
               chats: s.chats.map((c) => (c.id === chatId
                 ? { ...c, messages: c.messages.map((m) => (m.id === messageId
-                  ? { ...m, activeSwipe: r.swipe, swipes: m.swipes.map((sw, i) => (i === r.swipe ? { ...sw, content: String(r.message?.text ?? sw.content) } : sw)) }
+                  ? { ...m, activeSwipe: r.swipe, swipes: restored.swipes.map((sw, i) => ({ ...sw, id: m.swipes[i]?.id ?? sw.id })) }
                   : m)) }
                 : c)),
             }))
@@ -959,20 +972,37 @@ export const useApp = create<AppState>()(
           } catch (e) { toast.error(String((e as Error).message ?? e)) }
         })()
       },
+      removeThinking: (chatId, messageId) => {
+        const swipeIndex = get().chats.find((c) => c.id === chatId)?.messages.find((m) => m.id === messageId)?.activeSwipe
+        bumpMutate()
+        set((s) => ({ chats: s.chats.map((c) => c.id !== chatId ? c : {
+          ...c, messages: c.messages.map((m) => m.id !== messageId ? m : {
+            ...m, swipes: m.swipes.map((sw, i) => i !== m.activeSwipe ? sw : {
+              ...sw, reasoning: undefined, reasoningTime: undefined, hasThinking: false,
+              parts: sw.parts?.filter((p) => p.type !== 'thinking'),
+            }),
+          }),
+        }) }))
+        void saves.run(`${chatId}:thinking`, () => j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+          method: 'PATCH', body: JSON.stringify({ removeThinking: true, swipeIndex }),
+        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+      },
       editReasoning: (chatId, messageId, text) => {
+        const swipeIndex = get().chats.find((c) => c.id === chatId)?.messages.find((m) => m.id === messageId)?.activeSwipe
         bumpMutate()
         // optimistic, then commit — same shape as editMessage but for the
         // thinking block only (active swipe)
         set((s) => ({ chats: s.chats.map((c) => c.id !== chatId ? c : {
           ...c, messages: c.messages.map((m) => m.id === messageId
-            ? { ...m, swipes: m.swipes.map((sw, i) => (i === m.activeSwipe ? { ...sw, reasoning: text } : sw)) }
+            ? { ...m, swipes: m.swipes.map((sw, i) => (i === m.activeSwipe ? { ...sw, reasoning: text, hasThinking: !!text.trim(), ...(!text.trim() ? { reasoningTime: undefined } : {}) } : sw)) }
             : m),
         }) }))
-        void j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-          method: 'PATCH', body: JSON.stringify({ reasoning: text }),
-        }).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+        void saves.run(`${chatId}:thinking`, () => j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+          method: 'PATCH', body: JSON.stringify({ reasoning: text, swipeIndex }),
+        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
       },
       editThinkPart: (chatId, messageId, partIndex, text) => {
+        const swipeIndex = get().chats.find((c) => c.id === chatId)?.messages.find((m) => m.id === messageId)?.activeSwipe
         bumpMutate()
         set((s) => ({ chats: s.chats.map((c) => c.id !== chatId ? c : {
           ...c, messages: c.messages.map((m) => m.id === messageId
@@ -981,9 +1011,9 @@ export const useApp = create<AppState>()(
               : sw)) }
             : m),
         }) }))
-        void j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-          method: 'PATCH', body: JSON.stringify({ think: { index: partIndex, text } }),
-        }).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+        void saves.run(`${chatId}:thinking`, () => j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+          method: 'PATCH', body: JSON.stringify({ think: { index: partIndex, text }, swipeIndex }),
+        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
       },
       editMessage: (chatId, messageId, content) => {
         bumpMutate()
@@ -1379,7 +1409,7 @@ export const useApp = create<AppState>()(
           }
         }
         void j(`/characters/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(characterToCard(c)) })
-          .catch((e) => toast.error(String((e as Error).message ?? e)))
+          .catch((e) => charactersToast.error(String((e as Error).message ?? e)))
       },
       newCharacter: () => {
         bumpMutate()
@@ -1397,7 +1427,7 @@ export const useApp = create<AppState>()(
         }
         set((s) => ({ characters: [...s.characters, char] }))
         void j(`/characters/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(characterToCard(char)) })
-          .catch((e) => toast.error(String((e as Error).message ?? e)))
+          .catch((e) => charactersToast.error(String((e as Error).message ?? e)))
         return id
       },
       duplicateCharacter: (id) => {
@@ -1408,8 +1438,8 @@ export const useApp = create<AppState>()(
         const copy: Character = { ...c, id: nid, name: `${c.name} (copy)`, createdAt: Date.now(), favorite: false }
         set((s) => ({ characters: [...s.characters, copy] }))
         void j(`/characters/${encodeURIComponent(nid)}`, { method: 'PUT', body: JSON.stringify(characterToCard(copy)) })
-          .then(() => toast.success(`Duplicated ${c.name}`))
-          .catch((e) => { toast.error(String((e as Error).message ?? e)); void get().hydrate() })
+          .then(() => charactersToast.success(`Duplicated ${c.name}`))
+          .catch((e) => { charactersToast.error(String((e as Error).message ?? e)); void get().hydrate() })
       },
       deleteCharacter: (id) => {
         bumpMutate()
@@ -1420,7 +1450,7 @@ export const useApp = create<AppState>()(
         }))
         void j(`/characters/${encodeURIComponent(id)}`, { method: 'DELETE' })
           .then(() => void refreshLists(set, get))
-          .catch((e) => { toast.error(String((e as Error).message ?? e)); void get().hydrate() })
+          .catch((e) => { charactersToast.error(String((e as Error).message ?? e)); void get().hydrate() })
       },
       convertCharacterToPersona: (id, opts) => {
         const c = get().characters.find((x) => x.id === id)
@@ -1453,7 +1483,7 @@ export const useApp = create<AppState>()(
             if (riders.length) {
               set((s2) => ({ chats: s2.chats.map((c) => (c.personaId ? c : { ...c, personaId: prevDefault.id })) }))
               for (const c of riders) {
-                writeThrough('the chats that rode the old persona', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ personaId: prevDefault.id }) }))
+                writeThrough('personas', 'the chats that rode the old persona', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ personaId: prevDefault.id }) }))
               }
             }
           }
@@ -1467,8 +1497,8 @@ export const useApp = create<AppState>()(
         }))
         const p = get().personas.find((x) => x.id === id)
         if (!p) return
-        writeThrough('persona', j(`/personas/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...p, id }) }))
-        if (patch.isDefault) writeThrough('the default persona', j('/settings', { method: 'PUT', body: JSON.stringify({ personaId: id }) }))
+        writeThrough('personas', 'persona', j(`/personas/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...p, id }) }))
+        if (patch.isDefault) writeThrough('personas', 'the default persona', j('/settings', { method: 'PUT', body: JSON.stringify({ personaId: id }) }))
       },
       usePersona: (id) => {
         const { personas, chats, activeChatId } = get()
@@ -1501,7 +1531,7 @@ export const useApp = create<AppState>()(
           ...init,
         }
         set((s) => ({ personas: [...s.personas, persona] }))
-        writeThrough('persona', j(`/personas/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...persona, id }) }))
+        writeThrough('personas', 'persona', j(`/personas/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...persona, id }) }))
         return id
       },
       duplicatePersona: (id) => {
@@ -1511,14 +1541,14 @@ export const useApp = create<AppState>()(
         if (p) {
           const copy = { ...p, id: newId, name: `${p.name} (copy)`, isDefault: false, createdAt: Date.now() }
           set((s) => ({ personas: [...s.personas, copy] }))
-          writeThrough('the new persona', j(`/personas/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...copy, id: newId }) }))
+          writeThrough('personas', 'the new persona', j(`/personas/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...copy, id: newId }) }))
         }
         return newId
       },
       deletePersona: (id) => {
         bumpMutate()
         set((s) => ({ personas: s.personas.filter((p) => p.id !== id) }))
-        writeThrough('the persona deletion', j(`/personas/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+        writeThrough('personas', 'the persona deletion', j(`/personas/${encodeURIComponent(id)}`, { method: 'DELETE' }))
       },
 
       updatePreset: (id, patch) => {
@@ -1526,7 +1556,7 @@ export const useApp = create<AppState>()(
         // one is allowed; everything else requires an editable copy
         const target = get().presets.find((x) => x.id === id)
         if (target?.readOnly && Object.keys(patch).some((k) => k !== 'isDefault')) {
-          toast.error('Stock preset, create an editable copy to change it')
+          presetsToast.error('Stock preset, create an editable copy to change it')
           return
         }
         bumpMutate()
@@ -1542,7 +1572,7 @@ export const useApp = create<AppState>()(
           if (riders.length) {
             set((s2) => ({ chats: s2.chats.map((c) => (oldIds.has(c.presetId) ? { ...c, presetId: id } : c)) }))
             for (const c of riders) {
-              writeThrough('the chats that rode the old default', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ presetId: id as string }) }))
+              writeThrough('presets', 'the chats that rode the old default', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ presetId: id as string }) }))
             }
           }
         }
@@ -1555,9 +1585,9 @@ export const useApp = create<AppState>()(
         const p = get().presets.find((x) => x.id === id)
         if (!p) return
         void j(`/presets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(p), id }) })
-          .catch((e) => toast.error(String((e as Error).message ?? e)))
+          .catch((e) => presetsToast.error(String((e as Error).message ?? e)))
         for (const other of prevDefaults) {
-          writeThrough('preset', j(`/presets/${encodeURIComponent(other.id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine({ ...other, isDefault: false }), id: other.id }) }))
+          writeThrough('presets', 'preset', j(`/presets/${encodeURIComponent(other.id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine({ ...other, isDefault: false }), id: other.id }) }))
         }
       },
       duplicatePreset: (id) => {
@@ -1567,15 +1597,15 @@ export const useApp = create<AppState>()(
         if (p) {
           const copy = { ...p, id: newId, name: `${p.name} (copy)`, readOnly: false, isDefault: false, createdAt: Date.now() }
           set((s) => ({ presets: [...s.presets, copy] }))
-          writeThrough('the new preset', j(`/presets/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(copy), id: newId }) }))
+          writeThrough('presets', 'the new preset', j(`/presets/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(copy), id: newId }) }))
         }
         return newId
       },
       deletePreset: (id) => {
-        if (id === 'default') { toast.error('The default preset is required by the engine'); return }
+        if (id === 'default') { presetsToast.error('The default preset is required by the engine'); return }
         bumpMutate()
         set((s) => ({ presets: s.presets.filter((p) => p.id !== id) }))
-        writeThrough('the preset deletion', j(`/presets/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+        writeThrough('presets', 'the preset deletion', j(`/presets/${encodeURIComponent(id)}`, { method: 'DELETE' }))
       },
 
       updateLorebook: (id, patch) => {
@@ -1584,7 +1614,7 @@ export const useApp = create<AppState>()(
         const b = get().lorebooks.find((x) => x.id === id)
         if (!b) return
         void j(`/lorebooks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(b), id }) })
-          .catch((e) => toast.error(String((e as Error).message ?? e)))
+          .catch((e) => lorebooksToast.error(String((e as Error).message ?? e)))
       },
       addLorebook: () => {
         bumpMutate()
@@ -1596,7 +1626,7 @@ export const useApp = create<AppState>()(
           formatTemplate: '',
         }
         set((s) => ({ lorebooks: [...s.lorebooks, book] }))
-        writeThrough('lorebook', j(`/lorebooks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(book), id }) }))
+        writeThrough('lorebooks', 'lorebook', j(`/lorebooks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(book), id }) }))
         return id
       },
       duplicateLorebook: (id) => {
@@ -1607,14 +1637,14 @@ export const useApp = create<AppState>()(
           const copy = { ...b, id: newId, name: `${b.name} (copy)`, globalActive: false, isEmbedded: false,
             entries: b.entries.map((e) => ({ ...e, id: uid('entry') })) }
           set((s) => ({ lorebooks: [...s.lorebooks, copy] }))
-          writeThrough('the new lorebook', j(`/lorebooks/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(copy), id: newId }) }))
+          writeThrough('lorebooks', 'the new lorebook', j(`/lorebooks/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(copy), id: newId }) }))
         }
         return newId
       },
       deleteLorebook: (id) => {
         bumpMutate()
         set((s) => ({ lorebooks: s.lorebooks.filter((b) => b.id !== id) }))
-        writeThrough('the lorebook deletion', j(`/lorebooks/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+        writeThrough('lorebooks', 'the lorebook deletion', j(`/lorebooks/${encodeURIComponent(id)}`, { method: 'DELETE' }))
       },
 
       updateRegex: (id, patch) => {
@@ -1623,7 +1653,7 @@ export const useApp = create<AppState>()(
         const r = get().regexScripts.find((x) => x.id === id)
         if (!r) return
         void j(`/regex/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(r), id }) })
-          .catch((e) => toast.error(String((e as Error).message ?? e)))
+          .catch((e) => regexToast.error(String((e as Error).message ?? e)))
       },
       addRegex: (scope) => {
         bumpMutate()
@@ -1636,13 +1666,13 @@ export const useApp = create<AppState>()(
           order: get().regexScripts.length,
         }
         set((s) => ({ regexScripts: [...s.regexScripts, script] }))
-        writeThrough('regex script', j(`/regex/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id }) }))
+        writeThrough('regex', 'regex script', j(`/regex/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id }) }))
         return id
       },
       deleteRegex: (id) => {
         bumpMutate()
         set((s) => ({ regexScripts: s.regexScripts.filter((r) => r.id !== id) }))
-        writeThrough('the regex deletion', j(`/regex/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+        writeThrough('regex', 'the regex deletion', j(`/regex/${encodeURIComponent(id)}`, { method: 'DELETE' }))
       },
 
       updateQRSet: (id, patch) => { bumpMutate(); set((s) => ({ qrSets: s.qrSets.map((q) => (q.id === id ? { ...q, ...patch } : q)) })) },
@@ -1673,12 +1703,12 @@ export const useApp = create<AppState>()(
       updateDataBankFile: (id, patch) => {
         bumpMutate()
         set((s) => ({ dataBank: s.dataBank.map((f) => (f.id === id ? { ...f, ...patch } : f)) }))
-        writeThrough('the data bank entry', j(`/databank/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }))
+        writeThrough('databank', 'the data bank entry', j(`/databank/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }))
       },
       deleteDataBankFile: (id) => {
         bumpMutate()
         set((s) => ({ dataBank: s.dataBank.filter((f) => f.id !== id) }))
-        writeThrough('the data bank deletion', j(`/databank/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+        writeThrough('databank', 'the data bank deletion', j(`/databank/${encodeURIComponent(id)}`, { method: 'DELETE' }))
       },
 
       // ── connection profiles: named (provider, model) pairs for quick switching ──
@@ -1722,7 +1752,7 @@ export const useApp = create<AppState>()(
         // LOCAL data only — server data lives in the engine and is managed
         // from Settings → Data (per-type deletes) or the engine client.
         set({ ...localSeed(), view: 'home', activeChatId: null, activeCharacterId: null, drawer: null })
-        toast.success('Local UI state reset, server data (characters, chats, presets…) untouched')
+        settingsToast.success('Local UI state reset, server data (characters, chats, presets…) untouched')
       },
     }),
     {
@@ -1763,6 +1793,8 @@ export const useApp = create<AppState>()(
     },
   ),
 )
+
+configureNotifications(() => useApp.getState().settings.notifications)
 
 // ── generation driver ────────────────────────────────────────────────────────
 /** Chats with an automatic compaction in flight (one at a time per chat). */
@@ -1887,6 +1919,7 @@ async function preserveInterruptedStream(
 
 async function refreshChat(set: SetFn, get: GetFn, chatId: ID) {
   if (interruptedChats.has(chatId)) return
+  await saves.settled()
   const seqAtStart = mutateSeq
   try {
     const r = await j<{ meta: EngineChatMeta; messages: EngineMessage[] }>(`/chats/${encodeURIComponent(chatId)}`)
@@ -1897,6 +1930,7 @@ async function refreshChat(set: SetFn, get: GetFn, chatId: ID) {
 }
 
 async function refreshLists(set: SetFn, _get: GetFn) {
+  await saves.settled()
   const seqAtStart = mutateSeq
   try {
     const metas = await j<{ chats: EngineChatMeta[] }>('/chats')
@@ -2100,11 +2134,11 @@ async function runStream(
           if (trimmed > 0 || (scfg.interval > 0 && since >= scfg.interval + scfg.keepRecent)) {
             compacting.add(chatId)
             void get().compactChat(chatId)
-              .then((r) => toast.success('Chat compacted', {
+              .then((r) => memoryToast.success('Chat compacted', {
                 description: `${r.covered} messages folded into the summary`,
-                action: { label: 'Undo', onClick: () => { void get().undoCompaction(chatId).catch((e) => toast.error(String((e as Error).message ?? e))) } },
+                action: { label: 'Undo', onClick: () => { void get().undoCompaction(chatId).catch((e) => memoryToast.error(String((e as Error).message ?? e))) } },
               }))
-              .catch((e) => toast.error('Automatic compaction failed', { description: String((e as Error).message ?? e) }))
+              .catch((e) => memoryToast.error('Automatic compaction failed', { description: String((e as Error).message ?? e) }))
               .finally(() => compacting.delete(chatId))
           }
         }
@@ -2118,11 +2152,11 @@ async function runStream(
 async function drawRequested(get: GetFn, chatId: ID, prompts: string[]) {
   const ig = get().settings.imageGen
   if (!ig?.enabled) {
-    toast.error('The character tried to draw a picture', { description: 'Turn on Tools → Image Generation to see it.' })
+    imagesToast.error('The character tried to draw a picture', { description: 'Turn on Tools → Image Generation to see it.' })
     return
   }
   for (const prompt of prompts) {
-    const t = toast.loading('Drawing…')
+    const t = imagesToast.loading('Drawing…')
     try {
       const img = await generateImage({
         prompt: buildImagePrompt(ig, prompt),
@@ -2130,9 +2164,9 @@ async function drawRequested(get: GetFn, chatId: ID, prompts: string[]) {
         model: ig.model || undefined,
       })
       await get().postPicture(chatId, img)
-      toast.dismiss(t)
+      imagesToast.dismiss(t)
     } catch (e) {
-      toast.error('Could not draw the picture', { id: t, description: String((e as Error).message ?? e) })
+      imagesToast.error('Could not draw the picture', { id: t, description: String((e as Error).message ?? e) })
     }
   }
 }
@@ -2152,14 +2186,14 @@ function warnUnrunnableShortcut(label: string, command: string): void {
   const key = command.split(/\s/)[0] ?? command
   if (warnedShortcuts.has(key)) return
   warnedShortcuts.add(key)
-  toast.error(`Shortcut "${label}" can't auto-run ${key}`, {
+  shortcutsToast.error(`Shortcut "${label}" can't auto-run ${key}`, {
     description: 'Auto-execute runs /continue, /impersonate, /regenerate, /swipe, or plain text.',
   })
 }
 
-function writeThrough(what: string, req: Promise<unknown>): void {
+function writeThrough(area: NotificationArea, what: string, req: Promise<unknown>): void {
   void req.catch((e: unknown) => {
-    toast.error(`Could not save ${what}`, { description: e instanceof Error ? e.message : String(e) })
+    createToast(area).error(`Could not save ${what}`, { description: e instanceof Error ? e.message : String(e) })
   })
 }
 
@@ -2180,14 +2214,13 @@ const libraryJson = (): string =>
  *  refresh loop. Content comparison breaks the cycle: identical data never
  *  writes. */
 let libraryOnDisk: string | null = null
-let libraryTimer: ReturnType<typeof setTimeout> | undefined
 useApp.subscribe((s, prev) => {
   if (!LIB_KEYS.some((k) => s[k] !== prev[k])) return
-  clearTimeout(libraryTimer)
-  libraryTimer = setTimeout(() => {
-    const next = libraryJson()
-    if (next === libraryOnDisk) return // hydrate echo — nothing to write
-    libraryOnDisk = next
-    writeThrough('your collections', j('/library', { method: 'PUT', body: next }))
-  }, 500)
+  const next = libraryJson()
+  if (next === libraryOnDisk) return
+  libraryOnDisk = next
+  writeThrough('settings', 'your collections', saves.replace('/library:snapshot', () => j('/library', { method: 'PUT', body: next })).catch((error) => {
+    if (libraryOnDisk === next) libraryOnDisk = null
+    throw error
+  }))
 })

@@ -1,0 +1,77 @@
+{
+  "qrSets": [],
+  "themes": [
+    {
+      "id": "theme_void",
+      "name": "Void (default)",
+      "builtin": true,
+      "colors": {
+        "mainText": "#e4e4e4",
+        "italics": "#8f8f8f",
+        "quotes": "#54d17d",
+        "shadow": "#000000",
+        "chatBg": "#0b0b0b",
+        "uiBg": "#101010",
+        "borders": "#212121",
+        "userTint": "#171717",
+        "charTint": "#101010",
+        "accent": "#54d17d"
+      }
+    },
+    {
+      "id": "theme_charcoal",
+      "name": "Charcoal",
+      "builtin": true,
+      "colors": {
+        "mainText": "#e6e6e6",
+        "italics": "#9d9d9d",
+        "quotes": "#54d17d",
+        "shadow": "#000000",
+        "chatBg": "#141414",
+        "uiBg": "#191919",
+        "borders": "#2b2b2b",
+        "userTint": "#202020",
+        "charTint": "#191919",
+        "accent": "#54d17d"
+      }
+    },
+    {
+      "id": "theme_daylight",
+      "name": "Daylight",
+      "builtin": true,
+      "colors": {
+        "mainText": "#161616",
+        "italics": "#6b6b6b",
+        "quotes": "#1f6fb5",
+        "shadow": "#d4d4d4",
+        "chatBg": "#fafafa",
+        "uiBg": "#ffffff",
+        "borders": "#e0e0e0",
+        "userTint": "#f1f1f2",
+        "charTint": "#ffffff",
+        "accent": "#2eaf5a"
+      }
+    },
+    {
+      "id": "theme_ash",
+      "name": "Ash",
+      "builtin": false,
+      "colors": {
+        "mainText": "#e8e6e3",
+        "italics": "#a09c96",
+        "quotes": "#d8a657",
+        "shadow": "#000000",
+        "chatBg": "#161514",
+        "uiBg": "#1c1b1a",
+        "borders": "#2f2d2b",
+        "userTint": "#232120",
+        "charTint": "#1c1b1a",
+        "accent": "#c98a3f"
+      }
+    }
+  ],
+  "backgrounds": [],
+  "tags": [],
+  "folders": [],
+  "connectionProfiles": []
+}

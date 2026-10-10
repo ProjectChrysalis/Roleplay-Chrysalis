@@ -1,7 +1,7 @@
 
 import { useMemo, useRef, useState } from 'react'
 import { MagnifyingGlass, Star, SquaresFour, List, Plus, UploadSimple, Chats, Copy, Trash, Tag, DotsThree, CheckSquare, DownloadSimple, Users, FileCode, LinkSimple, UserCircle } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -31,6 +31,8 @@ import { downloadJson } from '@/lib/interop'
 import { CharacterEditor } from '@/components/views/character-editor'
 import { CreateGroupDialog } from '@/components/chat/create-group-dialog'
 import { characterBrowser, sortCharacters, type CharacterSort } from '@/lib/character-browser'
+
+const toast = createToast('characters')
 
 /** chub card links map to the full-resolution card image; the app's img
  *  route streams it through the engine (the sandboxed frame cannot fetch

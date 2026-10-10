@@ -1,0 +1,11 @@
+{
+  "id": "new-group",
+  "name": "New group",
+  "memberIds": [],
+  "mode": "natural",
+  "mutedIds": [],
+  "generationMode": "swap",
+  "autoMode": false,
+  "autoDelaySec": 5,
+  "allowSelfResponses": false
+}

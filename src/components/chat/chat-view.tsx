@@ -1,5 +1,5 @@
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, MagnifyingGlass, Note, BookOpenText, GitBranch, GearSix, X, CaretUp, CaretDown, BookmarkSimple, Brain, UserPlus, DotsThreeVertical, ImageSquare, Trash, Lightning, Storefront, ArrowRight } from '@phosphor-icons/react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
@@ -30,7 +30,8 @@ import { sectionsFor } from '@/components/shell/sections'
 import type { ID } from '@/lib/types'
 import { DEFAULT_AVATAR, cn, readableNameColor, shortModel } from '@/lib/utils'
 import { cssAttrValue, scopeCss } from '@/lib/scope-css'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
+import { useSwipeAnimation } from '@/hooks/use-swipe-animation'
 import { MessageRow } from './message-row'
 import { Composer } from './composer'
 import { GroupMemberBar } from './group-member-bar'
@@ -38,6 +39,10 @@ import { MemoryPanel } from './memory-panel'
 import { HelpDialog } from './help-dialog'
 import { ExpressionPanel } from './expression-panel'
 import { ConvertToGroupDialog } from './convert-to-group-dialog'
+
+const toast = createToast('chat')
+const appearanceToast = createToast('appearance')
+const speechToast = createToast('speech')
 
 /** The mobile chat's section bar. The desktop header's quick switch has no
  *  place here: presets, personas and connections are each one tap away, and
@@ -185,38 +190,7 @@ export function ChatView() {
   }
   const presets = useApp((s) => s.presets)
 
-  // ── swipe transition clock ──
-  // One clock for the whole chat: the swiped row AND every row below it slide
-  // out (0 → ±range), the content swaps, then everything slides back in from
-  // the opposite side (±range → 0). Rapid consecutive swipes accelerate with
-  // a sigmoid falloff — spamming through greetings gets progressively snappier.
-  const [swipeFx, setSwipeFx] = useState<{ index: number; dir: 1 | -1; range: number; dur: number; phase: 'out' | 'in' } | null>(null)
-  const swipeStats = useRef({ now: 0, dir: 0, count: 0 })
-  const swipeTimers = useRef<ReturnType<typeof setTimeout>[]>([])
-  const onSwipeFx = useCallback((index: number, dir: 1 | -1, range: number) => {
-    const stats = swipeStats.current
-    const base = 125
-    const now = performance.now()
-    if (now - stats.now >= base * 2 + 300 || dir !== stats.dir) stats.count = 0
-    stats.now = now
-    stats.dir = dir
-    stats.count++
-    const dur = Math.round(base / (1 + Math.exp(stats.count - 4)))
-    for (const t of swipeTimers.current) clearTimeout(t)
-    swipeTimers.current = []
-    if (dur <= 50) {
-      // too fast to read as motion — land the swap instantly
-      setSwipeFx({ index, dir, range, dur: 0, phase: 'in' })
-      swipeTimers.current.push(setTimeout(() => setSwipeFx(null), 40))
-      return
-    }
-    setSwipeFx({ index, dir, range, dur, phase: 'out' })
-    swipeTimers.current.push(
-      setTimeout(() => setSwipeFx((f) => (f ? { ...f, phase: 'in' } : null)), dur),
-      setTimeout(() => setSwipeFx(null), dur * 2),
-    )
-  }, [])
-  useEffect(() => () => { for (const t of swipeTimers.current) clearTimeout(t) }, [])
+  const { swipeFx, onSwipeFx } = useSwipeAnimation(scrollRef, activeChatId, settings.reducedMotion)
 
   // reset pagination + pinning when switching chats
   useEffect(() => { setVisibleCount(pageSize); setPinned(true) }, [activeChatId, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -312,7 +286,7 @@ export function ChatView() {
     spokenRef.current = last.id
     const speaker = characters.find((c) => c.id === (last.characterId ?? chat.characterId))
     speakText(last.swipes[last.activeSwipe]?.content ?? '', voiceFor(settings.tts, speaker), `${chat.id}:${last.id}`)
-      .catch((e: Error) => toast.error(`TTS failed: ${e.message}`))
+      .catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
   }, [chat, characters, isStreaming, settings.tts])
 
   const onScroll = () => {
@@ -774,14 +748,7 @@ export function ChatView() {
       {/* `data-chat-log` lets the composer scroll-compensate this pane as the
           textarea grows upward, so the message you're reading stays put. */}
       <div ref={scrollRef} data-chat-log data-pinned="true" onScroll={onScroll} className="relative z-10 min-h-0 flex-1 overflow-y-auto overflow-x-clip overscroll-contain [overflow-anchor:none] [-webkit-overflow-scrolling:touch]" style={{ fontSize: `${settings.fontScale}%` }}>
-        <div
-          className="chat-column flex flex-col gap-1 px-2 py-3 sm:px-4"
-          style={swipeFx ? ({
-            '--swipe-out-x': `${swipeFx.dir * swipeFx.range}px`,
-            '--swipe-in-x': `${-swipeFx.dir * swipeFx.range}px`,
-            '--swipe-dur': `${swipeFx.dur}ms`,
-          }) as React.CSSProperties : undefined}
-        >
+        <div className="chat-column flex flex-col gap-1 px-2 py-3 sm:px-4">
           {startIdx > 0 && (
             <button
               type="button"
@@ -865,7 +832,8 @@ export function ChatView() {
                     character={character}
                     isLast={i === lastReplyIndex}
                     summarized={i < summaryCutIndex}
-                    slidePhase={swipeFx && i >= swipeFx.index ? swipeFx.phase : null}
+                    slidePhase={swipeFx && i >= swipeFx.index && i < swipeFx.index + 100 ? swipeFx.phase : null}
+                    swipeBusy={swipeFx !== null}
                     onSwipeFx={onSwipeFx}
                   />
                 )}
@@ -1194,7 +1162,7 @@ export function ChatView() {
                 const url = await fileToRawDataUrl(file)
                 const id = addBackground(file.name.replace(/\.[^.]+$/, ''), url)
                 updateChat(chat.id, { backgroundId: id })
-                toast.success('Background added to your library')
+                appearanceToast.success('Background added to your library')
               }}
             />
             <div className="grid grid-cols-3 gap-2">

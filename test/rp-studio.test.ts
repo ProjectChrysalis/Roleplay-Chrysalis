@@ -1004,6 +1004,133 @@ describe("rp studio engine: export + regex + prompt preview", () => {
     expect(reply3.extra?.swipeMeta).toHaveLength(3);
   }, 30_000);
 
+  it("removes saved thinking while preserving the reply and tool results", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = String((created.json.meta as { id: string }).id);
+    const file = path.join(root, "chats", `${id}.jsonl`);
+    const messages = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const reply = messages[0];
+    const kept = [{ type: "text", text: reply.text }, { type: "tool", name: "dice", args: {}, resultText: "5" }];
+    reply.extra = { reasoning: "PRIVATE-THOUGHT", reasoningMs: 321, parts: [
+      { type: "thinking", text: "PRIVATE-THOUGHT", ms: 321 }, ...kept,
+      { type: "thinking", text: "ANOTHER-THOUGHT" },
+    ], model: "mock/model", swipeMeta: [{ genMs: 500 }], opaque: { keep: true } };
+    fs.writeFileSync(file, messages.map((item) => JSON.stringify(item)).join("\n") + "\n");
+    const preview = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(JSON.stringify(preview.json)).toContain("PRIVATE-THOUGHT");
+    expect(JSON.stringify(preview.json)).toContain("ANOTHER-THOUGHT");
+    const removed = await drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/${reply.id}`, body: { removeThinking: true } }, m);
+    expect(removed.status).toBe(200);
+    const read = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    const saved = (read.json.messages as typeof messages)[0];
+    expect(saved.text).toBe(reply.text);
+    expect(saved.swipes).toEqual(reply.swipes);
+    expect(saved.extra).toEqual({ parts: kept, model: "mock/model", swipeMeta: reply.swipes.map((_: string, i: number) => i === 0 ? { genMs: 500, model: "mock/model", parts: kept } : null), opaque: { keep: true } });
+    const again = await drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/${reply.id}`, body: { removeThinking: true } }, m);
+    expect(again.json.message).toEqual(saved);
+  });
+
+  it("preserves native thinking per swipe, opts out per preset, and invalidates edited signatures", async () => {
+    const native = { role: "assistant", api: "anthropic-messages", provider: "mock", model: "model", content: [
+      { type: "thinking", thinking: "Original plan", thinkingSignature: "original-signature" },
+      { type: "text", text: "Signed answer", textSignature: "text-signature" },
+    ] };
+    const response = { text: "Signed answer", reasoning: "Original plan", model: "mock/model",
+      replay: { text: "Signed answer", messages: [native] } };
+    const m = mockHost(response);
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = String((created.json.meta as { id: string }).id);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "Hi" } }, m);
+    const read = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    const msg = (read.json.messages as { id: string }[]).at(-1)!;
+    const mid = msg.id;
+    const preview = () => drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(JSON.stringify((await preview()).json)).toContain("original-signature");
+    const presetFile = path.join(root, "presets", "default.json");
+    const preset = JSON.parse(fs.readFileSync(presetFile, "utf8"));
+    preset.studio = { samplers: { reasoning: { history: "individual" } } };
+    fs.writeFileSync(presetFile, JSON.stringify(preset));
+    const individual = JSON.stringify((await preview()).json);
+    expect(individual).not.toContain("original-signature");
+    expect(individual).not.toContain("Original plan");
+    preset.studio.samplers.reasoning.history = "preserve";
+    fs.writeFileSync(presetFile, JSON.stringify(preset));
+    const patch = (body: unknown) => drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/${mid}`, body }, m);
+    await patch({ reasoning: "Changed plan" });
+    const changed = JSON.stringify((await preview()).json);
+    expect(changed).toContain("Changed plan");
+    expect(changed).not.toContain("original-signature");
+    expect(changed).not.toContain("text-signature");
+    response.replay.messages[0]!.content[0] = { type: "thinking", thinking: "Swipe plan", thinkingSignature: "swipe-signature" };
+    response.reasoning = "Swipe plan";
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe`, body: { messageId: mid } }, m);
+    expect(JSON.stringify((await preview()).json)).toContain("swipe-signature");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/messages/${mid}/swipe`, body: { index: 0 } }, m);
+    const oldSwipe = JSON.stringify((await preview()).json);
+    expect(oldSwipe).toContain("Changed plan");
+    expect(oldSwipe).not.toContain("swipe-signature");
+    await patch({ removeThinking: true });
+    const removed = JSON.stringify((await preview()).json);
+    expect(removed).not.toContain("Changed plan");
+    expect(removed).toContain("Signed answer");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/messages/${mid}/swipe`, body: { index: 1 } }, m);
+    expect(JSON.stringify((await preview()).json)).toContain("swipe-signature");
+  });
+
+  it("stopped swipes retain their own thinking through switching and regeneration", async () => {
+    const m = mockHost({ text: "Completed reply", reasoning: "Completed plan", model: "mock/model" } as never);
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = String((created.json.meta as { id: string }).id);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi" } }, m);
+    const transcript = path.join(root, "chats", `${id}.jsonl`);
+    const records = fs.readFileSync(transcript, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const original = records[records.length - 1];
+    const mid = original.id;
+    delete original.extra.swipeMeta;
+    fs.writeFileSync(transcript, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const parts = [{ type: "thinking", text: "Stopped plan", ms: 1200 }, { type: "text", text: "Partial reply" }];
+    const stopped = await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body: {
+      targetMessageId: mid, text: "Partial reply", parts, expectedSwipes: 1, model: "mock/model", genMs: 1500,
+    } }, m);
+    expect(stopped.status).toBe(200);
+    const move = (index: number) => drive(engineUrl, { method: "POST", path: `/chats/${id}/messages/${mid}/swipe`, body: { index } }, m);
+    const first = await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe`, body: { dir: -1 } }, m);
+    expect((first.json.message as { extra: { reasoning?: string } }).extra.reasoning).toBe("Completed plan");
+    expect((first.json.message as { extra: { parts?: unknown[] } }).extra.parts).toBeUndefined();
+    expect((await move(1)).json.message).toMatchObject({ extra: { parts } });
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe`, body: { dir: 1 } }, m);
+    expect((await move(1)).json.message).toMatchObject({ extra: { parts } });
+    expect((await move(0)).json.message).toMatchObject({ extra: { reasoning: "Completed plan" } });
+    await move(1);
+    const continuedParts = [{ type: "thinking", text: "Continued plan" }, { type: "text", text: "Partial reply continued" }];
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body: {
+      targetMessageId: mid, operation: "continue", text: "Partial reply continued", parts: continuedParts, expectedSwipes: 3,
+    } }, m);
+    await move(0);
+    expect((await move(1)).json.message).toMatchObject({ extra: { parts: continuedParts } });
+  });
+
+  it("switching swipes preserves saved thoughts when message metadata is stale", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = String((created.json.meta as { id: string }).id);
+    const file = path.join(root, "chats", `${id}.jsonl`);
+    const records = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const reply = records[0];
+    reply.swipes = ["First", "Second"];
+    reply.swipe = 1;
+    reply.text = "Second";
+    reply.extra = { reasoning: "First plan", reasoningMs: 11000, swipeMeta: [
+      { reasoning: "First plan", reasoningMs: 11000 }, { reasoning: "Second plan", reasoningMs: 22000 },
+    ] };
+    fs.writeFileSync(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    for (const index of [0, 1, 0, 1]) {
+      const r = await drive(engineUrl, { method: "POST", path: `/chats/${id}/messages/${reply.id}/swipe`, body: { index } }, m);
+      expect(r.json.message).toMatchObject({ extra: { reasoning: index === 0 ? "First plan" : "Second plan", reasoningMs: index === 0 ? 11000 : 22000 } });
+    }
+  });
+
   it("thinking is editable on its own, separate from the reply text", async () => {
     const m = mockHost();
     await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);

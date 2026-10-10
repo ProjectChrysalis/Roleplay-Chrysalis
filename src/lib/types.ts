@@ -69,6 +69,7 @@ export interface Character {
    *  nickname/assets/group_only_greetings, plus the spec extensions bag) —
    *  written back on save so round-trips never destroy card data. */
   cardExtras?: Record<string, unknown>
+  studioExtras?: Record<string, unknown>
   gallery: { id: ID; url: string; type: 'image' | 'video'; caption: string }[]
   expressions: { name: string; url: string | null }[]
   defaultExpression: string
@@ -108,6 +109,7 @@ export interface Swipe {
   content: string
   reasoning?: string
   reasoningTime?: number
+  hasThinking?: boolean
   model: string
   genTimeMs: number
   timestamp: number
@@ -277,7 +279,7 @@ export interface SamplerSettings {
   seed: number
   stopStrings: string[]
   logitBias: { token: string; bias: number }[]
-  reasoning: { enabled: boolean; effort: 'off' | 'min' | 'low' | 'med' | 'high' | 'max'; budget: number; autoParse: boolean; display: 'collapsed' | 'expanded' | 'hidden'; thinkTagOpen: string; thinkTagClose: string }
+  reasoning: { history?: 'preserve' | 'individual'; enabled: boolean; effort: 'off' | 'min' | 'low' | 'med' | 'high' | 'max'; budget: number; autoParse: boolean; display: 'collapsed' | 'expanded' | 'hidden'; thinkTagOpen: string; thinkTagClose: string }
   streaming: boolean
   streamingSpeed: number
   /** Sent as a trailing assistant turn — the reply starts with this text.
@@ -293,6 +295,7 @@ export interface SamplerSettings {
 }
 
 export interface Preset {
+  engineExtras?: Record<string, unknown>
   id: ID
   name: string
   readOnly: boolean
@@ -609,6 +612,8 @@ export interface ConnectionProfile {
 
 // ── Settings ──
 export interface AppSettings {
+  notificationPosition: NonNullable<import('sonner').ToasterProps['position']>
+  notifications: import('./notifications').NotificationSettings
   characterBrowser?: { grid: boolean; sort: import('./character-browser').CharacterSort }
   themeMode: 'dark' | 'light'
   activeThemeId: ID

@@ -1,6 +1,8 @@
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { downloadTextFile } from './export'
 import { importArchive, type ArchiveSummary } from './engine'
+
+const toast = createToast('imports')
 
 export async function importArchiveWithProgress(file: File): Promise<ArchiveSummary> {
   const controller = new AbortController()

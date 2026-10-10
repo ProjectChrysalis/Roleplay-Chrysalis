@@ -12,6 +12,7 @@ import type {
   Swipe, ID, ModelInfo, ModelPricing, PromptSection, DataBankFile, PromptFormatSequences,
 } from './types'
 import { uid } from './tokens'
+import { saves } from './save-queue'
 import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT, GENERATION_TYPES, normalizeCache } from './seed'
 import { DEFAULT_AVATAR, storedMediaUrl } from './utils'
 import { saveFile } from './export'
@@ -50,6 +51,18 @@ export interface EngineCard {
   [k: string]: unknown
 }
 
+interface EngineGenerationMeta {
+  model?: string
+  usage?: Swipe['usage']
+  genMs?: number
+  params?: Record<string, unknown>
+  reasoning?: string
+  reasoningMs?: number
+  tools?: Swipe['tools']
+  parts?: Swipe['parts']
+  replay?: { messages: { role: string; content: { type: string; thinkingSignature?: string; textSignature?: string; thoughtSignature?: string }[] }[] }
+}
+
 export interface EngineMessage {
   id: string
   name: string
@@ -68,7 +81,7 @@ export interface EngineMessage {
   attachments?: Message['attachments']
   picture?: boolean
   personaId?: string
-  extra?: { model?: string; usage?: Swipe['usage']; continued?: boolean; genMs?: number; params?: Record<string, unknown>; reasoning?: string; reasoningMs?: number; tools?: Swipe['tools']; parts?: Swipe['parts']; /** per-swipe generation facts, index-aligned with swipes (null = no data, e.g. client-cancelled commits) */ swipeMeta?: ({ model?: string; usage?: Swipe['usage']; genMs?: number } | null)[] }
+  extra?: EngineGenerationMeta & { continued?: boolean; swipeMeta?: (EngineGenerationMeta | null)[] }
 }
 
 export interface EngineChatMeta {
@@ -143,7 +156,7 @@ export interface EngineLorebook {
 export interface EnginePreset {
   id?: string
   name: string
-  prompts?: Array<{ identifier: string; name?: string; role?: string; content?: string; marker?: boolean; injection_position?: string; injection_depth?: number }>
+  prompts?: Array<{ identifier: string; name?: string; role?: string; content?: string; marker?: boolean; injection_position?: string | number; injection_depth?: number; injection_trigger?: string[]; [k: string]: unknown }>
   prompt_order?: Array<{ character_id?: number; order?: Array<{ identifier: string; enabled?: boolean }> }>
   temperature?: number
   top_p?: number
@@ -193,7 +206,15 @@ export class ApiError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status }
 }
 
-export async function j<T>(path: string, init?: RequestInit): Promise<T> {
+export function j<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const key = path.split('?')[0] ?? path
+  if (method === 'PUT' && /^\/(characters|personas|presets|lorebooks|regex|databank)\/[^/]+$/.test(key)) return saves.replace(key, () => requestJson<T>(path, init))
+  if (method !== 'GET' && method !== 'HEAD') return saves.run(key, () => requestJson<T>(path, init))
+  return requestJson<T>(path, init)
+}
+
+async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   const headers = new Headers(init?.headers)
   if (!headers.has('content-type')) headers.set('content-type', 'application/json')
@@ -581,14 +602,14 @@ const PLACEHOLDER = DEFAULT_AVATAR
 /** Fields the adapters own; any OTHER card field is preserved verbatim on the
  *  character (v3 extras, the spec extensions bag, future spec additions). */
 const CARD_KNOWN = new Set([
-  'id', 'spec', 'spec_version', 'studio', 'name', 'description', 'personality', 'scenario',
+  'id', 'studio', 'name', 'description', 'personality', 'scenario',
   'first_mes', 'mes_example', 'alternate_greetings', 'group_only_greetings', 'creator_notes', 'tags',
-  'system_prompt', 'post_history_instructions', 'avatar', 'creator', 'character_version', 'character_book',
+  'system_prompt', 'post_history_instructions', 'avatar', 'creator', 'character_version',
 ])
 function cardExtrasOf(card: EngineCard): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(card)) {
-    if (CARD_KNOWN.has(k) || v === undefined || v === null) continue
+    if (CARD_KNOWN.has(k) || v === undefined) continue
     out[k] = v
   }
   return out
@@ -640,6 +661,7 @@ export function cardToCharacter(card: EngineCard, id: string, lastChatAt = 0): C
     // unknown card fields (v3 extras + the spec extensions bag) ride the
     // character so edits can write them back — imports must not destroy data
     cardExtras: Object.keys(cardExtrasOf(card)).length ? cardExtrasOf(card) : undefined,
+    studioExtras: { ...card.studio },
     gallery: (studio.gallery ?? []).map((g) => ({ ...g, url: storedMediaUrl(g.url) })),
     expressions: (studio.expressions ?? []).map((e) => ({ ...e, url: e.url ? storedMediaUrl(e.url) : e.url })),
     defaultExpression: studio.defaultExpression ?? 'neutral',
@@ -657,18 +679,19 @@ export function characterToCard(c: Character): EngineCard {
     scenario: c.scenario,
     first_mes: c.firstMessage,
     mes_example: c.exampleDialogue,
-    ...(c.systemPromptOverride ? { system_prompt: c.systemPromptOverride } : {}),
-    ...(c.postHistoryInstructions ? { post_history_instructions: c.postHistoryInstructions } : {}),
-    ...(c.altGreetings.length ? { alternate_greetings: c.altGreetings } : {}),
-    ...(c.groupGreetings.length ? { group_only_greetings: c.groupGreetings } : {}),
-    ...(c.creatorNotes ? { creator_notes: c.creatorNotes } : {}),
-    ...(c.tags.length ? { tags: c.tags } : {}),
-    ...(c.avatar && c.avatar !== PLACEHOLDER ? { avatar: c.avatar } : {}),
-    ...(c.creator ? { creator: c.creator } : {}),
-    ...(c.version ? { character_version: c.version } : {}),
+    system_prompt: c.systemPromptOverride,
+    post_history_instructions: c.postHistoryInstructions,
+    alternate_greetings: c.altGreetings,
+    group_only_greetings: c.groupGreetings,
+    creator_notes: c.creatorNotes,
+    tags: c.tags,
+    avatar: c.avatar === PLACEHOLDER ? '' : c.avatar,
+    creator: c.creator,
+    character_version: c.version,
     // preserved unknown card-spec fields go back where they came from
     ...c.cardExtras,
     studio: {
+      ...c.studioExtras,
       altAvatars: c.altAvatars, depthPrompt: c.depthPrompt,
       favorite: c.favorite, folderId: c.folderId, createdAt: c.createdAt, importedAt: c.importedAt, lastChatAt: c.lastChatAt,
       embeddedLorebookId: c.embeddedLorebookId, linkedLorebookIds: c.linkedLorebookIds,
@@ -714,6 +737,8 @@ function toSwipe(content: string, model: string, at: number, genMs = 0, extra?: 
     ...(extra?.usage ? { usage: extra.usage } : {}),
     ...(extra?.params ? { params: extra.params } : {}),
     ...(extra?.reasoning ? { reasoning: extra.reasoning } : {}),
+    hasThinking: !!extra?.reasoning || !!extra?.parts?.some((p) => p.type === 'thinking') ||
+      !!extra?.replay?.messages?.some((m) => m.content?.some((b) => b.type === 'thinking' || b.textSignature || b.thoughtSignature)),
     ...(extra?.reasoningMs ? { reasoningTime: extra.reasoningMs / 1000 } : {}),
     ...(extra?.tools?.length ? { tools: extra.tools } : {}),
     ...(extra?.parts?.length ? { parts: extra.parts } : {}),
@@ -723,20 +748,21 @@ function toSwipe(content: string, model: string, at: number, genMs = 0, extra?: 
 export function engineMessageToUI(m: EngineMessage): Message {
   const raw = m.swipes?.length ? m.swipes : [m.text]
   const active = Math.min(m.swipe ?? 0, raw.length - 1)
-  // per-swipe generation facts ride extra.swipeMeta when it is index-aligned
-  // with the swipes; older messages only have the active swipe's facts
-  const meta = m.extra?.swipeMeta?.length === raw.length ? m.extra.swipeMeta : null
+  // A saved swipe entry owns its thinking, including an explicit empty entry.
+  // Message metadata is a fallback for older replies without that entry.
+  const meta = m.extra?.swipeMeta
   // the engine expands macros ({{user}}/{{char}}/…) on `text` for the ACTIVE
   // swipe but keeps swipes[] raw so future navigation can re-expand with
   // fresh values — mirror that: the active swipe shows the expanded text
   const swipes = raw.map((t, i) => {
     const own = meta?.[i]
+    const generation = own ?? (i === active ? m.extra : undefined)
     return toSwipe(
       i === active && m.text ? m.text : t,
-      i === active && m.extra?.model ? m.extra.model : (own?.model ?? ''),
+      generation?.model ?? '',
       m.at,
-      i === active ? (m.extra?.genMs ?? 0) : (own?.genMs ?? 0),
-      i === active ? m.extra : (own?.usage ? { usage: own.usage } : undefined),
+      generation?.genMs ?? 0,
+      generation,
     )
   })
   return {
@@ -906,6 +932,7 @@ export function fetchWIStatus(chatId: string): Promise<WIStatus> {
 export function enginePersonaToUI(p: { id?: string } & Record<string, unknown>, defaultId: string | null): Persona {
   const id = p.id ?? ''
   return {
+    ...p,
     id, name: String(p.name ?? 'Persona'),
     avatar: storedMediaUrl((p.avatar as string) || PLACEHOLDER),
     title: (p.title as string) ?? '',
@@ -928,26 +955,46 @@ const MARKER_TO_ENGINE: Record<string, string> = {
   main: 'main', nsfw: 'nsfw', jailbreak: 'postHistory',
   charDescription: 'charDescription', personality: 'charPersonality', scenario: 'scenario',
   persona: 'personaDescription', exampleDialogue: 'dialogueExamples', chatHistory: 'chatHistory',
-  wiBefore: 'worldInfoBefore', wiAfter: 'worldInfoAfter',
+  wiBefore: 'worldInfoBefore', wiAfter: 'worldInfoAfter', summary: 'summary', depthPrompt: 'depthPrompt',
 }
 const ENGINE_TO_MARKER = Object.fromEntries(Object.entries(MARKER_TO_ENGINE).map(([k, v]) => [v, k] as const))
 
 export function presetToEngine(p: Preset): EnginePreset {
   const sections = [...p.sections].sort((a, b) => a.order - b.order)
-  const prompts = sections.map((s) => ({
-    identifier: s.id,
-    name: s.name,
-    role: s.role,
-    marker: s.marker != null,
-    ...(s.marker == null || s.content ? { content: s.content } : {}),
-    ...(s.position === 'in-chat' ? { injection_position: 'absolute' as const, injection_depth: s.depth } : {}),
-  }))
+  const originalPrompts = (p.engineExtras?.prompts ?? []) as EnginePreset['prompts']
+  const prompts = sections.map((s) => {
+    const original = originalPrompts?.find((entry) => entry.identifier === s.id)
+    const prompt = {
+      ...original,
+      identifier: s.id,
+      name: s.name,
+      role: s.role,
+      marker: s.marker != null,
+      content: s.content,
+      injection_trigger: s.injectionTriggers,
+      ...(s.position === 'in-chat' ? { injection_position: 'absolute' as const, injection_depth: s.depth } : {}),
+    }
+    if (s.position !== 'in-chat') { delete prompt.injection_position; delete prompt.injection_depth }
+    return prompt
+  })
+  for (const original of originalPrompts ?? []) {
+    if (!sections.some((s) => s.id === original.identifier)) prompts.push(original as typeof prompts[number])
+  }
+  const originalOrders = (p.engineExtras?.prompt_order ?? []) as EnginePreset['prompt_order']
+  const activeOrder = originalOrders?.find((o) => o.character_id === 100001 && o.order?.length)
+    ?? originalOrders?.find((o) => o.order?.length)
+  const orderId = activeOrder?.character_id ?? 100000
+  const order = sections.map((s) => ({ ...activeOrder?.order?.find((entry) => entry.identifier === s.id), identifier: s.id, enabled: s.enabled }))
+  const { engineExtras, ...studio } = p
   const S = p.samplers
   const num = (v: { value: number; enabled: boolean } | undefined) => (v && v.enabled && Number.isFinite(v.value) ? v.value : undefined)
   const out: EnginePreset = {
+    ...engineExtras,
     name: p.name,
     prompts,
-    prompt_order: [{ character_id: 100000, order: sections.map((s) => ({ identifier: s.id, enabled: s.enabled })) }],
+    prompt_order: activeOrder
+      ? (originalOrders ?? []).map((entry) => entry === activeOrder ? { ...entry, character_id: orderId, order } : entry)
+      : [...(originalOrders ?? []), { character_id: orderId, order }],
     ...(num(S?.temperature) != null ? { temperature: num(S!.temperature) } : {}),
     ...(num(S?.top_p) != null ? { top_p: num(S!.top_p) } : {}),
     ...(num(S?.top_k) != null ? { top_k: num(S!.top_k) } : {}),
@@ -957,7 +1004,7 @@ export function presetToEngine(p: Preset): EnginePreset {
     ...(num(S?.pres_pen) != null ? { presence_penalty: num(S!.pres_pen) } : {}),
     ...(S?.maxTokens ? { openai_max_tokens: S.maxTokens } : {}),
     ...(S?.contextSize ? { openai_max_context: S.contextSize } : {}),
-    ...(S?.seed ? { seed: S.seed } : {}),
+    ...(Number.isFinite(S?.seed) ? { seed: S.seed } : {}),
     ...(S?.stopStrings?.length ? { stop: S.stopStrings } : {}),
     ...(S?.reasoning?.enabled && S.reasoning.effort !== 'off'
       ? { reasoning: S.reasoning.effort === 'med' ? 'medium' : S.reasoning.effort }
@@ -976,7 +1023,7 @@ export function presetToEngine(p: Preset): EnginePreset {
     // section editor loses nothing the kernel doesn't understand. Fields the
     // ENGINE actually consumes at runtime (utility prompts) are ALSO lifted to
     // the top level where the plugin reads them.
-    studio: p as unknown as Record<string, unknown>,
+    studio: studio as unknown as Record<string, unknown>,
     ...(p.utilityPrompts ? { utilityPrompts: p.utilityPrompts } : {}),
   }
   return out
@@ -984,6 +1031,8 @@ export function presetToEngine(p: Preset): EnginePreset {
 
 export function enginePresetToUI(ep: EnginePreset, id: string): Preset {
   const bag = ep.studio as Partial<Preset> | undefined
+  const owned = new Set(['id', 'name', 'studio', 'utilityPrompts', 'temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty', 'rep_pen', 'frequency_penalty', 'presence_penalty', 'openai_max_tokens', 'openai_max_context', 'seed', 'stop', 'reasoning', 'reasoningTags', 'thinkingBudget'])
+  const engineExtras = Object.fromEntries(Object.entries(ep).filter(([key]) => !owned.has(key)))
   const ordered = (() => {
     const byId = new Map((ep.prompts ?? []).map((p) => [p.identifier, p]))
     // the studio bag carries the full editor preset — group + condition ride there
@@ -1000,21 +1049,23 @@ export function enginePresetToUI(ep: EnginePreset, id: string): Preset {
       const p = byId.get(o.identifier)
       const markerKey = p && p.marker ? ENGINE_TO_MARKER[p.identifier] : undefined
       const bagSection = bagSections.get(o.identifier)
+      const triggers = p?.injection_trigger?.filter((trigger) => (GENERATION_TYPES as readonly string[]).includes(trigger))
       return {
+        ...bagSection,
         id: o.identifier,
         name: p?.name ?? o.identifier,
         enabled: o.enabled !== false,
         role: (p?.role || 'system') as 'system' | 'user' | 'assistant',
-        marker: (markerKey ?? null) as never,
+        marker: (bagSection?.marker ?? markerKey ?? null) as never,
         // marker sections keep their stored content — the Main Prompt and
         // Post-history instructions are editable entries whose text must
         // survive a reload (wiping it here made edits vanish on rehydrate)
         content: p?.content ?? '',
-        position: p?.injection_position === 'absolute' ? ('in-chat' as const) : ('relative' as const),
+        position: (p?.injection_position === 'absolute' || p?.injection_position === 1) ? ('in-chat' as const) : ('relative' as const),
         depth: p?.injection_depth ?? 4,
         order: i,
         // a section that never chose its generation types runs for all of them
-        injectionTriggers: bagSection?.injectionTriggers ?? [...GENERATION_TYPES],
+        injectionTriggers: bagSection?.injectionTriggers ?? (triggers?.length ? triggers : [...GENERATION_TYPES]),
         forbidOverrides: bagSection?.forbidOverrides ?? false,
         groupId: bagSection?.groupId ?? null,
         condition: bagSection?.condition ?? null,
@@ -1043,11 +1094,24 @@ export function enginePresetToUI(ep: EnginePreset, id: string): Preset {
   const samplers = bag?.samplers
     ? { ...base, ...bag.samplers, ...Object.fromEntries(Object.entries(flat).filter(([, v]) => v != null).map(([k, v]) => [k, (k === 'stopStrings' || k === 'maxTokens' || k === 'contextSize' || k === 'seed') ? v : (typeof v === 'number' ? { value: v, enabled: true } : v)])) }
     : base
+  const effort = ep.reasoning === 'medium' ? 'med' : ep.reasoning
+  if (effort && ['min', 'low', 'med', 'high', 'max'].includes(effort)) {
+    samplers.reasoning = { ...samplers.reasoning, enabled: true, effort: effort as typeof samplers.reasoning.effort }
+  }
+  const tags = ep.reasoningTags as { open?: unknown; close?: unknown } | undefined
+  if (typeof tags?.open === 'string' && typeof tags.close === 'string') {
+    samplers.reasoning = { ...samplers.reasoning, autoParse: true, thinkTagOpen: tags.open, thinkTagClose: tags.close }
+  }
+  if (typeof ep.thinkingBudget === 'number' && ep.thinkingBudget > 0) {
+    samplers.reasoning = { ...samplers.reasoning, budget: ep.thinkingBudget }
+  }
   samplers.cache = normalizeCache(samplers.cache)
   return {
+    ...bag,
+    engineExtras,
     id,
     name: ep.name ?? id,
-    // the default preset is the user's own working copy — fully editable
+    // The stored editor flag controls whether this preset can be edited.
     readOnly: bag?.readOnly === true,
     // default is the USER'S choice (persisted in the studio bag); the id-based
     // fallback only covers legacy bags that predate the flag

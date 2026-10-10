@@ -1352,6 +1352,14 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
         role: m.role === "user" ? "user" : "assistant",
         ...(prefixNames && m.name && namesBehavior === "completion" ? { name: m.name } : {}),
         content: prefixNames && m.name ? m.name + ": " + body : body,
+        ...(m.role === "char" && S?.reasoning?.history !== "individual" ? {
+          ...(m.extra?.replay && m.extra.replay.text.trim() === m.text.trim() && body === m.text
+            ? { replay: { ...m.extra.replay, text: prefixNames && m.name ? m.name + ": " + body : body } } : {}),
+          reasoning: Array.isArray(m.extra?.parts)
+            ? m.extra.parts.filter((p) => p.type === "thinking").map((p) => p.text).join("\n")
+            : m.extra?.reasoning,
+          reasoningModel: m.extra?.model,
+        } : {}),
       };
     });
 
@@ -1369,7 +1377,8 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
       const ctx = { ...mc, charName: (visibleHist[i] && visibleHist[i].name) || charName };
       const pre = expandMacros(unesc(isUser ? chCfg.userPrefix : chCfg.charPrefix), ctx);
       const suf = expandMacros(unesc(isUser ? chCfg.userSuffix : chCfg.charSuffix), ctx);
-      return pre + h.content + suf;
+      const thinking = h.reasoning ? (preset.reasoningTags?.open || "<think>") + "\n" + h.reasoning + "\n" + (preset.reasoningTags?.close || "</think>") + "\n\n" : "";
+      return pre + thinking + h.content + suf;
     }).join(sep);
     const role = chCfg.role === "user" || chCfg.role === "system" ? chCfg.role : "assistant";
     history.length = 0;
@@ -1381,7 +1390,7 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   const fixedLen = () => before.concat(extras, after).reduce((a, m) => a + m.content.length, 0);
   // what fell out is reported: automatic compaction fires on it
   let trimmed = 0;
-  while (fixedLen() + history.reduce((a, m) => a + m.content.length, 0) > budget && history.length > 1) { history.splice(0, 1); trimmed++; }
+  while (fixedLen() + history.reduce((a, m) => a + m.content.length + (m.replay ? JSON.stringify(m.replay.messages).length : (m.reasoning?.length || 0)), 0) > budget && history.length > 1) { history.splice(0, 1); trimmed++; }
 
   // utility prompts (preset-level, blank = off):
   //  - new-chat marker rides at the very top of a freshly started chat
@@ -1461,13 +1470,13 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   if (pp && pp.enabled === true && pp.mode && pp.mode !== "none") {
     let list = messages.slice();
     if (pp.mode === "single") {
-      list = [{ role: "user", content: list.map((m) => m.content).filter(Boolean).join("\n\n") }];
+      list = [{ role: "user", content: list.map((m) => m.reasoning ? "<think>\n" + m.reasoning + "\n</think>\n\n" + m.content : m.content).filter(Boolean).join("\n\n") }];
     } else {
       const mergePass = (src) => {
         const merged = [];
         for (const m of src) {
           const last = merged[merged.length - 1];
-          if (last && last.role === m.role && m.content) last.content = last.content + "\n\n" + m.content;
+          if (last && last.role === m.role && m.content && !last.replay && !m.replay && !last.reasoning && !m.reasoning) last.content = last.content + "\n\n" + m.content;
           else merged.push({ ...m });
         }
         return merged;
@@ -2034,6 +2043,58 @@ function portableMedia(value, fsx) {
   const out = {};
   for (const [key, item] of Object.entries(value)) out[key] = portableMedia(item, fsx);
   return out;
+}
+
+const THINKING_FIELDS = ["reasoning", "reasoningMs", "parts", "tools", "replay"];
+function syncSwipeThinking(msg, overwrite = true) {
+  const extra = { ...msg.extra };
+  const count = msg.swipes?.length || 1;
+  extra.swipeMeta = Array.from({ length: count }, (_, i) => extra.swipeMeta?.[i] ?? null);
+  if (!overwrite && extra.swipeMeta[msg.swipe || 0] != null) return { ...msg, extra };
+  const own = { ...extra.swipeMeta[msg.swipe || 0] };
+  for (const key of THINKING_FIELDS) {
+    if (extra[key] === undefined) delete own[key];
+    else own[key] = extra[key];
+  }
+  for (const key of ["model", "usage", "genMs", "params"]) if (extra[key] !== undefined) own[key] = extra[key];
+  extra.swipeMeta[msg.swipe || 0] = own;
+  return { ...msg, extra };
+}
+function restoreSwipeThinking(extra, index) {
+  const next = { ...extra };
+  for (const key of [...THINKING_FIELDS, "model", "usage", "genMs", "params"]) delete next[key];
+  const own = extra?.swipeMeta?.[index];
+  if (own) {
+    for (const key of THINKING_FIELDS) if (own[key] !== undefined) next[key] = own[key];
+    for (const key of ["model", "usage", "genMs", "params"]) if (own[key] !== undefined) next[key] = own[key];
+  }
+  return next;
+}
+// Signed blocks cannot be reused after their thinking has changed.
+function editReplayThinking(replay, text, thinkingIndex) {
+  if (!Array.isArray(replay?.messages)) return undefined;
+  let index = 0;
+  let inserted = false;
+  const messages = replay.messages.map((m) => {
+    if (m.role !== "assistant") return m;
+    const content = m.content.flatMap((block) => {
+      const { thinkingSignature, textSignature, thoughtSignature, ...clean } = block;
+      if (block.type !== "thinking") return [clean];
+      if (block.redacted) return [];
+      if (text === undefined) return [clean];
+      const current = block.thinking?.trim() ? index++ : -1;
+      if (thinkingIndex !== undefined && current !== thinkingIndex) return [clean];
+      if (!text.trim() || (thinkingIndex === undefined && inserted)) return [];
+      inserted = true;
+      return [{ type: "thinking", thinking: text }];
+    });
+    return { ...m, content };
+  });
+  if (typeof text === "string" && text.trim() && !inserted && thinkingIndex === undefined) {
+    const last = [...messages].reverse().find((m) => m.role === "assistant");
+    if (last) last.content.unshift({ type: "thinking", thinking: text });
+  }
+  return { ...replay, messages };
 }
 
 export function handleRoute(req, host) {
@@ -2855,7 +2916,8 @@ const forkTitle = (fsx, title) => {
   while (taken.has(n)) n++;
   return n === 1 ? base + " fork" : base + " fork " + n;
 };
-const swipeMetaEntry = (reply) => ({ model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0 });
+const swipeMetaEntry = (reply) => ({ model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0,
+  params: reply.requestParams, reasoning: reply.reasoning, reasoningMs: reply.reasoningTimeMs, ...toolX(reply) });
 const pushSwipeMeta = (extra, swipesLen, entry) => {
   // pad unknown/misaligned history with nulls so indices always match swipes
   const base = Array.isArray(extra?.swipeMeta) && extra.swipeMeta.length === swipesLen - 1
@@ -2878,6 +2940,7 @@ const stripEchoedName = (text, preset, isGroup, name) => {
   return t.startsWith(prefix) ? t.slice(prefix.length).trimStart() : t;
 };
 const toolX = (r) => ({
+      replay: r.replay,
       ...(Array.isArray(r.toolTrace) && r.toolTrace.length ? { tools: r.toolTrace } : {}),
       ...(Array.isArray(r.parts) && r.parts.length ? { parts: r.parts } : {}),
     });
@@ -3151,7 +3214,7 @@ const toolX = (r) => ({
       const pristineGreeting = !meta.tainted && chat.msgs.length === 1 && msg.greeting === true;
       if (next >= 0 && next < swipes.length) {
         const text = expandMacros(String(swipes[next]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), summary: String(meta.summary || "") }));
-        chat.msgs[idx] = { ...msg, text, swipe: next, swipes, translation: undefined };
+        chat.msgs[idx] = { ...msg, text, swipe: next, swipes, translation: undefined, extra: restoreSwipeThinking(syncSwipeThinking(msg, false).extra, next) };
         saveChat(fsx, id, touch(meta), chat.msgs);
         return ok({ message: chat.msgs[idx], swipe: next, count: swipes.length });
       }
@@ -3197,8 +3260,9 @@ const toolX = (r) => ({
       if (swipPrefill && !fresh.startsWith(swipPrefill)) fresh = swipPrefill + fresh;
       fresh = onSave(fresh, "ai_output", speaker);
       if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
+      const previousMeta = syncSwipeThinking(msg, false).extra.swipeMeta;
       swipes.push(fresh);
-      chat.msgs[idx] = { ...msg, text: fresh, swipe: swipes.length - 1, swipes, translation: undefined, extra: pushSwipeMeta({ model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) }, swipes.length, swipeMetaEntry(reply)) };
+      chat.msgs[idx] = { ...msg, text: fresh, swipe: swipes.length - 1, swipes, translation: undefined, extra: pushSwipeMeta({ swipeMeta: previousMeta, model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) }, swipes.length, swipeMetaEntry(reply)) };
       applyStashVars(req, meta);
       saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
       return ok({ message: chat.msgs[idx], swipe: swipes.length - 1, count: swipes.length });
@@ -3228,14 +3292,14 @@ const toolX = (r) => ({
         if (continuing) swipes[target.swipe || 0] = text;
         else swipes.push(text);
         const swipe = continuing ? target.swipe || 0 : swipes.length - 1;
-        const extra = { ...target.extra, model, genMs, usage: undefined, params: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
+        const extra = { ...syncSwipeThinking(target, false).extra, model, genMs, usage: undefined, params: undefined, replay: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
         if (continuing) {
-          const swipeMeta = Array.isArray(target.extra?.swipeMeta) ? target.extra.swipeMeta.slice() : swipes.map(() => ({}));
+          const swipeMeta = extra.swipeMeta.slice();
           swipeMeta[swipe] = { genMs, ...(model ? { model } : {}) };
           extra.swipeMeta = swipeMeta;
         }
-        chat.msgs[chat.msgs.indexOf(target)] = { ...target, text, swipes, swipe, translation: undefined,
-          extra: continuing ? extra : pushSwipeMeta(extra, swipes.length, { genMs, ...(model ? { model } : {}) }) };
+        chat.msgs[chat.msgs.indexOf(target)] = syncSwipeThinking({ ...target, text, swipes, swipe, translation: undefined,
+          extra: continuing ? extra : pushSwipeMeta(extra, swipes.length, { genMs, ...(model ? { model } : {}) }) });
       } else {
         const userText = typeof b.userText === "string" ? onSave(b.userText.trim(), "user_input", members[0] || null).trim() : "";
         if (!keep && !userText) return err(400, "nothing to keep");
@@ -3313,11 +3377,28 @@ const toolX = (r) => ({
       const swipes = msg.swipes && msg.swipes.length ? msg.swipes.slice() : [msg.text];
       swipes[msg.swipe || 0] = merged;
       const contExtra = { ...msg.extra, model: reply.model, continued: true, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) };
+      contExtra.reasoning = [msg.extra?.reasoning, reply.reasoning].filter(Boolean).join("\n") || undefined;
+      const thinkingMs = (msg.extra?.reasoningMs || 0) + (reply.reasoningTimeMs || 0);
+      contExtra.reasoningMs = thinkingMs || undefined;
+      if (msg.extra?.parts?.length || reply.parts?.length) {
+        const segments = (text, reasoning, parts) => parts?.length ? parts : [
+          ...(reasoning ? [{ type: "thinking", text: reasoning }] : []),
+          ...(text ? [{ type: "text", text }] : []),
+        ];
+        contExtra.parts = [...segments(msg.text, msg.extra?.reasoning, msg.extra?.parts), ...segments(extra, reply.reasoning, reply.parts)];
+        contExtra.tools = [...(msg.extra?.tools || []), ...(reply.toolTrace || [])];
+      }
+      if (reply.replay) {
+        const first = reply.replay.messages.find((m) => m.role === "assistant");
+        const prior = msg.extra?.replay?.text === msg.text ? msg.extra.replay.messages
+          : first ? [{ ...first, content: [{ type: "text", text: msg.text }] }] : [];
+        contExtra.replay = { text: merged, messages: [...prior, ...reply.replay.messages] };
+      }
       if (Array.isArray(msg.extra?.swipeMeta) && msg.extra.swipeMeta.length === swipes.length) {
         contExtra.swipeMeta = msg.extra.swipeMeta.slice();
         contExtra.swipeMeta[msg.swipe || 0] = swipeMetaEntry(reply);
       }
-      chat.msgs[idx] = { ...msg, text: merged, swipes, translation: undefined, extra: contExtra };
+      chat.msgs[idx] = syncSwipeThinking({ ...msg, text: merged, swipes, translation: undefined, extra: contExtra });
       applyStashVars(req, meta);
       saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
       return ok({ message: chat.msgs[idx] });
@@ -3601,6 +3682,7 @@ const toolX = (r) => ({
       if (idx < 0) return err(404, "message not found");
       const b = body();
       const msg = chat.msgs[idx];
+      if (b.swipeIndex !== undefined && b.swipeIndex !== (msg.swipe || 0)) return err(409, "Reply changed, try again");
       let next = { ...msg };
       if (typeof b.text === "string" && b.text.trim()) {
         // scripts opted into edit-time rewriting clean the stored text itself
@@ -3612,7 +3694,7 @@ const toolX = (r) => ({
         );
         const swipes = msg.swipes && msg.swipes.length ? msg.swipes.slice() : [msg.text];
         swipes[msg.swipe || 0] = text;
-        next = { ...next, text, swipes, edited: true, translation: undefined };
+        next = { ...next, text, swipes, edited: true, translation: undefined, extra: { ...next.extra, replay: undefined } };
       }
       // a message's translation dies with its text: every route that swaps
       // the displayed text (edit, swipe switch/append, continue, cancel
@@ -3626,16 +3708,43 @@ const toolX = (r) => ({
         const extra = { ...next.extra };
         if (b.reasoning.trim()) extra.reasoning = b.reasoning;
         else delete extra.reasoning;
+        extra.replay = editReplayThinking(extra.replay, b.reasoning);
+        if (!b.reasoning.trim()) delete extra.reasoningMs;
         next = { ...next, extra };
       }
       if (b.think && typeof b.think.index === "number" && typeof b.think.text === "string" && Array.isArray(next.extra?.parts)) {
         const parts = next.extra.parts.map((p, i) => (i === b.think.index && p && p.type === "thinking" ? { ...p, text: b.think.text } : p));
-        next = { ...next, extra: { ...next.extra, parts } };
+        const thinkingIndex = next.extra.parts.slice(0, b.think.index).filter((p) => p?.type === "thinking").length;
+        const isThinking = next.extra.parts[b.think.index]?.type === "thinking";
+        next = { ...next, extra: { ...next.extra, parts,
+          ...(isThinking ? { replay: editReplayThinking(next.extra.replay, b.think.text, thinkingIndex),
+            reasoning: parts.filter((p) => p?.type === "thinking").map((p) => p.text).join("\n") } : {}),
+        } };
+      }
+      if (b.removeThinking === true) {
+        const extra = { ...next.extra };
+        delete extra.reasoning;
+        delete extra.reasoningMs;
+        if (extra.replay) extra.replay = editReplayThinking(extra.replay, "");
+        if (Array.isArray(extra.parts)) {
+          extra.parts = extra.parts.filter((p) => p?.type !== "thinking");
+          if (!extra.parts.length) delete extra.parts;
+        }
+        next = { ...next, extra };
       }
       if ("hidden" in b) next.hidden = b.hidden === true;
       if ("bookmarked" in b) next.bookmarked = b.bookmarked === true;
       if ("bookmarkLabel" in b) next.bookmarkLabel = b.bookmarkLabel;
-      chat.msgs[idx] = next;
+      if (typeof b.text === "string" || typeof b.reasoning === "string" || b.think || b.removeThinking === true) {
+        for (let i = idx + 1; i < chat.msgs.length; i++) {
+          const later = chat.msgs[i];
+          if (later.extra?.replay) chat.msgs[i] = syncSwipeThinking({ ...later,
+            extra: { ...later.extra, replay: editReplayThinking(later.extra.replay) },
+          });
+        }
+      }
+      chat.msgs[idx] = syncSwipeThinking(next);
+      next = chat.msgs[idx];
       applyStashVars(req, meta);
       saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
       return ok({ message: next });
@@ -3665,7 +3774,8 @@ const toolX = (r) => ({
       const want = Math.floor(Number(body().index));
       if (!(want >= 0 && want < swipes.length)) return err(400, "swipe index out of range");
       const text = expandMacros(String(swipes[want]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), summary: String(meta.summary || "") }));
-      chat.msgs[idx] = { ...msg, text, swipe: want, swipes, translation: undefined };
+      const savedExtra = syncSwipeThinking(msg, false).extra;
+      chat.msgs[idx] = { ...msg, text, swipe: want, swipes, translation: undefined, extra: restoreSwipeThinking(savedExtra, want) };
       saveChat(fsx, id, touch(meta), chat.msgs);
       return ok({ message: chat.msgs[idx], swipe: want, count: swipes.length });
     }
@@ -3681,10 +3791,11 @@ const toolX = (r) => ({
       if (swipes.length <= 1) return err(400, "cannot delete the only swipe");
       if (!(sidx >= 0 && sidx < swipes.length)) return err(400, "swipe index out of range");
       swipes.splice(sidx, 1);
-      const swipe = Math.min(msg.swipe || 0, swipes.length - 1);
+      const oldSwipe = msg.swipe || 0;
+      const swipe = sidx < oldSwipe ? oldSwipe - 1 : Math.min(oldSwipe, swipes.length - 1);
       const metaLeft = Array.isArray(msg.extra?.swipeMeta) && msg.extra.swipeMeta.length === swipes.length + 1 ? msg.extra.swipeMeta.slice() : null;
       if (metaLeft) metaLeft.splice(sidx, 1);
-      chat.msgs[idx] = { ...msg, swipes, swipe, text: swipes[swipe], translation: undefined, extra: metaLeft ? { ...msg.extra, swipeMeta: metaLeft } : msg.extra };
+      chat.msgs[idx] = { ...msg, swipes, swipe, text: swipes[swipe], translation: undefined, extra: sidx === oldSwipe ? restoreSwipeThinking({ ...msg.extra, swipeMeta: metaLeft }, swipe) : { ...msg.extra, ...(metaLeft ? { swipeMeta: metaLeft } : {}) } };
       saveChat(fsx, id, touch(meta), chat.msgs);
       return ok({ message: chat.msgs[idx], swipe, count: swipes.length });
     }

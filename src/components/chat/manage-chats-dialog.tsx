@@ -2,7 +2,7 @@ import { importArchiveWithProgress } from "@/lib/archive-import"
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Check, Flag, GitBranch, ChatCenteredText, PencilSimple, Trash, ArrowElbowDownRight, BookmarkSimple, FileText, FileCode, UploadSimple, BoxArrowUp } from '@phosphor-icons/react'
-import { toast } from "sonner"
+import { createToast } from '@/lib/notifications'
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
@@ -17,6 +17,8 @@ import { saveFile } from "@/lib/export"
 import { j } from "@/lib/engine"
 import type { Chat, ID } from "@/lib/types"
 import { cn } from "@/lib/utils"
+
+const toast = createToast('chat')
 
 function downloadText(text: string, filename: string, mime = "text/plain") {
   saveFile(new Blob([text], { type: mime }), filename)

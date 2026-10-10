@@ -1,0 +1,52 @@
+{
+  "spec": "chara_card_v2",
+  "name": "New character",
+  "description": "",
+  "personality": "",
+  "scenario": "",
+  "first_mes": "",
+  "mes_example": "",
+  "system_prompt": "",
+  "post_history_instructions": "",
+  "alternate_greetings": [],
+  "group_only_greetings": [],
+  "creator_notes": "",
+  "tags": [],
+  "avatar": "",
+  "creator": "",
+  "character_version": "1.0",
+  "studio": {
+    "altAvatars": [],
+    "depthPrompt": {
+      "text": "",
+      "depth": 4,
+      "role": "system"
+    },
+    "favorite": false,
+    "folderId": null,
+    "createdAt": 0,
+    "lastChatAt": 0,
+    "embeddedLorebookId": null,
+    "linkedLorebookIds": [],
+    "colors": {
+      "name": "",
+      "dialogue": "",
+      "bubble": ""
+    },
+    "stats": [],
+    "descVariants": [],
+    "personalityVariants": [],
+    "scenarioVariants": [],
+    "variantSelection": {},
+    "versions": [],
+    "voiceProvider": "",
+    "voiceId": "",
+    "gallery": [],
+    "expressions": [],
+    "defaultExpression": "neutral",
+    "characterRegexIds": [],
+    "css": ""
+  },
+  "spec_version": "2.0",
+  "extensions": {}
+}

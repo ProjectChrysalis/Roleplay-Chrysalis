@@ -8,10 +8,12 @@ import {
 } from '@/components/ui/select'
 import { Image, CircleNotch, MagicWand } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { buildImagePrompt, generateImage, type GeneratedImage } from '@/lib/image-gen'
 import { fetchImageModels, type ImageModelInfo } from '@/lib/engine'
+
+const toast = createToast('images')
 
 /** Fixed subject so the test isolates the effect of the settings themselves. */
 const TEST_SUBJECT = 'a lantern-lit street after rain, figure in a long coat'

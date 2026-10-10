@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { useApp } from '@/lib/store'
 import type { ID } from '@/lib/types'
 import { cn, shortModel } from '@/lib/utils'
@@ -9,6 +9,8 @@ import {
 } from '@/components/ui/command'
 import { ProfilesSheet } from '@/components/connections/profiles-sheet'
 import { BookmarkSimple, Check, PencilSimple, GearSix } from '@phosphor-icons/react'
+
+const toast = createToast('connections')
 
 /**
  * Chat-header quick switcher: ONE compact control (icon on mobile,

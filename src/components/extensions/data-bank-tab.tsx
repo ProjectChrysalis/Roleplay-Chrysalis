@@ -5,8 +5,10 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Database, FileText, CircleNotch, Trash, UploadSimple } from '@phosphor-icons/react'
 import { useConfirm } from '@/components/ui/confirm'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { j } from '@/lib/engine'
+
+const toast = createToast('databank')
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`

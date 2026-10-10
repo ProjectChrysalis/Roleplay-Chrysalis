@@ -4,6 +4,29 @@ You are operating on the official Roleplay app's files. First-party but
 unprivileged: everything here is plain files you may read, edit, and commit —
 same as any user-made app. Keep this file current when you change the app.
 
+## Create and edit data
+
+Use the focused skill matching the request under `.agents/skills/`: character,
+persona, preset, lorebook, regex, chat, group, settings, library, or databank,
+all with the `-editing` suffix. Skills cover reading as well as editing. Load
+only the relevant skill; use its inspector to resolve known records and nested
+items in one call. Its editor preserves fields and checks inspected revisions.
+Preset helpers also synchronize portable/editor values; chat helpers preserve
+inactive swipes and generation metadata. Structural chat actions use app routes.
+
+For creation or unfamiliar fields, consult `data/_catalog.json`: entity paths, routes, complete templates, and
+source types. Read only the matching section of `data/_EDITING.md` for field meanings,
+paired representations, bindings, and safe writes. Copy `data/_templates/_<kind>.json` to a new
+unique non-underscore ID, replace names/text/IDs, and use actual millisecond
+timestamps. For an edit, read the existing record and preserve every field
+you are not changing, including opaque metadata, extensions, and studio bags.
+Character cards are flat; their stored example-dialogue key is `mes_example`.
+Preset text/order live in prompts/prompt_order and their matching studio
+sections. Keep both copies consistent. Persona defaults live in
+settings.json.personaId. Never overwrite live settings/library with a template.
+UI data saves coalesce rapid replacements and serialize writes per entity;
+refresh reads wait for pending saves, including the debounce period.
+
 ## Where a change goes — decide this first
 
 Pick the lightest place that can carry the request. All three are supported and
@@ -71,8 +94,29 @@ explicit bindings through `_chatLorebookNames`. Forks inherit the selection.
 Stored avatar URLs must pass through `lib/avatar-media.ts` before the UI kit
 preloads them. Detached image preloaders cannot carry the frame’s session; the
 resolver shares authenticated fetches and gives the component a blob URL.
+Settings → Notifications controls popups by type and area through
+lib/notifications.ts. Popups use neutral borders. All popup producers use createToast(area), including
+store actions. Swipe transitions use hooks/use-swipe-animation.ts and lib/swipe-animation.ts.
+The avatar and message content slide out, swap offscreen, and enter from the
+opposite side. New generations reveal the stream at the midpoint; commits
+and interrupted replies stay in place. One transition runs at a time.
+Preferences live in settings.ui.notifications; missing keys
+are enabled for older settings. settings.ui.notificationPosition chooses
+the popup position, defaulting to bottom-center.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
 to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
+
+Thinking controls can remove all saved thinking from the displayed reply, including
+interleaved thinking parts, without changing text or tool results. Presets choose
+Thinking history: preserve (default) replays native assistant/tool sequences and
+signatures on the same provider, API and model; individual sends reply text only.
+Edits clear invalid signatures and send changed thinking as ordinary context.
+Deletion clears thought text and signatures; swipes retain their own thinking.
+Stopped replies store their thinking parts on their own swipe. Swipe navigation
+snapshots the outgoing metadata and restores the chosen swipe's metadata.
+Saved swipe metadata is authoritative in the UI and during navigation; stale
+message metadata must not overwrite a swipe's thought text or duration.
+Older replies retain readable thinking but cannot recover missing signatures.
 
 ## Phase status
 

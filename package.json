@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "bunx --package typescript@5.9.3 tsc --noEmit -p tsconfig.json",
-    "test": "bun test test/"
+    "test": "bun test test/",
+    "build:skills": "bun .agents/build-skills.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

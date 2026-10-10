@@ -1,12 +1,14 @@
 import { useRef, useState } from 'react'
 import { BookOpenText, Check, X } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { useApp } from '@/lib/store'
 import type { ID } from '@/lib/types'
 import { cn } from '@/lib/utils'
+
+const toast = createToast('lorebooks')
 
 export function ChatLorebooks({ chatId, open, onOpenChange }: {
   chatId: ID; open: boolean; onOpenChange: (open: boolean) => void

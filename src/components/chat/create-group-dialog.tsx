@@ -8,7 +8,9 @@ import { Input } from '@/components/ui/input'
 import { Field, FieldLabel } from '@/components/ui/field'
 import { useApp } from '@/lib/store'
 import { DEFAULT_AVATAR, cn } from '@/lib/utils'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
+
+const toast = createToast('chat')
 
 export function CreateGroupDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const characters = useApp((s) => s.characters)

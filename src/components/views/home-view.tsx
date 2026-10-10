@@ -12,8 +12,10 @@ import {
 import { useApp } from '@/lib/store'
 import { timeAgo } from '@/lib/tokens'
 import type { Achievement } from '@/lib/types'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { DEFAULT_AVATAR } from '@/lib/utils'
+
+const toast = createToast('chat')
 
 export function HomeView() {
   const characters = useApp((s) => s.characters)

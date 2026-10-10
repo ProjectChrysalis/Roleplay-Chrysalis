@@ -23,8 +23,12 @@ import { uid } from "@/lib/tokens"
 import { fileToRawDataUrl } from "@/lib/engine"
 import { cn } from "@/lib/utils"
 import type { ID, Message, QuickReply } from "@/lib/types"
-import { toast } from "sonner"
+import { createToast } from '@/lib/notifications'
 import { DEFAULT_AVATAR } from '../../lib/utils'
+
+const toast = createToast('chat')
+const personasToast = createToast('personas')
+const imagesToast = createToast('images')
 
 type Attachment = NonNullable<Message["attachments"]>[number]
 
@@ -195,7 +199,7 @@ export function Composer({ chatId }: { chatId: ID }) {
    */
   const startImageGen = async (arg = "") => {
     if (!imageGen?.enabled) {
-      toast.error("Image generation is off", { description: "Turn it on in Tools → Image Generation." })
+      imagesToast.error("Image generation is off", { description: "Turn it on in Tools → Image Generation." })
       return
     }
     const start = parseImagineArg(arg)
@@ -205,19 +209,19 @@ export function Composer({ chatId }: { chatId: ID }) {
       return
     }
     setImgBusy(true)
-    const toastId = toast.loading("mode" in start ? "Reading the chat…" : "Drawing…")
+    const toastId = imagesToast.loading("mode" in start ? "Reading the chat…" : "Drawing…")
     try {
       const subject = "text" in start ? start.text : await describeForImage(chatId, start.mode, chatModel)
-      toast.loading("Drawing…", { id: toastId })
+      imagesToast.loading("Drawing…", { id: toastId })
       const img = await generateImage({
         prompt: buildImagePrompt(imageGen, subject),
         negativePrompt: imageGen.negativePrompt,
         model: imageGen.model || undefined,
       })
       await postPicture(chatId, img)
-      toast.success("Picture posted", { id: toastId })
+      imagesToast.success("Picture posted", { id: toastId })
     } catch (err) {
-      toast.error("Image generation failed", { id: toastId, description: (err as Error).message })
+      imagesToast.error("Image generation failed", { id: toastId, description: (err as Error).message })
     } finally {
       setImgBusy(false)
     }
@@ -477,7 +481,7 @@ export function Composer({ chatId }: { chatId: ID }) {
                     key={p.id}
                     onClick={() => {
                       updateChat(chatId, { personaId: p.id })
-                      toast.success(`Speaking as ${p.name}`)
+                      personasToast.success(`Speaking as ${p.name}`)
                     }}
                   >
                     <img src={p.avatar || DEFAULT_AVATAR} alt="" className="size-5 shrink-0 rounded-full object-cover" />

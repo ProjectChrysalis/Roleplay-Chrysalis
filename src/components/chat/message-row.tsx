@@ -28,7 +28,11 @@ import { speakText, stopSpeaking, useSpeakingKey, voiceFor } from '@/lib/tts'
 import type { Chat, Character, Message, RegexScript, ToolPart } from '@/lib/types'
 import { estimateTokens, formatCost, formatTokens, knownCost } from '@/lib/tokens'
 import { DEFAULT_AVATAR, cn, copyText, readableNameColor, shortModel } from '@/lib/utils'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
+
+const toast = createToast('chat')
+const memoryToast = createToast('memory')
+const speechToast = createToast('speech')
 
 // claim the wheel ALWAYS while the cursor is over the box: scrolling inside
 // a thinking block never moves the page, even at its top/bottom boundaries
@@ -98,7 +102,7 @@ type LiveNode =
 // streaming); open state is caller-owned — untouched segments follow the
 // Auto-expand Thinking setting (off = start closed), so the streaming→commit
 // swap keeps exactly what the user was looking at.
-function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit }: {
+function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit, onRemove }: {
   text: string
   /** measured span for this segment (kernel-reported) */
   ms?: number
@@ -108,6 +112,7 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit }: {
   onOpenChange?: (open: boolean) => void
   /** present on committed segments: the thinking is editable on its own */
   onEdit?: (text: string) => void
+  onRemove?: () => void
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null)
   const pinnedRef = useRef(true)
@@ -152,6 +157,18 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit }: {
             <PencilSimple className="size-3" aria-hidden="true" />
           </Button>
         )}
+        {onRemove && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="size-6 shrink-0 text-muted-foreground"
+            aria-label="Remove thinking"
+            title="Remove all thinking from this reply"
+            onClick={onRemove}
+          >
+            <Trash className="size-3" aria-hidden="true" />
+          </Button>
+        )}
       </div>
       <CollapsibleContent>
         {editing ? (
@@ -191,7 +208,7 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit }: {
 const EMPTY_THINK_OPEN: Record<number, boolean> = {}
 
 export const MessageRow = memo(function MessageRow({
-  chat, message, index, character, isLast, slidePhase, onSwipeFx, summarized = false,
+  chat, message, index, character, isLast, slidePhase, swipeBusy = false, onSwipeFx, summarized = false,
 }: {
   chat: Chat
   message: Message
@@ -203,9 +220,8 @@ export const MessageRow = memo(function MessageRow({
   /** swipe transition phase for this row: 'out'/'in' while this row or one
    *  above it is mid-swipe (rows below a swipe slide along with it), else null */
   slidePhase?: 'out' | 'in' | null
-  /** row asking the chat view to run the swipe phase clock (dir: -1 = next
-   *  swipe / exits left, +1 = previous / exits right; range = px to travel) */
-  onSwipeFx?: (index: number, dir: 1 | -1, range: number) => void
+  swipeBusy?: boolean
+  onSwipeFx?: (index: number, dir: 1 | -1, swap: () => void) => boolean
 }) {
   const settings = useApp((s) => s.settings)
   const activeModel = useApp((s) => s.model)
@@ -244,6 +260,7 @@ export const MessageRow = memo(function MessageRow({
   const [translateBusy, setTranslateBusy] = useState(false)
   // thinking-block editing (separate from the reply text)
   const editReasoning = useApp((s) => s.editReasoning)
+  const removeThinking = useApp((s) => s.removeThinking)
   const editThinkPart = useApp((s) => s.editThinkPart)
   const [reasonEditing, setReasonEditing] = useState(false)
   const [reasonDraft, setReasonDraft] = useState('')
@@ -279,12 +296,11 @@ export const MessageRow = memo(function MessageRow({
     const charVoice = !isUser && speaker && 'voiceProvider' in speaker ? speaker : null
     speakText(rawContent, voiceFor(settings.tts, charVoice), speakKey)
       .then((played) => {
-        if (!played) toast.info('Pick a TTS provider in Settings → Sound. “System (Web Speech)” uses the browser’s built-in voices')
+        if (!played) speechToast.info('Pick a TTS provider in Settings → Sound. “System (Web Speech)” uses the browser’s built-in voices')
       })
-      .catch((e: Error) => toast.error(`TTS failed: ${e.message}`))
+      .catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
   }
 
-  const swipe = message.swipes[message.activeSwipe]
   // narrow streaming subscription: primitives only, so a tick for ONE
   // message re-renders just that row (the whole-object selector re-rendered
   // every mounted row 30-60x/s during generation — the scroll jank)
@@ -308,46 +324,54 @@ export const MessageRow = memo(function MessageRow({
     if (!el) return
     thinkPinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
   }
-  const isStreamingThis = streamingShown >= 0
-  // Swipe transition (out → swap → in): the row renders `shownSwipe`, which
-  // lags the store's activeSwipe by exactly one animation. The chat view owns
-  // the phase clock and echoes it back through `slidePhase`; content swaps the
-  // instant the in-phase starts, so the outgoing text never coexists with the
-  // incoming one.
+  const streamingOperation = useApp((s) => s.streaming?.messageId === message.id ? s.streaming.operation : undefined)
+  const streamingStartedAt = useApp((s) => s.streaming?.messageId === message.id ? s.streaming.startedAt : null)
+  const hasStream = streamingShown >= 0
   const [shownSwipe, setShownSwipe] = useState(message.activeSwipe)
+  const [shownGeneration, setShownGeneration] = useState<number | null>(null)
+  const isStreamingThis = hasStream && (streamingOperation !== 'swipe' || shownGeneration === streamingStartedAt)
   const [lockH, setLockH] = useState(0)
-  const prevTarget = useRef(message.activeSwipe)
   const rowRef = useRef<HTMLDivElement>(null)
+  const latestTarget = useRef({ swipe: message.activeSwipe, generation: streamingStartedAt })
+  latestTarget.current = { swipe: message.activeSwipe, generation: streamingStartedAt }
+  const hadStream = useRef(hasStream)
+  const hadVisibleStream = useRef(isStreamingThis)
   const swipeFxSkip = useApp((s) => s.swipeFxSkip)
   const consumeSwipeFxSkip = useApp((s) => s.consumeSwipeFxSkip)
-  useEffect(() => {
-    if (prevTarget.current === message.activeSwipe) return
-    const target = message.activeSwipe
-    // a cancelled regen lands on its frozen swipe with the animation
-    // suppressed — the screen keeps what it had, no slide
-    if (swipeFxSkip === `${message.id}:${target}`) {
-      prevTarget.current = target
-      setShownSwipe(target)
+  const swipe = message.swipes[shownSwipe]
+  useLayoutEffect(() => {
+    const commit = () => {
+      pinAtSwapRef.current = readerAtBottom()
+      setShownSwipe(latestTarget.current.swipe)
+      setShownGeneration(latestTarget.current.generation)
       setLockH(0)
-      consumeSwipeFxSkip(swipeFxSkip)
+    }
+    const committedStream = hadStream.current && !hasStream
+    const streamWasVisible = hadVisibleStream.current
+    hadStream.current = hasStream
+    hadVisibleStream.current = isStreamingThis
+    const skip = swipeFxSkip === `${message.id}:${message.activeSwipe}`
+    if (skip) consumeSwipeFxSkip(swipeFxSkip)
+    // A completed or interrupted stream already occupies the visible row.
+    // If it finishes during the outgoing slide, the midpoint reads its result.
+    if (committedStream) {
+      if (!swipeBusy || streamWasVisible) commit()
       return
     }
-    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    const el = rowRef.current
-    if (reduced || isStreamingThis || !el || !onSwipeFx) {
-      prevTarget.current = target
-      setShownSwipe(target)
+    const newGeneration = hasStream && streamingOperation === 'swipe' && shownGeneration !== streamingStartedAt
+    if (!newGeneration && (hasStream || shownSwipe === message.activeSwipe)) return
+    if (skip) { commit(); return }
+    if (settings.reducedMotion || window.matchMedia('(prefers-reduced-motion: reduce)').matches || !onSwipeFx || !rowRef.current) {
+      commit()
       return
     }
-    // freeze the row's height for the out-phase so a shorter/longer incoming
-    // swipe can't reflow the chat mid-slide; released when content swaps
-    const rect = el.getBoundingClientRect()
-    setLockH(rect.height)
-    // next swipe exits left, previous swipe exits right (carousel semantics)
-    const dir = target > prevTarget.current ? -1 : 1
-    prevTarget.current = target
-    onSwipeFx(index, dir, rect.width + 30)
-  }, [message.activeSwipe, isStreamingThis, index, onSwipeFx, swipeFxSkip, consumeSwipeFxSkip])
+    // Changes during a slide are coalesced at the midpoint or on completion.
+    if (swipeBusy) return
+    const height = rowRef.current.getBoundingClientRect().height
+    const direction = newGeneration || message.activeSwipe > shownSwipe ? -1 : 1
+    if (onSwipeFx(index, direction, commit)) setLockH(height)
+    else commit()
+  }, [message.activeSwipe, shownSwipe, hasStream, streamingOperation, streamingStartedAt, shownGeneration, isStreamingThis, swipeBusy, index, onSwipeFx, swipeFxSkip, consumeSwipeFxSkip, settings.reducedMotion])
   // Swapping a swipe (or the streaming bubble committing) changes the row's
   // height, and the chat log runs with native scroll anchoring OFF so the
   // streaming follow stays deterministic. Compensation is the chat-log rule:
@@ -367,18 +391,11 @@ export const MessageRow = memo(function MessageRow({
     scroller.scrollTop += row.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom
   }
   const pinAtSwapRef = useRef(false)
-  // the in-phase is the swap point; the height lock dies with it
-  useEffect(() => {
-    if (slidePhase === 'in') {
-      pinAtSwapRef.current = readerAtBottom()
-      setShownSwipe(message.activeSwipe); setLockH(0)
-    }
-  }, [slidePhase, message.activeSwipe]) // eslint-disable-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     if (!pinAtSwapRef.current) return
     pinAtSwapRef.current = false
     keepRowInView()
-  }, [shownSwipe, lockH]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [shownSwipe, shownGeneration, lockH]) // eslint-disable-line react-hooks/exhaustive-deps
   // streaming→commit swaps the row's content source (live bubble → committed
   // rendering) — the same rule, measured on the last streamed frame
   const pinAtCommitRef = useRef(false)
@@ -586,6 +603,12 @@ export const MessageRow = memo(function MessageRow({
             {message.hidden ? <Eye className="size-4" aria-hidden="true" /> : <Ghost className="size-4" aria-hidden="true" />}
             {message.hidden ? 'Unhide from AI' : 'Hide from AI'}
           </DropdownMenuItem>
+          {!isUser && !isStreamingThis && swipe?.hasThinking && (
+            <DropdownMenuItem onClick={() => removeThinking(chat.id, message.id)}>
+              <Trash className="size-3.5" />
+              Remove thinking
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onClick={() => setPeekOpen(true)}>
             <Scan className="size-4" aria-hidden="true" />
             Prompt peek
@@ -597,18 +620,18 @@ export const MessageRow = memo(function MessageRow({
           {isCutoff && chat.compactions > 0 ? (
             <DropdownMenuItem onClick={() => {
               void undoCompaction(chat.id)
-                .then(() => toast.success('Summary restored to before the last compaction'))
-                .catch((e) => toast.error(String((e as Error).message ?? e)))
+                .then(() => memoryToast.success('Summary restored to before the last compaction'))
+                .catch((e) => memoryToast.error(String((e as Error).message ?? e)))
             }}>
               <Brain className="size-4" aria-hidden="true" />
               Undo last summary
             </DropdownMenuItem>
           ) : !isCutoff && index > 0 && (
             <DropdownMenuItem onClick={() => {
-              const t = toast.loading('Summarizing…')
+              const t = memoryToast.loading('Summarizing…')
               void compactChat(chat.id, { upTo: message.id })
-                .then((r) => toast.success(`${r.covered} messages folded into the summary`, { id: t }))
-                .catch((e) => toast.error(String((e as Error).message ?? e), { id: t }))
+                .then((r) => memoryToast.success(`${r.covered} messages folded into the summary`, { id: t }))
+                .catch((e) => memoryToast.error(String((e as Error).message ?? e), { id: t }))
             }}>
               <Brain className="size-4" aria-hidden="true" />
               Summarize everything above
@@ -643,16 +666,16 @@ export const MessageRow = memo(function MessageRow({
       <div
         ref={rowRef}
         data-message-id={message.id}
+        data-message-index={index}
         data-char-id={!isUser ? (message.characterId ?? chat.characterId) : undefined}
-        style={slidePhase === 'out' && lockH > 0
-          ? { height: lockH }
-          : settings.messageTint && !isUser && character.colors.bubble ? { backgroundColor: character.colors.bubble + '26' } : undefined}
+        style={{
+          ...(slidePhase === 'out' && lockH > 0 ? { height: lockH, overflow: 'hidden' } : {}),
+          ...(settings.messageTint && !isUser && character.colors.bubble ? { backgroundColor: character.colors.bubble + '26' } : {}),
+        }}
         className={cn(
           'relative flex rounded-lg transition-colors',
           rowGap,
           rowPad,
-          slidePhase === 'out' && 'swipe-out',
-          slidePhase === 'in' && 'swipe-in',
           mode === 'bubbles' && (isUser ? 'bg-secondary/70' : 'bg-card/80') + ' border border-border/60',
           mode === 'flat' && 'border-b border-border/40 rounded-none',
           mode === 'minimal' && cn('border-l-2 rounded-none pl-3', isUser ? 'border-primary/60' : 'border-muted-foreground/40'),
@@ -662,7 +685,7 @@ export const MessageRow = memo(function MessageRow({
         )}
       >
         {!settings.hideAvatars && mode !== 'document' && (
-          <div className="flex shrink-0 flex-col items-center gap-0.5 self-start" style={{ zoom: 'var(--avatar-scale, 1)' }}>
+          <div data-swipe-panel className="flex shrink-0 flex-col items-center gap-0.5 self-start" style={{ zoom: 'var(--avatar-scale, 1)' }}>
           <Popover open={avatarOpen} onOpenChange={setAvatarOpen}>
             <PopoverTrigger
               render={
@@ -753,7 +776,7 @@ export const MessageRow = memo(function MessageRow({
           </div>
           </div>
         )}
-        <div className="min-w-0 flex-1">
+        <div data-swipe-panel className="min-w-0 flex-1">
           {mode !== 'document' && (
             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
               <span className="font-semibold" style={{ color: !isUser ? readableNameColor(character.colors.name) : undefined }}>
@@ -865,6 +888,16 @@ export const MessageRow = memo(function MessageRow({
                     <PencilSimple className="size-3" aria-hidden="true" />
                   </Button>
                 )}
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="size-6 shrink-0 text-muted-foreground"
+                  aria-label="Remove thinking"
+                  title="Remove all thinking from this reply"
+                  onClick={() => { removeThinking(chat.id, message.id); setReasonEditing(false) }}
+                >
+                  <Trash className="size-3" aria-hidden="true" />
+                </Button>
               </div>
               <CollapsibleContent>
                 {reasonEditing ? (
@@ -936,6 +969,7 @@ export const MessageRow = memo(function MessageRow({
                                 open={thinkOpen[n] ?? settings.reasoningAutoExpand}
                                 onOpenChange={(o) => thinkToggle(n, o)}
                                 onEdit={(t) => editThinkPart(chat.id, message.id, i, t)}
+                                onRemove={() => removeThinking(chat.id, message.id)}
                               />
                             </div>
                           )
@@ -970,7 +1004,7 @@ export const MessageRow = memo(function MessageRow({
                   <RichText
                     content={content || '…'}
                     scope={cssScope}
-                    onChoice={!isUser && !isStreamingThis ? (choice) => { void sendMessage(chat.id, choice) } : undefined}
+                    onChoice={!isUser && !hasStream && !swipeBusy ? (choice) => { void sendMessage(chat.id, choice) } : undefined}
                   />
                 )}
                 {message.translation && (
@@ -993,18 +1027,19 @@ export const MessageRow = memo(function MessageRow({
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Previous swipe"
-                disabled={message.activeSwipe === 0}
+                disabled={message.activeSwipe === 0 || swipeBusy || hasStream}
                 onClick={() => setSwipe(chat.id, message.id, message.activeSwipe - 1)}
               >
                 <CaretLeft aria-hidden="true" />
               </Button>
-              <button type="button" className="tabular-nums hover:text-foreground" onClick={() => setSwipesOpen(true)}>
-                {message.activeSwipe + 1} / {message.swipes.length}
+              <button type="button" className="tabular-nums hover:text-foreground" disabled={swipeBusy || hasStream} onClick={() => setSwipesOpen(true)}>
+                {shownSwipe + 1} / {message.swipes.length}
               </button>
               <Button
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Next swipe or generate new"
+                disabled={swipeBusy || hasStream}
                 onClick={() => {
                   if (message.activeSwipe < message.swipes.length - 1) setSwipe(chat.id, message.id, message.activeSwipe + 1)
                   else if (isLast) regenerate(chat.id)
@@ -1029,7 +1064,7 @@ export const MessageRow = memo(function MessageRow({
             clicks into accidental actions. Desktop reveals the full bar on
             hover; touch shows a minimal always-on bar — more menu + edit, the
             reference layout — so two small icons don't eat the screen */}
-        {!editing && !isStreamingThis && !slidePhase && (
+        {!editing && !hasStream && !slidePhase && (
           <div className={cn(
             'absolute -top-3 right-2 flex items-center rounded-md border border-border bg-popover shadow-sm',
             settings.expandMessageActions || coarsePointer

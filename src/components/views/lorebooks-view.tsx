@@ -1,7 +1,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { BookOpenText, Plus, Trash, Copy, MagnifyingGlass, Globe, Flask, Pulse, CaretDown, CaretRight } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -21,6 +21,8 @@ import type { Lorebook, LoreEntry } from '@/lib/types'
 import { MasterDetail } from '@/components/shell/master-detail'
 import { LoreStatusIcon, LORE_STATUS_LABEL } from '@/components/lore-status-icon'
 import { useConfirm } from '@/components/ui/confirm'
+
+const toast = createToast('lorebooks')
 
 const positions: LoreEntry['position'][] = ['before_char', 'after_char', 'before_em', 'after_em', 'before_an', 'after_an', 'at_depth', 'before_examples', 'after_examples']
 

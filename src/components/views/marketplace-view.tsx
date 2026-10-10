@@ -1,7 +1,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ImgHTMLAttributes } from 'react'
 import { MagnifyingGlass, Storefront, DownloadSimple, CircleNotch, ArrowSquareOut, Check, Heart, X, CaretLeft, CaretRight, BookOpenText, BookBookmark, User, Tag, Plus, SlidersHorizontal, Fire, Chats } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +15,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/
 import { useApp } from '@/lib/store'
 import { DEFAULT_AVATAR, cn } from '@/lib/utils'
 import { j, proxyUrl, downscaleRemoteImage } from '@/lib/engine'
+
+const toast = createToast('imports')
 
 /** Listing IDs are source-specific: a path or a character UUID. */
 type MarketplaceItem = {

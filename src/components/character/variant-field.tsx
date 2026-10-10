@@ -1,7 +1,7 @@
 
 import { useState } from 'react'
 import { Plus, Trash, Copy, Check, PencilSimple } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -9,6 +9,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
 import { cn } from '@/lib/utils'
 import type { AltVariant } from '@/lib/types'
+
+const toast = createToast('characters')
 
 /**
  * A character text field that can carry alternates, the way alternate greetings

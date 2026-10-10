@@ -1,3 +1,4 @@
+import { defaultNotifications } from './notifications'
 // Local defaults for the studio's client-side slices (theme palettes,
 // sampler defaults). Server-backed data starts EMPTY apart from the shipped
 // template: a fresh workspace carries the stock preset, the default persona,
@@ -31,7 +32,7 @@ export function defaultSamplers(): SamplerSettings {
     rep_pen: v(1.08), freq_pen: v(0.1), pres_pen: v(0.05),
     maxTokens: 512, contextSize: 8192, contextUnlocked: false, seed: -1,
     stopStrings: ['\\n{{user}}:', '</s>'], logitBias: [],
-    reasoning: { enabled: true, effort: 'med', budget: 2048, autoParse: true, display: 'collapsed', thinkTagOpen: '<think>', thinkTagClose: '</think>' },
+    reasoning: { history: 'preserve', enabled: true, effort: 'med', budget: 2048, autoParse: true, display: 'collapsed', thinkTagOpen: '<think>', thinkTagClose: '</think>' },
     streaming: true, streamingSpeed: 30, assistantPrefill: '',
     cache: { enabled: true, pinned: false, depth: 0, ttl: 'short' },
   }
@@ -172,6 +173,8 @@ export const DEFAULT_SUMMARY_PROMPT = 'You keep the running summary of a rolepla
 
 export function defaultSettings(): AppSettings {
   return {
+    notifications: defaultNotifications(),
+    notificationPosition: 'bottom-center',
     themeMode: 'dark', activeThemeId: 'theme_void', displayMode: 'bubbles',
     chatWidth: 'comfortable', chatWidthCustom: 760, fontScale: 100, lineSpacing: 136, paragraphSpacing: 10, proseFont: 'noto', uiScale: 100,
     avatarScale: 100, streamingFps: 30,

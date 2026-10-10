@@ -1,0 +1,83 @@
+{
+  "formatVersion": 1,
+  "guide": "_EDITING.md",
+  "rules": [
+    "Read existing records before editing.",
+    "Use a new unique path-safe ID and real timestamps when creating.",
+    "Keep all unedited fields, including unknown metadata, extensions, and studio bags.",
+    "Templates are starting shapes, never live records or replacements for existing settings.",
+    "PUT replaces an entity; PATCH merges top-level fields. Deeply merge nested objects yourself.",
+    "Read back the saved file and verify bindings and prompt order."
+  ],
+  "entities": {
+    "character": {
+      "path": "characters/{id}/card.json",
+      "route": "/characters/{id}",
+      "template": "_templates/_character.json",
+      "fields": "src/lib/types.ts: Character; src/lib/engine.ts: EngineCard",
+      "notes": "Flat card fields plus studio. Character ID comes from its directory. Keep extensions and unknown fields."
+    },
+    "persona": {
+      "path": "personas/{id}.json",
+      "route": "/personas/{id}",
+      "template": "_templates/_persona.json",
+      "fields": "src/lib/types.ts: Persona",
+      "notes": "Default persona is settings.json personaId. Pin a persona on a chat to select it there."
+    },
+    "preset": {
+      "path": "presets/{id}.json",
+      "route": "/presets/{id}",
+      "template": "_templates/_preset.json",
+      "fields": "src/lib/types.ts: Preset; src/lib/engine.ts: EnginePreset",
+      "notes": "prompts and prompt_order control runtime text/order; studio preserves section controls and other editor fields. Keep both copies consistent."
+    },
+    "lorebook": {
+      "path": "lorebooks/{id}.json",
+      "route": "/lorebooks/{id}",
+      "template": "_templates/_lorebook.json",
+      "fields": "src/lib/types.ts: Lorebook; src/lib/engine.ts: EngineLorebook",
+      "notes": "Entry status chooses normal, constant, or vectorized. Preserve extensions."
+    },
+    "regex": {
+      "path": "regex/{id}.json",
+      "route": "/regex/{id}",
+      "template": "_templates/_regex.json",
+      "fields": "src/lib/types.ts: RegexScript; src/lib/engine.ts: EngineRegex",
+      "notes": "Scope, placements, markdownOnly, and promptOnly choose when and where it runs."
+    },
+    "group": {
+      "path": "groups/{id}.json",
+      "route": "/groups/{id}",
+      "template": "_templates/_group.json",
+      "fields": "src/lib/engine.ts: EngineGroup",
+      "notes": "memberIds refer to existing character IDs."
+    },
+    "settings": {
+      "path": "settings.json",
+      "route": "/settings",
+      "template": "_templates/_settings.json",
+      "fields": "src/lib/types.ts: AppSettings",
+      "notes": "Patch the existing ui object. Do not replace a user configuration with the template."
+    },
+    "library": {
+      "path": "library.json",
+      "route": "/library",
+      "template": "_templates/_library.json",
+      "fields": "src/lib/types.ts: QuickReplySet, ThemePreset, Background, Tag, Folder, ConnectionProfile",
+      "notes": "Collections share one file. Preserve every other collection when editing one."
+    },
+    "databank": {
+      "path": "databank/{id}.json",
+      "route": "/databank/{id}",
+      "template": "_templates/_databank.json",
+      "fields": "plugins/engine/plugin.js",
+      "notes": "Creation/content replacement uses the focused editor or upload route for chunking original text. Preserve opaque metadata and measure actual content size."
+    },
+    "chat": {
+      "path": "chats/{id}.meta.json + chats/{id}.jsonl",
+      "route": "/chats/{id}; /chats/{id}/messages/{messageId}",
+      "fields": "plugins/engine/plugin.js; src/lib/engine.ts: EngineMessage",
+      "notes": "Keep every JSONL message field and inactive swipe. Text edits update the active swipe; structural actions and generation use app routes."
+    }
+  }
+}

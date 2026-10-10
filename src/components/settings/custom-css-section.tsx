@@ -1,10 +1,12 @@
 
 import { useEffect, useRef, useState } from "react"
 import { Check, ArrowCounterClockwise, Warning } from '@phosphor-icons/react'
-import { toast } from "sonner"
+import { createToast } from '@/lib/notifications'
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { useApp } from "@/lib/store"
+
+const toast = createToast('appearance')
 
 /** Copy-in starting points mirroring the CSS hooks themes lean on. */
 const SNIPPETS: { name: string; css: string }[] = [

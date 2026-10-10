@@ -8,10 +8,12 @@ import {
   Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
 import { Check, ImageSquare, Trash } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { DEFAULT_AVATAR, cn } from '@/lib/utils'
 import { fileToRawDataUrl } from '@/lib/engine'
 import { useConfirm } from '@/components/ui/confirm'
+
+const toast = createToast('appearance')
 
 export function BackgroundsTab() {
   const backgrounds = useApp((s) => s.backgrounds)

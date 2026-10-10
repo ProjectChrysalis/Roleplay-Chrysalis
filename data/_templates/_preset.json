@@ -1,0 +1,548 @@
+{
+  "name": "New preset",
+  "prompts": [
+    {
+      "identifier": "main",
+      "name": "Main Prompt",
+      "role": "system",
+      "marker": true,
+      "content": "Write {{char}}'s next reply in a fictional roleplay chat between {{char}} and {{user}}. Stay in character, describe actions and atmosphere, and never speak or act for {{user}}.",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "worldInfoBefore",
+      "name": "World info before",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "charDescription",
+      "name": "Character description",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "charPersonality",
+      "name": "Personality",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "scenario",
+      "name": "Scenario",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "personaDescription",
+      "name": "Persona description",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "worldInfoAfter",
+      "name": "World info after",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "dialogueExamples",
+      "name": "Example dialogue",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "chatHistory",
+      "name": "Chat history",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    },
+    {
+      "identifier": "postHistory",
+      "name": "Post-history instructions",
+      "role": "system",
+      "marker": true,
+      "content": "",
+      "injection_trigger": [
+        "normal",
+        "continue",
+        "impersonate",
+        "swipe",
+        "regenerate",
+        "quiet"
+      ]
+    }
+  ],
+  "prompt_order": [
+    {
+      "character_id": 100000,
+      "order": [
+        {
+          "identifier": "main",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoBefore",
+          "enabled": true
+        },
+        {
+          "identifier": "charDescription",
+          "enabled": true
+        },
+        {
+          "identifier": "charPersonality",
+          "enabled": true
+        },
+        {
+          "identifier": "scenario",
+          "enabled": true
+        },
+        {
+          "identifier": "personaDescription",
+          "enabled": true
+        },
+        {
+          "identifier": "worldInfoAfter",
+          "enabled": true
+        },
+        {
+          "identifier": "dialogueExamples",
+          "enabled": true
+        },
+        {
+          "identifier": "chatHistory",
+          "enabled": true
+        },
+        {
+          "identifier": "postHistory",
+          "enabled": true
+        }
+      ]
+    }
+  ],
+  "temperature": 0.85,
+  "top_p": 0.95,
+  "min_p": 0.05,
+  "repetition_penalty": 1.08,
+  "frequency_penalty": 0.1,
+  "presence_penalty": 0.05,
+  "openai_max_tokens": 512,
+  "openai_max_context": 8192,
+  "seed": -1,
+  "stop": [
+    "\\n{{user}}:",
+    "</s>"
+  ],
+  "reasoning": "medium",
+  "reasoningTags": {
+    "open": "<think>",
+    "close": "</think>"
+  },
+  "thinkingBudget": 2048,
+  "studio": {
+    "id": "new-preset",
+    "name": "New preset",
+    "readOnly": false,
+    "isDefault": false,
+    "folderId": null,
+    "picture": null,
+    "sections": [
+      {
+        "id": "main",
+        "name": "Main Prompt",
+        "enabled": true,
+        "role": "system",
+        "marker": "main",
+        "content": "Write {{char}}'s next reply in a fictional roleplay chat between {{char}} and {{user}}. Stay in character, describe actions and atmosphere, and never speak or act for {{user}}.",
+        "position": "relative",
+        "depth": 4,
+        "order": 0,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "worldInfoBefore",
+        "name": "World info before",
+        "enabled": true,
+        "role": "system",
+        "marker": "wiBefore",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 1,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "charDescription",
+        "name": "Character description",
+        "enabled": true,
+        "role": "system",
+        "marker": "charDescription",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 2,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "charPersonality",
+        "name": "Personality",
+        "enabled": true,
+        "role": "system",
+        "marker": "personality",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 3,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "scenario",
+        "name": "Scenario",
+        "enabled": true,
+        "role": "system",
+        "marker": "scenario",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 4,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "personaDescription",
+        "name": "Persona description",
+        "enabled": true,
+        "role": "system",
+        "marker": "persona",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 5,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "worldInfoAfter",
+        "name": "World info after",
+        "enabled": true,
+        "role": "system",
+        "marker": "wiAfter",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 6,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "dialogueExamples",
+        "name": "Example dialogue",
+        "enabled": true,
+        "role": "system",
+        "marker": "exampleDialogue",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 7,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "chatHistory",
+        "name": "Chat history",
+        "enabled": true,
+        "role": "system",
+        "marker": "chatHistory",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 8,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      },
+      {
+        "id": "postHistory",
+        "name": "Post-history instructions",
+        "enabled": true,
+        "role": "system",
+        "marker": "jailbreak",
+        "content": "",
+        "position": "relative",
+        "depth": 4,
+        "order": 9,
+        "injectionTriggers": [
+          "normal",
+          "continue",
+          "impersonate",
+          "swipe",
+          "regenerate",
+          "quiet"
+        ],
+        "forbidOverrides": false,
+        "groupId": null
+      }
+    ],
+    "library": [],
+    "groups": [],
+    "variables": [],
+    "utilityPrompts": {
+      "impersonation": "Write the next reply from {{user}}'s point of view, using the chat history as a style guide. Do not write as any character. Output only {{user}}'s message.",
+      "continueNudge": "[Continue your last message without repeating its original content.]",
+      "newChat": "[Start a new chat]",
+      "groupNudge": "[Write the next reply only as {{name}}]",
+      "emptySend": ""
+    },
+    "samplers": {
+      "temperature": {
+        "value": 0.85,
+        "enabled": true
+      },
+      "top_p": {
+        "value": 0.95,
+        "enabled": true
+      },
+      "top_k": {
+        "value": 40,
+        "enabled": false
+      },
+      "min_p": {
+        "value": 0.05,
+        "enabled": true
+      },
+      "rep_pen": {
+        "value": 1.08,
+        "enabled": true
+      },
+      "freq_pen": {
+        "value": 0.1,
+        "enabled": true
+      },
+      "pres_pen": {
+        "value": 0.05,
+        "enabled": true
+      },
+      "maxTokens": 512,
+      "contextSize": 8192,
+      "contextUnlocked": false,
+      "seed": -1,
+      "stopStrings": [
+        "\\n{{user}}:",
+        "</s>"
+      ],
+      "logitBias": [],
+      "reasoning": {
+        "history": "preserve",
+        "enabled": true,
+        "effort": "med",
+        "budget": 2048,
+        "autoParse": true,
+        "display": "collapsed",
+        "thinkTagOpen": "<think>",
+        "thinkTagClose": "</think>"
+      },
+      "streaming": true,
+      "streamingSpeed": 30,
+      "assistantPrefill": "",
+      "cache": {
+        "enabled": true,
+        "pinned": false,
+        "depth": 0,
+        "ttl": "short"
+      }
+    },
+    "namesBehavior": "default",
+    "verbosity": "auto",
+    "continuePrefill": true,
+    "squashSystemMessages": false,
+    "compactHistory": {
+      "enabled": false,
+      "role": "assistant",
+      "separator": "double",
+      "userPrefix": "**{{user}}:** ",
+      "userSuffix": "",
+      "charPrefix": "",
+      "charSuffix": "",
+      "stopString": "**{{user}}:**"
+    },
+    "promptPostProcessing": {
+      "enabled": false,
+      "mode": "none"
+    },
+    "promptFormat": {
+      "use": "connection",
+      "custom": {
+        "systemPrefix": "",
+        "systemSuffix": "",
+        "userPrefix": "",
+        "userSuffix": "",
+        "assistantPrefix": "",
+        "assistantSuffix": "",
+        "systemAsUser": false
+      }
+    },
+    "createdAt": 0
+  },
+  "utilityPrompts": {
+    "impersonation": "Write the next reply from {{user}}'s point of view, using the chat history as a style guide. Do not write as any character. Output only {{user}}'s message.",
+    "continueNudge": "[Continue your last message without repeating its original content.]",
+    "newChat": "[Start a new chat]",
+    "groupNudge": "[Write the next reply only as {{name}}]",
+    "emptySend": ""
+  },
+  "id": "new-preset"
+}

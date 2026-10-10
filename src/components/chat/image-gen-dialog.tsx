@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { BookOpenText, CircleNotch, MagicWand } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -13,6 +13,8 @@ import {
   type GeneratedImage, type ImageGenSettings, type ImageMode,
 } from '@/lib/image-gen'
 import type { ID } from '@/lib/types'
+
+const toast = createToast('images')
 
 /** How the dialog opens: a mode asks the chat model to describe the scene,
  *  text is a description the user already wrote. */

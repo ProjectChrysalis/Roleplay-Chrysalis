@@ -1,7 +1,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { Plug, SealCheck, Brain, CircleNotch, ArrowsClockwise, PencilSimple, Plus, MagnifyingGlass, X } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -17,6 +17,8 @@ import { ProfilesSheet } from '@/components/connections/profiles-sheet'
 import { ModelMark } from '@/components/model-mark'
 import type { ModelInfo, ModelPricing } from '@/lib/types'
 import { cn, shortModel } from '@/lib/utils'
+
+const toast = createToast('connections')
 
 /**
  * Connections — the app is a CONSUMER of the engine's provider setup:

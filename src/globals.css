@@ -320,18 +320,3 @@
   text-decoration-color: color-mix(in srgb, var(--tap-quotes, currentColor) 45%, transparent);
   text-underline-offset: 3px;
 }
-
-
-/* Swipe transitions: the whole message row (and every row below it) slides
-   fully off-screen — translate by the row's own width — then the content
-   swaps and slides back in from the opposite side. Two sequential phases
-   driven by the chat view's clock; the travel distance and duration arrive
-   as CSS variables on the chat column. Transform-only so the compositor
-   owns it and long chats stay smooth. */
-.swipe-out { animation: swipe-out var(--swipe-dur, 125ms) ease-in-out forwards; will-change: transform; }
-.swipe-in { animation: swipe-in var(--swipe-dur, 125ms) ease-in-out forwards; will-change: transform; }
-@keyframes swipe-out { from { transform: translateX(0); } to { transform: translateX(var(--swipe-out-x, -120%)); } }
-@keyframes swipe-in { from { transform: translateX(var(--swipe-in-x, 120%)); } to { transform: translateX(0); } }
-@media (prefers-reduced-motion: reduce) {
-  .swipe-out, .swipe-in { animation: none; }
-}

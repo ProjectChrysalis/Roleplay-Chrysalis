@@ -1,7 +1,7 @@
 
 import { useState } from 'react'
 import { ArrowCounterClockwise } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -14,6 +14,8 @@ import { useApp } from '@/lib/store'
 import { defaultSamplers, normalizeCache } from '@/lib/seed'
 import { cn } from '@/lib/utils'
 import type { Preset, SamplerSettings } from '@/lib/types'
+
+const toast = createToast('presets')
 
 type NumKey = {
   [K in keyof SamplerSettings]: SamplerSettings[K] extends { value: number; enabled: boolean } ? K : never
@@ -161,6 +163,17 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
               </SelectContent>
             </Select>
           </div>
+          <div className="flex items-center gap-3">
+            <Label className="w-28 text-xs">Thinking history</Label>
+            <Select value={sp.reasoning.history ?? 'preserve'} onValueChange={(v) => up({ reasoning: { ...sp.reasoning, history: v as 'preserve' | 'individual' } })}>
+              <SelectTrigger className="w-52" aria-label="Thinking history" disabled={ro}><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="preserve">Preserve across turns</SelectItem>
+                <SelectItem value="individual">Each reply only</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="text-xs text-muted-foreground">Preserved thinking is sent with later turns using the same model.</p>
           <Num label="Token budget" value={sp.reasoning.budget} onChange={(v) => up({ reasoning: { ...sp.reasoning, budget: v } })} disabled={ro} wide />
           <label className="flex items-center gap-2 text-xs">
             <Switch checked={sp.reasoning.autoParse} disabled={ro} onCheckedChange={(v) => up({ reasoning: { ...sp.reasoning, autoParse: v } })} aria-label="Auto-parse" />

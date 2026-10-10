@@ -19,8 +19,10 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { useApp } from '@/lib/store'
 import { timeAgo } from '@/lib/tokens'
 import { exportChatJSONL, exportChatTxt } from '@/lib/export'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { DEFAULT_AVATAR } from '@/lib/utils'
+
+const toast = createToast('chat')
 
 export function ChatsView() {
   const chats = useApp((s) => s.chats)

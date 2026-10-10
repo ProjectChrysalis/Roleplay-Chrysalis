@@ -1,7 +1,7 @@
 
 import { useEffect, useState } from 'react'
 import { SpeakerHigh } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -11,6 +11,8 @@ import { Switch } from '@/components/ui/switch'
 import { useApp } from '@/lib/store'
 import { fetchEdgeVoices, fetchSpeechEndpoints, type SpeechEndpointInfo } from '@/lib/engine'
 import { edgeVoiceLabel, speakText, stopSpeaking, TTS_PROVIDERS } from '@/lib/tts'
+
+const toast = createToast('speech')
 
 const TEST_LINE = 'The lantern light caught the rain as she stepped into the alley.'
 

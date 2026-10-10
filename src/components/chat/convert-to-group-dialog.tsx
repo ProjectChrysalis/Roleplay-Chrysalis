@@ -6,8 +6,10 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useApp } from '@/lib/store'
 import type { Chat, Character } from '@/lib/types'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { DEFAULT_AVATAR } from '@/lib/utils'
+
+const toast = createToast('chat')
 
 export function ConvertToGroupDialog({
   chat, character, open, onOpenChange,

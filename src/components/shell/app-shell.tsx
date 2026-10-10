@@ -1,7 +1,7 @@
 
 import { useEffect, useState } from 'react'
 import { CircleNotch } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Toaster } from '@/components/ui/sonner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useApp, DRAWER_VIEWS, type ViewKey } from '@/lib/store'
@@ -27,10 +27,13 @@ import { ThemeApplier } from '@/components/theme-applier'
 import { MobileTabBar } from '@/components/shell/mobile-tab-bar'
 import { SECTIONS } from '@/components/shell/sections'
 
+const toast = createToast('settings')
+
 export function AppShell() {
   const [mounted, setMounted] = useState(false)
   const [keyboardOpen, setKeyboardOpen] = useState(false)
   const view = useApp((s) => s.view)
+  const notificationPosition = useApp((s) => s.settings.notificationPosition ?? 'bottom-center')
   // a boolean, never the streaming object: subscribing to the object here
   // re-rendered the whole shell on every token
   const streaming = useApp((s) => s.streaming !== null)
@@ -140,7 +143,7 @@ export function AppShell() {
           generating…
         </span>
       )}
-      <Toaster position={isDesktop ? "bottom-right" : "top-center"} visibleToasts={isDesktop ? 3 : 1} closeButton />
+      <Toaster position={notificationPosition} mobileOffset={{ bottom: "calc(4rem + env(safe-area-inset-bottom))" }} visibleToasts={isDesktop ? 3 : 1} closeButton />
     </div>
   )
 }

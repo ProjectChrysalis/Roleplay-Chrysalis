@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Plugs } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Switch } from '@/components/ui/switch'
 import { fetchAppMcp, setAppMcpUse, type McpServerInfo } from '@/lib/engine'
 import { cn } from '@/lib/utils'
+
+const toast = createToast('plugins')
 
 const errText = (e: unknown) => String((e as Error)?.message ?? e)
 

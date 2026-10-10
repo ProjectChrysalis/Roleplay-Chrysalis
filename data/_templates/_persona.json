@@ -1,0 +1,14 @@
+{
+  "id": "new-persona",
+  "name": "New persona",
+  "avatar": "",
+  "title": "",
+  "description": "",
+  "pronouns": "",
+  "lorebookIds": [],
+  "folderId": null,
+  "binding": "default",
+  "boundCharacterIds": [],
+  "autoLock": false,
+  "createdAt": 0
+}

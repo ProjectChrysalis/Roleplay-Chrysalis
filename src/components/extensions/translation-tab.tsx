@@ -1,7 +1,7 @@
 
 import { useState } from 'react'
 import { Translate, CircleNotch } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -9,6 +9,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { useApp } from '@/lib/store'
 import { j } from '@/lib/engine'
 import type { AppSettings } from '@/lib/types'
+
+const toast = createToast('translation')
 
 const PROVIDERS: { id: AppSettings['translation']['provider']; label: string; note: string }[] = [
   { id: 'llm', label: 'LLM (engine model)', note: 'Any model the engine serves. Works offline with a local model. Accepts any language name.' },

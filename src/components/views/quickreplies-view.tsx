@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 import { Plus, Trash, Lightning } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -14,6 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useApp } from '@/lib/store'
 import { uid } from '@/lib/tokens'
 import { useConfirm } from '@/components/ui/confirm'
+
+const toast = createToast('shortcuts')
 
 export function QuickRepliesView() {
   const qrSets = useApp((s) => s.qrSets)

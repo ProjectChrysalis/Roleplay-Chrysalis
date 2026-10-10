@@ -1,7 +1,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { Plus, Trash, Asterisk, UploadSimple, DownloadSimple, Flask, X } from '@phosphor-icons/react'
-import { toast } from "sonner"
+import { createToast } from '@/lib/notifications'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -18,6 +18,8 @@ import { cn } from "@/lib/utils"
 import { MasterDetail } from "@/components/shell/master-detail"
 import { useConfirm } from '@/components/ui/confirm'
 import { runRegexSafe, type SafeRegexResult } from '@/lib/safe-regex'
+
+const toast = createToast('regex')
 
 const PLACEMENTS: [keyof RegexScript["placements"], string][] = [
   ["userInput", "User input"],

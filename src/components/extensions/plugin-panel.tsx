@@ -1,7 +1,7 @@
 
 import { useState } from 'react'
 import { Plus, Trash, CaretRight } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { j } from '@/lib/engine'
 import { useApp } from '@/lib/store'
 import type { ModelInfo } from '@/lib/types'
@@ -11,6 +11,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+
+const toast = createToast('plugins')
 
 /** A plugin ships its own UI as a declarative panel (uiPanel hook →
  *  /__panels): the shape below is the whole contract. The plugin owns the

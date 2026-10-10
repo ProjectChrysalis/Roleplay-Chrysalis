@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ArrowCounterClockwise, ArrowsClockwise, CaretDown, CircleNotch, PushPin, PushPinSlash, Sparkle, Trash } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Textarea } from '@/components/ui/textarea'
@@ -12,6 +12,8 @@ import { addMemory, deleteMemory, extractMemories, fetchMemories, updateMemory }
 import type { Chat, MemoryEntry } from '@/lib/types'
 import { estimateTokens } from '@/lib/tokens'
 import { cn } from '@/lib/utils'
+
+const toast = createToast('memory')
 
 const errText = (e: unknown) => String((e as Error)?.message ?? e)
 

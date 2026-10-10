@@ -6,7 +6,7 @@ import { ProseColorsSection } from "@/components/settings/prose-colors-section"
 import { CustomCssSection } from "@/components/settings/custom-css-section"
 import { MemorySummarySection } from "@/components/settings/memory-summary-section"
 import { PROSE_FONTS } from "@/components/theme-applier"
-import { toast } from "sonner"
+import { createToast, NOTIFICATION_TYPES, NOTIFICATION_AREAS, defaultNotifications } from '@/lib/notifications'
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
@@ -27,8 +27,13 @@ import { extractCharaFromPng, regexImport } from "@/lib/interop"
 import { downloadBlob, importLorebookFiles, j } from "@/lib/engine"
 import { cn } from "@/lib/utils"
 
+const toast = createToast('imports')
+const settingsToast = createToast('settings')
+
+type SettingKey = keyof AppSettings | `notifications.${keyof AppSettings['notifications']}`
+
 type ControlDef =
-  | { kind: "switch"; key: keyof AppSettings; label: string }
+  | { kind: "switch"; key: SettingKey; label: string }
   | { kind: "slider"; key: keyof AppSettings; label: string; min: number; max: number; step: number; unit?: string }
   | { kind: "select"; key: keyof AppSettings; label: string; options: [string, string][] }
 
@@ -39,6 +44,16 @@ interface SectionDef {
 }
 
 const SECTIONS: SectionDef[] = [
+  {
+    id: "notifications",
+    label: "Notifications",
+    controls: [
+      { kind: "switch", key: "notifications.enabled", label: "Show notifications" },
+      { kind: "select", key: "notificationPosition", label: "Position", options: [["bottom-center", "Bottom center"], ["bottom-right", "Bottom right"], ["bottom-left", "Bottom left"], ["top-center", "Top center"], ["top-right", "Top right"], ["top-left", "Top left"]] },
+      ...NOTIFICATION_TYPES.map(([key, label]): ControlDef => ({ kind: "switch", key: `notifications.${key}`, label })),
+      ...NOTIFICATION_AREAS.map(([key, label]): ControlDef => ({ kind: "switch", key: `notifications.${key}`, label })),
+    ],
+  },
   {
     id: "appearance",
     label: "Appearance",
@@ -112,13 +127,14 @@ export function SettingsView() {
   }, [section])
 
   const navItems = [
-    ...SECTIONS.map((s) => ({ id: s.id, label: s.label })),
+    ...SECTIONS.filter((s) => s.id !== "notifications").map((s) => ({ id: s.id, label: s.label })),
     { id: "memory", label: "Memory" },
     { id: "themes", label: "Themes" },
     { id: "prose", label: "Prose Colors" },
     { id: "custom-css", label: "Custom CSS" },
     { id: "studio-import", label: "Import" },
     { id: "data", label: "Data" },
+    { id: "notifications", label: "Notifications" },
   ]
   const activeLabel = navItems.find((n) => n.id === section)?.label ?? "Settings"
 
@@ -139,12 +155,16 @@ export function SettingsView() {
   const cssPinsProseFont = /\.mes_text[^{]*\{[^}]*font-family/i.test(settings.customCss)
 
   const renderControl = (c: ControlDef) => {
-    const value = settings[c.key]
+    const notificationKey = c.key.startsWith("notifications.") ? c.key.slice(14) as keyof AppSettings['notifications'] : null
+    const notifications = { ...defaultNotifications(), ...settings.notifications }
+    const value = notificationKey ? notifications[notificationKey] : c.key === "notificationPosition" ? settings.notificationPosition ?? "bottom-center" : settings[c.key as keyof AppSettings]
     if (c.kind === "switch") {
       return (
         <label key={c.key} className="flex items-center justify-between py-1.5 text-sm">
           <span>{c.label}</span>
-          <Switch checked={value as boolean} onCheckedChange={(v) => updateSettings({ [c.key]: v })} />
+          <Switch checked={value as boolean} aria-label={c.label} onCheckedChange={(v) => updateSettings(notificationKey
+            ? { notifications: { ...notifications, [notificationKey]: v } }
+            : { [c.key]: v })} />
         </label>
       )
     }
@@ -198,7 +218,24 @@ export function SettingsView() {
   const renderSection = (s: SectionDef) => (
     <div key={s.id} className="flex flex-col gap-1">
       <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{s.label}</h3>
-      <div className="rounded-lg border border-border px-3 py-1.5">{s.controls.map(renderControl)}</div>
+      {s.id === "notifications" && <p className="text-xs text-muted-foreground">Choose popup types and areas. Both must be on.</p>}
+      {s.id === "notifications" ? (
+        <>
+          <div className="rounded-lg border border-border px-3 py-1.5">{s.controls.filter((c) => (c.key === "notifications.enabled" || c.key === "notificationPosition")).map(renderControl)}</div>
+          {[
+            { label: "Types", keys: NOTIFICATION_TYPES.map(([key]) => `notifications.${key}`) },
+            { label: "Areas", keys: NOTIFICATION_AREAS.map(([key]) => `notifications.${key}`) },
+          ].map(({ label, keys }) => {
+            const controls = s.controls.filter((c) => keys.includes(c.key))
+            return controls.length > 0 && (
+              <div key={label} className="mt-2 flex flex-col gap-1">
+                <h4 className="text-xs font-medium text-muted-foreground">{label}</h4>
+                <div className="rounded-lg border border-border px-3 py-1.5">{controls.map(renderControl)}</div>
+              </div>
+            )
+          })}
+        </>
+      ) : <div className="rounded-lg border border-border px-3 py-1.5">{s.controls.map(renderControl)}</div>}
     </div>
   )
 
@@ -606,7 +643,7 @@ function DataSection() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => { resetAll(); toast.success("Local UI state reset, server data untouched") }}
+              onClick={() => { resetAll(); settingsToast.success("Local UI state reset, server data untouched") }}
               className="bg-destructive text-white hover:bg-destructive/90"
             >
               Reset everything

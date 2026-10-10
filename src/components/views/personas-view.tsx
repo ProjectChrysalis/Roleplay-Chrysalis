@@ -1,7 +1,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Trash, Copy, UploadSimple, DownloadSimple, SealCheck, ChartBar, CheckCircle } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -20,6 +20,8 @@ import { estimateTokens, formatTokens } from '@/lib/tokens'
 import { downloadTextFile } from '@/lib/export'
 import { fileToDataUrl } from '@/lib/engine'
 import { DEFAULT_AVATAR, cn } from '@/lib/utils'
+
+const toast = createToast('personas')
 
 export function PersonasView() {
   const personas = useApp((s) => s.personas)

@@ -1,7 +1,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Star, Chats, Copy, DownloadSimple, Plus, Trash, ClockCounterClockwise, Palette, Image as ImageIcon, CaretLeft, CaretRight, X } from '@phosphor-icons/react'
-import { toast } from 'sonner'
+import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -29,6 +29,9 @@ import { speakText, edgeVoiceLabel, ENGINE_VOICES } from '@/lib/tts'
 import { buildCardPng, downloadCardPng } from '@/lib/png-card'
 import type { Character } from '@/lib/types'
 import { DEFAULT_AVATAR } from '@/lib/utils'
+
+const toast = createToast('characters')
+const speechToast = createToast('speech')
 
 function TokenBadge({ text }: { text: string }) {
   return <Badge variant="outline" className="text-[10px] text-muted-foreground">{formatTokens(estimateTokens(text))} tok</Badge>
@@ -566,15 +569,15 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
               </div>
               <Button variant="outline" size="sm" className="w-fit" onClick={() => {
                 if (c.voiceProvider === 'none' || !c.voiceProvider) {
-                  toast.info('Pick a provider first. Engine uses the speech endpoints configured in the app')
+                  speechToast.info('Pick a provider first. Engine uses the speech endpoints configured in the app')
                   return
                 }
                 void speakText(`Hello, traveler. I am ${c.name}.`, {
                   provider: c.voiceProvider, narratorVoice: c.voiceId || 'alloy', speed: 1, model: 'tts-1', engineProvider: 'edge',
                   autoPlay: false, onlyQuotes: false, skipAsterisks: true, skipCodeblocks: true, charVoices: {},
                 }).then((played) => {
-                  if (!played) toast.info('Nothing played, check the voice settings')
-                }).catch((e: Error) => toast.error(`TTS failed: ${e.message}`))
+                  if (!played) speechToast.info('Nothing played, check the voice settings')
+                }).catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
               }}>Test voice</Button>
             </TabsContent>
           </div>
