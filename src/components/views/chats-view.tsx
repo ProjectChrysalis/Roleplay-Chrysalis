@@ -22,7 +22,7 @@ import { timeAgo } from '@/lib/tokens'
 import { exportChatJSONL, exportChatTxt } from '@/lib/export'
 import { createToast } from '@/lib/notifications'
 import { searchChats } from '@/lib/engine'
-import { searchHighlight, type ChatSearchMode, type ChatSearchPage } from '@/lib/chat-search'
+import { chatSearchRevision, searchHighlight, type ChatSearchMode, type ChatSearchPage } from '@/lib/chat-search'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DEFAULT_AVATAR } from '@/lib/utils'
 
@@ -69,6 +69,7 @@ export function ChatsView() {
     toast.success(`Folder "${name}" created`)
   }
 
+  const searchRevision = useMemo(() => chatSearchRevision(chats, characters), [chats, characters])
   const searching = query.trim().length > 0
   useEffect(() => {
     if (!searching) { setSearchPage(null); setSearchBusy(false); setSearchError(''); return }
@@ -88,7 +89,7 @@ export function ChatsView() {
         .finally(() => { if (alive) setSearchBusy(false) })
     }, 300)
     return () => { alive = false; clearTimeout(timer); controller.abort() }
-  }, [query, searching, searchMode, activeFolderId, characterId, chatPage, retry, chats])
+  }, [query, searching, searchMode, activeFolderId, characterId, chatPage, retry, searchRevision])
 
   const filtered = useMemo(() => [...chats]
     .sort((a, b) => b.updatedAt - a.updatedAt)

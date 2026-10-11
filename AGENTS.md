@@ -124,12 +124,12 @@ are enabled for older settings. settings.ui.notificationPosition chooses
 the popup position, defaulting to bottom-center.
 The composer’s Speak as submenu shows titles to the right when same-name personas have different titles.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
-to it on every change. Chats search uses POST /chats/search to search saved active message text, names
+to it on every change. Chats search uses GET /chats/search to search saved active message text, names
 and titles, including unloaded transcripts. Words must all occur somewhere in the
 chat; quoted phrases stay intact. Results are paginated with matched-message
 snippets, character/folder filters and a transient message focus for jumping to
 older turns. Pictures and inactive swipes are excluded. Missing/corrupt data is
-reported. Search responses do not hydrate whole transcripts. The composer skips
+reported. Search responses do not hydrate whole transcripts. Unchanged hydrated chat lists do not restart search. The composer skips
 hidden-frame measurements, keeps a one-line minimum and refits on visibility,
 width, viewport and font changes.
 Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.

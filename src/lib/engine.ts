@@ -1509,6 +1509,9 @@ export async function importArchive(file: File, progress?: (stage: string, done:
 
 export async function searchChats(options: { query: string; mode: import('./chat-search').ChatSearchMode; folderId: string | null; characterId: string | null; offset: number; limit: number }, signal: AbortSignal): Promise<import('./chat-search').ChatSearchPage> {
   await saves.settled()
-  const page = await j<{ total: number; results: { meta: EngineChatMeta; matchCount: number; snippets: import('./chat-search').ChatSearchHit['snippets'] }[]; errors: { chatId: string; error: string }[] }>('/chats/search', { method: 'POST', body: JSON.stringify(options), signal })
+  const query = new URLSearchParams({ query: options.query, mode: options.mode, offset: String(options.offset), limit: String(options.limit) })
+  if (options.folderId) query.set('folderId', options.folderId)
+  if (options.characterId) query.set('characterId', options.characterId)
+  const page = await j<{ total: number; results: { meta: EngineChatMeta; matchCount: number; snippets: import('./chat-search').ChatSearchHit['snippets'] }[]; errors: { chatId: string; error: string }[] }>(`/chats/search?${query}`, { signal })
   return { ...page, results: page.results.map((hit) => ({ chat: engineChatToUI(hit.meta, []), matchCount: hit.matchCount, snippets: hit.snippets })) }
 }

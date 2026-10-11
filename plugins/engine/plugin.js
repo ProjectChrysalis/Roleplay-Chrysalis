@@ -3245,8 +3245,8 @@ export function handleRoute(req, host) {
 
     // ---------- chats ----------
   if (head === "chats") {
-    if (req.method === "POST" && id === "search") {
-      const b = body();
+    if ((req.method === "GET" || req.method === "POST") && id === "search") {
+      const b = req.method === "GET" ? req.query || {} : body();
       if (typeof b.query !== "string" || !b.query.trim()) return err(400, "Search text required");
       if (b.query.length > 200) return err(400, "Search text is too long");
       if (!chatSearchTerms(b.query).length) return err(400, "Search text required");

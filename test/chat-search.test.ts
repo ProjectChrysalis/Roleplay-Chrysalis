@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { searchHighlight, searchTerms } from '../src/lib/chat-search'
+import { chatSearchRevision, searchHighlight, searchTerms } from '../src/lib/chat-search'
 
 let root: string
 beforeEach(() => {
@@ -17,9 +17,9 @@ function chat(id: string, title: string, lines: Record<string, unknown>[], extra
   fs.writeFileSync(path.join(root, 'chats', id + '.meta.json'), JSON.stringify({ id, title, characterId: 'aria', createdAt: 1, updatedAt: 1, ...extra }))
   fs.writeFileSync(path.join(root, 'chats', id + '.jsonl'), lines.map((line) => JSON.stringify(line)).join('\n'))
 }
-async function search(body: Record<string, unknown>) {
+async function search(body: Record<string, unknown>, method = 'POST') {
   const { handleRoute } = await import('../plugins/engine/plugin.js')
-  return handleRoute({ method: 'POST', path: '/chats/search', body }, { fs: { list: (dir: string) => fs.readdirSync(path.join(root, dir)), read: (file: string) => fs.readFileSync(path.join(root, file), 'utf8') } }) as { status: number; json: { total: number; results: { meta: { id: string }; matchCount: number; snippets: { text: string; messageId: string }[] }[]; errors: { chatId: string }[] } }
+  return handleRoute({ method, path: '/chats/search', ...(method === 'GET' ? { query: body } : { body }) }, { fs: { list: (dir: string) => fs.readdirSync(path.join(root, dir)), read: (file: string) => fs.readFileSync(path.join(root, file), 'utf8') } }) as { status: number; json: { total: number; results: { meta: { id: string }; matchCount: number; snippets: { text: string; messageId: string }[] }[]; errors: { chatId: string }[] } }
 }
 
 describe('saved chat search', () => {
@@ -89,4 +89,33 @@ it('highlights quoted phrases and overlapping literal terms without losing text'
   const parts = searchHighlight('A BLUE lantern waits.', '"blue lantern" blue')
   expect(parts.map((p) => p.text).join('')).toBe('A BLUE lantern waits.')
   expect(parts.filter((p) => p.matched).map((p) => p.text).join('')).toBe('BLUE lantern')
+})
+
+it('searches through a read-only GET with encoded filter and paging values', async () => {
+  chat('a', 'Selene', [{ id: 'one', text: 'A silver moon' }], { folderId: 'work' })
+  chat('b', 'Selene', [{ id: 'two', text: 'Another moon' }], { folderId: 'home' })
+  const options = { query: 'Selene', mode: 'all', folderId: 'work', characterId: 'aria', offset: '0', limit: '30' }
+  const page = await search(options, 'GET')
+  expect(page.json.results.map((hit) => hit.meta.id)).toEqual(['a'])
+  expect(page).toEqual(await search(options))
+  expect((await search({ query: '' }, 'GET')).status).toBe(400)
+})
+
+it('keeps search stable across hydration and invalidates saved text, filters and names', () => {
+  const chats = [{ id: 'one', characterId: 'aria', title: 'Selene', folderId: null,
+    updatedAt: 1, messageCount: 1, preview: 'Moon',
+    messages: [{ id: 'm1', role: 'char', activeSwipe: 0, swipes: [{ content: 'Moon' }] }],
+  }] as Parameters<typeof chatSearchRevision>[0]
+  const characters = [{ id: 'aria', name: 'Aria' }]
+  const revision = chatSearchRevision(chats, characters)
+  const hydrated = JSON.parse(JSON.stringify(chats)) as typeof chats
+  expect(hydrated).not.toBe(chats)
+  expect(chatSearchRevision(hydrated, [...characters])).toBe(revision)
+  for (const patch of [{ title: 'Other' }, { folderId: 'work' }, { updatedAt: 2 }, { messageCount: 2 }, { preview: 'Sun' }]) {
+    expect(chatSearchRevision([{ ...hydrated[0]!, ...patch }], characters)).not.toBe(revision)
+  }
+  hydrated[0]!.messages[0]!.swipes[0]!.content = 'Sun'
+  expect(chatSearchRevision(hydrated, characters)).not.toBe(revision)
+  expect(chatSearchRevision(chats, [{ id: 'aria', name: 'Selene' }])).not.toBe(revision)
+  expect(chatSearchRevision([], characters)).not.toBe(revision)
 })

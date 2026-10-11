@@ -1,4 +1,4 @@
-import type { Chat } from './types'
+import type { Chat, Character } from './types'
 
 export type ChatSearchMode = 'all' | 'messages' | 'titles'
 export interface ChatSearchHit {
@@ -35,4 +35,15 @@ export function searchHighlight(text: string, query: string): { text: string; ma
   }
   if (last < text.length) parts.push({ text: text.slice(last), matched: false })
   return parts
+}
+
+/** Hydration replaces arrays even when saved search inputs are unchanged. */
+export function chatSearchRevision(chats: Chat[], characters: Pick<Character, 'id' | 'name'>[]): string {
+  return JSON.stringify([
+    chats.map((chat) => [chat.id, chat.characterId, chat.title, chat.folderId, chat.updatedAt,
+      chat.messageCount, chat.preview,
+      chat.messages.map((message) => [message.id, message.role, message.picture,
+        message.swipes[message.activeSwipe]?.content])]),
+    characters.map((character) => [character.id, character.name]),
+  ])
 }
