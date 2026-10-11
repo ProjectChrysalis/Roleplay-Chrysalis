@@ -288,6 +288,7 @@ export function presetImport(json: unknown, name: string, base: Preset): Preset 
 
 // ─── Regex scripts (portable JSON) ───
 interface WireRegex {
+  folder?: string
   scriptName?: string
   findRegex?: string
   replaceString?: string
@@ -307,12 +308,13 @@ export function regexImport(json: unknown): Omit<RegexScript, 'id' | 'order'> | 
   if (!d || typeof d.findRegex !== 'string') return null
   // the format stores /pattern/flags or a bare pattern
   let find = d.findRegex
-  let flags = 'g'
+  let flags = ''
   const m = /^\/(.*)\/([a-z]*)$/s.exec(d.findRegex)
-  if (m) { find = m[1] ?? d.findRegex; flags = m[2] || 'g' }
-  const placement = d.placement ?? [2]
+  if (m) { find = m[1] ?? d.findRegex; flags = m[2] ?? '' }
+  const placement = Array.isArray(d.placement) ? d.placement : [2]
   return {
     name: d.scriptName ?? 'Imported script',
+    ...(typeof d.folder === 'string' && d.folder.trim() ? { folder: d.folder.trim() } : {}),
     scope: 'global',
     scopeTargetId: null,
     find,
@@ -329,7 +331,7 @@ export function regexImport(json: unknown): Omit<RegexScript, 'id' | 'order'> | 
     promptOnly: !!d.promptOnly,
     minDepth: d.minDepth ?? null,
     maxDepth: d.maxDepth ?? null,
-    trimStrings: d.trimStrings ?? [],
+    trimStrings: Array.isArray(d.trimStrings) ? d.trimStrings.filter((s): s is string => typeof s === 'string') : [],
     runOnEdit: !!d.runOnEdit,
     macroMode: d.substituteRegex === 1 ? 'raw' : d.substituteRegex === 2 ? 'escaped' : 'none',
     enabled: !d.disabled,
@@ -345,6 +347,7 @@ export function regexExport(script: RegexScript): WireRegex {
   if (script.placements.reasoning) placement.push(6)
   return {
     scriptName: script.name,
+    ...(script.folder ? { folder: script.folder } : {}),
     findRegex: `/${script.find.replace(/(?<!\\)\//g, '\\/')}/${script.flags}`,
     replaceString: script.replace,
     trimStrings: script.trimStrings,

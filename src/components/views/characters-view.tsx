@@ -10,7 +10,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuCheckboxItem,
 } from '@/components/ui/dropdown-menu'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -30,6 +30,7 @@ import { buildCardPng, downloadCardPng } from '@/lib/png-card'
 import { downloadJson } from '@/lib/interop'
 import { CharacterEditor } from '@/components/views/character-editor'
 import { CreateGroupDialog } from '@/components/chat/create-group-dialog'
+import { cardImportDetails, type CardImportResult } from '@/lib/import-feedback'
 import { characterBrowser, sortCharacters, type CharacterSort } from '@/lib/character-browser'
 
 const toast = createToast('characters')
@@ -80,6 +81,7 @@ export function CharactersView() {
   const [urlOpen, setUrlOpen] = useState(false)
   const [urlValue, setUrlValue] = useState('')
   const [urlBusy, setUrlBusy] = useState(false)
+  const [enableEmbeddedRegex, setEnableEmbeddedRegex] = useState(false)
   const [page, setPage] = useState(0)
   const importRef = useRef<HTMLInputElement>(null)
 
@@ -95,11 +97,11 @@ export function CharactersView() {
     for (const url of urls) {
       try {
         const avatar = await fullSizeAvatar(url)
-        const r = await j<{ characters: string[]; name?: string; error?: string }>('/import/url', {
-          method: 'POST', body: JSON.stringify({ url, ...(avatar ? { avatar } : {}) }),
+        const r = await j<CardImportResult>('/import/url', {
+          method: 'POST', body: JSON.stringify({ url, deferEmbeddedLore: true, enableEmbeddedRegex, ...(avatar ? { avatar } : {}) }),
         })
         okCount++
-        toast.success(`Imported ${r.name ?? 'character'}`)
+        toast.success(`Imported ${r.name ?? 'character'}`, { description: cardImportDetails(r, enableEmbeddedRegex) })
       } catch (e) {
         toast.error(url.split('/').pop() ?? url, { description: String((e as Error).message ?? e) })
       }
@@ -133,10 +135,11 @@ export function CharactersView() {
     }
     if (cards.length) {
       try {
-        const r = await j<{ characters: string[]; errors?: string[] }>('/import/batch', {
-          method: 'POST', body: JSON.stringify({ cards }),
+        const r = await j<CardImportResult>('/import/batch', {
+          method: 'POST', body: JSON.stringify({ cards, deferEmbeddedLore: true, enableEmbeddedRegex }),
         })
-        toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? '' : 's'}`)
+        if (r.characters.length) toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? '' : 's'}`, { description: cardImportDetails(r, enableEmbeddedRegex) })
+        errors.push(...(r.errors ?? []))
         await hydrate()
       } catch (e) {
         toast.error(String((e as Error).message ?? e))
@@ -257,11 +260,13 @@ export function CharactersView() {
               </Button>
             } />
             <DropdownMenuContent align="end">
+              <DropdownMenuCheckboxItem checked={enableEmbeddedRegex} onCheckedChange={setEnableEmbeddedRegex}>Enable embedded regex</DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => importRef.current?.click()}>
                 <FileCode className="size-4" aria-hidden="true" />From files…
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setUrlOpen(true)}>
-                <LinkSimple className="size-4" aria-hidden="true" />From URL (chub)…
+                <LinkSimple className="size-4" aria-hidden="true" />From URL…
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -456,16 +461,18 @@ export function CharactersView() {
       <Dialog open={urlOpen} onOpenChange={setUrlOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Import from chub</DialogTitle>
+            <DialogTitle>Import card URLs</DialogTitle>
           </DialogHeader>
           <Textarea
             value={urlValue}
             onChange={(e) => setUrlValue(e.target.value)}
             placeholder={"https://chub.ai/characters/user/name\nhttps://chub.ai/characters/user/another"}
-            aria-label="chub card URLs, one per line"
+            aria-label="Card URLs, one per line"
             rows={5}
             className="font-mono text-xs"
           />
+          <p className="text-xs text-muted-foreground">Chub, CharacterHub, Pygmalion, Realm, AI Character Cards. One URL per line. Embedded lorebooks can be imported now or later.</p>
+          <label className="flex items-center justify-between text-sm">Enable embedded regex<Switch checked={enableEmbeddedRegex} onCheckedChange={setEnableEmbeddedRegex} /></label>
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={() => setUrlOpen(false)}>Cancel</Button>
             <Button size="sm" disabled={urlBusy || !urlValue.trim()} onClick={() => void importFromUrl()}>

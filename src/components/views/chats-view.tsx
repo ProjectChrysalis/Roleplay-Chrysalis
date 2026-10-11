@@ -1,6 +1,7 @@
 
-import { useMemo, useState } from 'react'
-import { MagnifyingGlass, Trash, DownloadSimple, GitBranch, Chats, PencilSimple, Plus, X, Folder as FolderIcon, DotsThree } from '@phosphor-icons/react'
+import { useEffect, useMemo, useState } from 'react'
+import { MagnifyingGlass, Trash, DownloadSimple, GitBranch, Chats, PencilSimple, Plus, X, Folder as FolderIcon, DotsThree, SlidersHorizontal } from '@phosphor-icons/react'
+import { Popover, PopoverContent, PopoverTrigger, PopoverTitle } from '@/components/ui/popover'
 import { Input } from '@/components/ui/input'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -20,9 +21,17 @@ import { useApp } from '@/lib/store'
 import { timeAgo } from '@/lib/tokens'
 import { exportChatJSONL, exportChatTxt } from '@/lib/export'
 import { createToast } from '@/lib/notifications'
+import { searchChats } from '@/lib/engine'
+import { searchHighlight, type ChatSearchMode, type ChatSearchPage } from '@/lib/chat-search'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { DEFAULT_AVATAR } from '@/lib/utils'
 
 const toast = createToast('chat')
+const CHAT_PAGE = 30
+
+function SearchText({ text, query }: { text: string; query: string }) {
+  return <>{searchHighlight(text, query).map((part, i) => part.matched ? <mark key={i} className="rounded-sm bg-primary/20 text-foreground">{part.text}</mark> : part.text)}</>
+}
 
 export function ChatsView() {
   const chats = useApp((s) => s.chats)
@@ -34,6 +43,12 @@ export function ChatsView() {
   const addFolder = useApp((s) => s.addFolder)
   const deleteFolder = useApp((s) => s.deleteFolder)
   const [query, setQuery] = useState('')
+  const [searchMode, setSearchMode] = useState<ChatSearchMode>('all')
+  const [characterId, setCharacterId] = useState<string | null>(null)
+  const [searchPage, setSearchPage] = useState<ChatSearchPage | null>(null)
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const [retry, setRetry] = useState(0)
   const [confirmId, setConfirmId] = useState<string | null>(null)
   const [renameId, setRenameId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -54,39 +69,78 @@ export function ChatsView() {
     toast.success(`Folder "${name}" created`)
   }
 
-  const filtered = useMemo(() => {
-    const q = query.toLowerCase()
-    return [...chats]
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .filter((c) => !activeFolderId || c.folderId === activeFolderId)
-      .filter((c) => {
-        const char = characters.find((x) => x.id === c.characterId)
-        return !q || c.title.toLowerCase().includes(q) || char?.name.toLowerCase().includes(q)
-      })
-  }, [chats, characters, query, activeFolderId])
-  const CHAT_PAGE = 30
-  const safePage = clampPage(chatPage, filtered.length, CHAT_PAGE)
-  const paged = useMemo(() => filtered.slice(safePage * CHAT_PAGE, safePage * CHAT_PAGE + CHAT_PAGE), [filtered, safePage])
+  const searching = query.trim().length > 0
+  useEffect(() => {
+    if (!searching) { setSearchPage(null); setSearchBusy(false); setSearchError(''); return }
+    let alive = true
+    const controller = new AbortController()
+    setSearchBusy(true)
+    setSearchPage(null)
+    setSearchError('')
+    const timer = setTimeout(() => {
+      void searchChats({ query: query.trim(), mode: searchMode, folderId: activeFolderId, characterId, offset: chatPage * CHAT_PAGE, limit: CHAT_PAGE }, controller.signal)
+        .then((page) => {
+          if (!alive) return
+          if (chatPage > 0 && chatPage * CHAT_PAGE >= page.total) setChatPage(Math.max(0, Math.ceil(page.total / CHAT_PAGE) - 1))
+          else setSearchPage(page)
+        })
+        .catch((error: unknown) => { if (alive) setSearchError(error instanceof Error ? error.message : String(error)) })
+        .finally(() => { if (alive) setSearchBusy(false) })
+    }, 300)
+    return () => { alive = false; clearTimeout(timer); controller.abort() }
+  }, [query, searching, searchMode, activeFolderId, characterId, chatPage, retry, chats])
+
+  const filtered = useMemo(() => [...chats]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .filter((c) => (!activeFolderId || c.folderId === activeFolderId) && (!characterId || c.characterId === characterId)), [chats, activeFolderId, characterId])
+  const total = searching ? searchPage?.total ?? 0 : filtered.length
+  const safePage = clampPage(chatPage, total, CHAT_PAGE)
+  const paged = searching ? searchPage?.results.map((hit) => chats.find((c) => c.id === hit.chat.id) ?? hit.chat) ?? []
+    : filtered.slice(safePage * CHAT_PAGE, (safePage + 1) * CHAT_PAGE)
+  const hits = new Map(searchPage?.results.map((hit) => [hit.chat.id, hit]))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* header + folder chips scroll WITH the list (mobile keyboard room) */}
       <ScrollArea className="min-h-0 flex-1">
-      <header className="flex items-center gap-3 border-b border-border px-4 py-2.5">
-        <h1 className="text-sm font-semibold">All chats</h1>
-        <Badge variant="secondary">{chats.length}</Badge>
-        <div className="relative ml-auto w-56">
-          <MagnifyingGlass className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-          <Input
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setChatPage(0) }}
-            placeholder="Search chats…"
-            className="h-8 pl-8 text-sm"
-            aria-label="Search chats"
-          />
+      <header className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
+        <h1 className="text-sm font-semibold">Chats <span className="ml-1 font-normal text-muted-foreground">{chats.length}</span></h1>
+        <div className="flex w-full min-w-0 items-center gap-1.5 sm:ml-auto sm:w-auto sm:flex-1 sm:max-w-md">
+          <div className="relative min-w-0 flex-1">
+            <MagnifyingGlass className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <Input value={query} onChange={(e) => { setQuery(e.target.value); setChatPage(0) }} placeholder="Search chats…" maxLength={200} className="h-8 pl-8 pr-8 text-sm" aria-label="Search chats" />
+            {query && <button type="button" className="absolute right-1 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring" aria-label="Clear search" onClick={() => { setQuery(''); setChatPage(0) }}><X className="size-3.5" aria-hidden="true" /></button>}
+          </div>
+          <Popover>
+            <PopoverTrigger render={<Button variant="ghost" size="icon" className={`size-8 shrink-0 ${searchMode !== 'all' || characterId ? 'bg-primary/10 text-primary' : 'text-muted-foreground'}`} aria-label="Search filters" />}><SlidersHorizontal className="size-4" aria-hidden="true" /></PopoverTrigger>
+            <PopoverContent align="end" className="gap-3 p-3">
+              <PopoverTitle>Search filters</PopoverTitle>
+              <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">Search in
+                <Select value={searchMode} onValueChange={(v) => { if (v) { setSearchMode(v as ChatSearchMode); setChatPage(0) } }}>
+                  <SelectTrigger className="w-full" aria-label="Search in"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">Names and messages</SelectItem><SelectItem value="messages">Messages only</SelectItem><SelectItem value="titles">Names and titles</SelectItem></SelectContent>
+                </Select>
+              </label>
+              <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">Character
+                <Select value={characterId ?? 'all'} onValueChange={(v) => { setCharacterId(v === 'all' ? null : v); setChatPage(0) }}>
+                  <SelectTrigger className="w-full" aria-label="Filter by character"><SelectValue /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">All characters</SelectItem>{characters.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+                </Select>
+              </label>
+              <p className="text-xs text-muted-foreground">Use quotes for an exact phrase.</p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Button variant="ghost" size="sm" onClick={() => { setFolderName(''); setFolderOpen(true) }}><Plus className="size-3" aria-hidden="true" />New folder</Button>
+                {(searchMode !== 'all' || characterId || activeFolderId) && <Button variant="ghost" size="sm" onClick={() => { setSearchMode('all'); setCharacterId(null); setActiveFolderId(null); setChatPage(0) }}>Reset filters</Button>}
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
       </header>
-      <div className="flex items-center gap-1.5 overflow-x-auto overscroll-x-contain border-b border-border px-4 py-2 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {(searchMode !== 'all' || characterId) && <div className="flex flex-wrap gap-1.5 px-4 pt-2">
+        {searchMode !== 'all' && <Button variant="ghost" size="sm" className="h-6 gap-1 text-xs text-muted-foreground" onClick={() => { setSearchMode('all'); setChatPage(0) }}>{searchMode === 'messages' ? 'Messages only' : 'Names and titles'}<X className="size-3" aria-hidden="true" /></Button>}
+        {characterId && <Button variant="ghost" size="sm" className="h-6 max-w-full gap-1 text-xs text-muted-foreground" onClick={() => { setCharacterId(null); setChatPage(0) }}><span className="truncate">{characters.find((c) => c.id === characterId)?.name ?? 'Character'}</span><X className="size-3 shrink-0" aria-hidden="true" /></Button>}
+      </div>}
+      {chatFolders.length > 0 && <div className="flex items-center gap-1.5 overflow-x-auto overscroll-x-contain border-b border-border px-4 py-2 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <button
           type="button"
           onClick={() => { setActiveFolderId(null); setChatPage(0) }}
@@ -126,7 +180,7 @@ export function ChatsView() {
         >
           <Plus className="size-3" aria-hidden="true" /> New folder
         </button>
-      </div>
+      </div>}
 
       <Dialog open={folderOpen} onOpenChange={setFolderOpen}>
         <DialogContent className="sm:max-w-sm">
@@ -150,7 +204,11 @@ export function ChatsView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-        {filtered.length === 0 ? (
+        {searching && <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-muted-foreground" role="status">
+          {searchBusy ? 'Searching saved messages…' : searchError ? <><span className="text-destructive">{searchError}</span><Button variant="outline" size="sm" onClick={() => setRetry((n) => n + 1)}>Retry</Button></> : `${total} matching chat${total === 1 ? '' : 's'}`}
+          {!!searchPage?.errors.length && <span className="text-destructive">{new Set(searchPage.errors.map((error) => error.chatId)).size} chat(s) could not be fully searched.</span>}
+        </div>}
+        {searching && (searchBusy || searchError) ? null : paged.length === 0 ? (
           <Empty>
             <EmptyHeader>
               <EmptyMedia variant="icon">
@@ -164,6 +222,7 @@ export function ChatsView() {
           <ul className="flex flex-col divide-y divide-border">
             {paged.map((chat) => {
               const char = characters.find((c) => c.id === chat.characterId)
+              const hit = hits.get(chat.id)
               const last = chat.messages[chat.messages.length - 1]
               // a chat whose transcript has not been loaded yet (list refresh,
               // never opened this session) carries its preview and size on the
@@ -172,7 +231,7 @@ export function ChatsView() {
               const previewText = last?.swipes[last.activeSwipe]?.content ?? chat.preview ?? ''
               const msgCount = loaded ? chat.messages.length : chat.messageCount ?? 0
               return (
-                <li key={chat.id} className="group flex items-center gap-3 px-4 py-2 hover:bg-accent/50">
+                <li key={chat.id} className="group flex flex-wrap items-center gap-3 px-4 py-2 hover:bg-accent/50">
                   <button type="button" onClick={() => openChat(chat.id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
                     <Avatar className="size-9 rounded-md">
                       <AvatarImage src={char?.avatar || DEFAULT_AVATAR} alt="" />
@@ -194,6 +253,7 @@ export function ChatsView() {
                       <span className="line-clamp-1 text-xs text-muted-foreground">
                         {previewText.replace(/[*>#`]/g, '').slice(0, 120)}
                       </span>
+                      {hit && hit.matchCount > 0 && <span className="block text-xs text-muted-foreground">{hit.matchCount} matching message{hit.matchCount === 1 ? '' : 's'}</span>}
                     </span>
                     <span className="flex shrink-0 flex-col items-end text-xs text-muted-foreground">
                       <span>{timeAgo(chat.updatedAt)}</span>
@@ -242,17 +302,22 @@ export function ChatsView() {
                       </DropdownMenuGroup>
                     </DropdownMenuContent>
                   </DropdownMenu>
+                  {hit && hit.snippets.length > 0 && <div className="flex w-full min-w-0 flex-col gap-1 pl-12">
+                    {hit.snippets.slice(-1).map((snippet, i) => <button key={`${snippet.messageId}-${i}`} type="button" className="line-clamp-2 border-l-2 border-border pl-2 text-left text-xs text-muted-foreground hover:text-foreground" onClick={() => openChat(chat.id, snippet.messageId ?? undefined)}>
+                      <span className="mr-1 font-medium">{snippet.role === 'user' ? 'You:' : snippet.role === 'system' ? 'System:' : `${char?.name ?? 'Reply'}:`}</span><SearchText text={snippet.text} query={query} />
+                    </button>)}
+                  </div>}
                 </li>
               )
             })}
           </ul>
         )}
 
-        {filtered.length > CHAT_PAGE && (
+        {total > CHAT_PAGE && !searchBusy && (
           <div className="flex items-center justify-center gap-3 py-3 text-xs text-muted-foreground">
             <Button variant="outline" size="sm" className="h-7" disabled={safePage === 0} onClick={() => setChatPage((p) => p - 1)}>Previous</Button>
-            <span>{safePage * CHAT_PAGE + 1}–{Math.min(filtered.length, (safePage + 1) * CHAT_PAGE)} of {filtered.length}</span>
-            <Button variant="outline" size="sm" className="h-7" disabled={(safePage + 1) * CHAT_PAGE >= filtered.length} onClick={() => setChatPage((p) => p + 1)}>Next</Button>
+            <span>{safePage * CHAT_PAGE + 1}–{Math.min(total, (safePage + 1) * CHAT_PAGE)} of {total}</span>
+            <Button variant="outline" size="sm" className="h-7" disabled={(safePage + 1) * CHAT_PAGE >= total} onClick={() => setChatPage((p) => p + 1)}>Next</Button>
           </div>
         )}
       </ScrollArea>

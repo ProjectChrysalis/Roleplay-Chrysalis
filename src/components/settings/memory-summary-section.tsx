@@ -13,8 +13,8 @@ import { embedConfig, embedStatus, setEmbedConfig } from '@/lib/engine'
 const one = (v: number | readonly number[]) => (Array.isArray(v) ? v[0]! : (v as number))
 
 /**
- * Memory: how the running summary is made and placed (compaction folds the
- * messages above a chat's cutoff into it), and how a chat's facts are kept.
+ * Memory: how summaries are made and placed (each compaction summarizes the
+ * next stretch above a chat's cutoff), and how a chat's facts are kept.
  */
 export function MemorySummarySection() {
   const summary = useApp((s) => s.settings.summary)
@@ -71,8 +71,13 @@ export function MemorySummarySection() {
           <Slider value={[summary.keepRecent]} min={1} max={30} step={1} onValueChange={(v) => set({ keepRecent: one(v) })} />
         </Field>
         <Field>
-          <FieldLabel>Summary length: about {summary.targetLength} words</FieldLabel>
+          <FieldLabel>Each summary: about {summary.targetLength} words</FieldLabel>
           <Slider value={[summary.targetLength]} min={50} max={1500} step={25} onValueChange={(v) => set({ targetLength: one(v) })} />
+        </Field>
+        <Field>
+          <FieldLabel>All of a chat's summaries: about {summary.maxWords} words</FieldLabel>
+          <Slider value={[summary.maxWords]} min={300} max={8000} step={100} onValueChange={(v) => set({ maxWords: one(v) })} />
+          <p className="text-[11px] text-muted-foreground">A summary is written once and left alone. Past this total, the oldest ones are merged into one.</p>
         </Field>
         <Field>
           <div className="flex items-center justify-between gap-2">
@@ -82,12 +87,12 @@ export function MemorySummarySection() {
             )}
           </div>
           <Textarea id="sum-prompt" rows={5} value={summary.prompt} onChange={(e) => set({ prompt: e.target.value })} className="text-xs" />
-          <p className="text-[11px] text-muted-foreground">{'{{summary}}'} is the summary so far, {'{{words}}'} the length. The messages being folded in follow it.</p>
+          <p className="text-[11px] text-muted-foreground">{'{{summary}}'} is the earlier summaries, {'{{words}}'} the length. The messages to summarize follow it.</p>
         </Field>
       </div>
 
       <div className="flex flex-col gap-3 rounded-md border border-border p-3">
-        <p className="text-sm font-medium">Where the summary goes</p>
+        <p className="text-sm font-medium">Where summaries go</p>
         <Select value={summary.position} onValueChange={(v) => v && set({ position: v as typeof summary.position })}>
           <SelectTrigger aria-label="Summary placement"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -126,7 +131,7 @@ export function MemorySummarySection() {
 
       <div className="flex flex-col gap-3 rounded-md border border-border p-3">
         <p className="text-sm font-medium">Facts</p>
-        <p className="text-xs text-muted-foreground">Short facts kept per chat. Pinned ones ride every prompt; the rest come back when the chat mentions them.</p>
+        <p className="text-xs text-muted-foreground">Short facts kept per chat. Pinned ones ride every prompt; the rest come back when the chat uses their words.</p>
         <div className="flex flex-wrap gap-6">
           <Field orientation="horizontal">
             <FieldLabel htmlFor="mem-enabled">Use facts</FieldLabel>
@@ -143,10 +148,15 @@ export function MemorySummarySection() {
             <Slider value={[memory.interval]} min={4} max={100} step={2} onValueChange={(v) => setMemory({ interval: one(v) })} />
           </Field>
         )}
+      </div>
+
+      <div className="flex flex-col gap-3 rounded-md border border-border p-3">
+        <p className="text-sm font-medium">Lorebook entries matched by meaning</p>
+        <p className="text-xs text-muted-foreground">Only for entries you set to Vectorized. Everything else, facts included, matches on words and needs none of this.</p>
         <p className="text-[11px] text-muted-foreground" aria-live="polite">
-          {embed === null ? 'Matching by meaning: checking…'
-            : embed.ok ? `Matching by meaning${embed.via ? ` via ${embed.via}` : ''}`
-            : 'Matching by words only. An embeddings connection adds matching by meaning.'}
+          {embed === null ? 'Checking for an embeddings connection…'
+            : embed.ok ? `Available${embed.via ? ` via ${embed.via}` : ''}`
+            : 'No connection offers embeddings, so those entries fire on their keys only.'}
         </p>
         <div className="flex items-center gap-2">
           <Input

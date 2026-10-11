@@ -120,6 +120,14 @@ async function sendAndCapture(mock: ReturnType<typeof mockHost>, chatId: string,
 }
 
 describe("regex replace semantics", () => {
+  it("empty flags rewrite only the first saved match", async () => {
+    const m = mockHost();
+    const chatId = await newChat(m);
+    writeRegex({ findRegex: "a", replaceString: "X", placement: ["user_input"], flags: "" });
+    const out = await sendAndCapture(m, chatId, "aaa");
+    expect(out).toContain("Xaa");
+    expect(out).not.toContain("XXX");
+  });
   it("{{match}} carries the trimmed whole match, $n the trimmed group, missing groups vanish", async () => {
     const m = mockHost();
     const chatId = await newChat(m);

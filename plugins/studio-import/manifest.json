@@ -1,7 +1,7 @@
 {
   "name": "Studio Import",
-  "version": "1.16.0",
-  "description": "Clean-room import: character cards (PNG v2/v3 + JSON + chub/CharacterHub URL), world info, presets, regex, personas, themes, chats; full backup zips (text entries plugin-side, PNG cards via the browser path); Chub and Datacat marketplace discovery. Public data formats only.",
+  "version": "1.18.5",
+  "description": "Clean-room import: character cards (PNG v2/v3 + JSON + catalog URLs), world info, presets, regex, personas, themes, chats; full backup zips (text entries plugin-side, PNG cards via the browser path); Chub, Datacat, Wyvern and Character Tavern marketplace discovery. Public data formats only.",
   "origin": "local",
   "permissions": [
     "routes",
@@ -19,6 +19,15 @@
     "gateway.chub.ai",
     "datacat.run",
     "media.datacat.run",
-    "ella.janitorai.com"
+    "ella.janitorai.com",
+    "pygmalion.chat",
+    "server.pygmalion.chat",
+    "realm.risuai.net",
+    "aicharactercards.com",
+    "api.wyvern.chat",
+    "app.wyvern.chat",
+    "imagedelivery.net",
+    "character-tavern.com",
+    "ct-cards.storage.character-tavern.com"
   ]
 }

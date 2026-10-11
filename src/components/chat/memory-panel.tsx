@@ -9,7 +9,7 @@ import { Field, FieldLabel } from '@/components/ui/field'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { useApp } from '@/lib/store'
 import { addMemory, deleteMemory, extractMemories, fetchMemories, updateMemory } from '@/lib/engine'
-import type { Chat, MemoryEntry } from '@/lib/types'
+import type { Chat, MemoryEntry, SummaryPart } from '@/lib/types'
 import { estimateTokens } from '@/lib/tokens'
 import { cn } from '@/lib/utils'
 
@@ -18,8 +18,9 @@ const toast = createToast('memory')
 const errText = (e: unknown) => String((e as Error)?.message ?? e)
 
 /**
- * The chat's memory: the running summary that stands in for everything above
- * the cutoff (compact / redo / undo), and the facts kept for this chat.
+ * The chat's memory: the summaries that stand in for everything above the
+ * cutoff, one per compacted stretch (compact / redo / undo), and the facts
+ * kept for this chat.
  */
 export function MemoryPanel({ chat, open, onOpenChange }: { chat: Chat; open: boolean; onOpenChange: (o: boolean) => void }) {
   const updateChat = useApp((s) => s.updateChat)
@@ -34,15 +35,33 @@ export function MemoryPanel({ chat, open, onOpenChange }: { chat: Chat; open: bo
     : -1
   const summarized = cutoffIdx > 0 ? chat.messages.slice(0, cutoffIdx).filter((m) => !m.hidden).length : 0
 
+  // One box per summary, oldest first. With none yet there is still one box:
+  // typing in it writes the flat summary, which the engine keeps as a part.
+  const parts = chat.summaryParts
+  const shown = parts.length ? parts : [{ id: 's0', text: chat.summary }]
+  const editPart = (i: number, text: string) => {
+    if (!parts.length) { updateChat(chat.id, { summary: text }); return }
+    const next = parts.map((p, k) => (k === i ? { ...p, text } : p))
+    updateChat(chat.id, { summaryParts: next, summary: next.map((p) => p.text.trim()).filter(Boolean).join('\n\n') })
+  }
+  /** "Messages 1 to 40": where a summary's stretch sits in the chat today. */
+  const stretch = (p: SummaryPart) => {
+    if (!p.to) return ''
+    const end = chat.messages.findIndex((m) => m.id === p.to)
+    const start = p.from ? chat.messages.findIndex((m) => m.id === p.from) : 0
+    return end > 0 && start >= 0 && end > start ? `Messages ${start + 1} to ${end}` : ''
+  }
+  const canRedo = !!parts[parts.length - 1]?.to
+
   const run = async (kind: 'compact' | 'redo' | 'undo') => {
     setBusy(kind)
     try {
       if (kind === 'undo') {
         await undoCompaction(chat.id)
-        toast.success('Summary restored to before the last compaction')
+        toast.success('Last compaction undone')
       } else {
         const r = await compactChat(chat.id, kind === 'redo' ? { redo: true } : undefined)
-        toast.success(kind === 'redo' ? 'Summary rewritten' : `${r.covered} messages folded into the summary`)
+        toast.success(kind === 'redo' ? 'Summary rewritten' : `${r.covered} messages summarized`)
       }
     } catch (e) {
       toast.error(errText(e))
@@ -59,17 +78,29 @@ export function MemoryPanel({ chat, open, onOpenChange }: { chat: Chat; open: bo
         </SheetHeader>
         <div className="flex flex-col gap-4 overflow-y-auto px-4 pb-4">
           <Field>
-            <FieldLabel htmlFor="chat-summary">Summary · {estimateTokens(chat.summary)} tokens</FieldLabel>
-            <Textarea
-              id="chat-summary"
-              rows={10}
-              value={chat.summary}
-              onChange={(e) => updateChat(chat.id, { summary: e.target.value })}
-              placeholder="Nothing summarized yet. Compact folds older messages in here."
-            />
+            <FieldLabel htmlFor="chat-summary-0">
+              {parts.length > 1 ? 'Summaries' : 'Summary'} · {estimateTokens(shown.map((p) => p.text).join('\n\n'))} tokens
+            </FieldLabel>
+            {shown.map((part, i) => (
+              <div key={i} className="flex flex-col gap-1">
+                <Textarea
+                  id={`chat-summary-${i}`}
+                  rows={parts.length > 1 ? 5 : 10}
+                  value={part.text}
+                  onChange={(e) => editPart(i, e.target.value)}
+                  placeholder="Nothing summarized yet. Compact writes a summary of the older messages here."
+                  aria-label={parts.length > 1 ? `Summary ${i + 1} of ${parts.length}` : undefined}
+                />
+                {parts.length > 1 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {[stretch(part), part.merged ? `${part.merged} summaries merged` : ''].filter(Boolean).join(' · ') || 'Written by hand'}
+                  </p>
+                )}
+              </div>
+            ))}
             <p className="text-xs text-muted-foreground">
               {summarized > 0
-                ? `Stands in for the ${summarized} messages above the cutoff. They stay in the chat but leave the prompt.`
+                ? `${parts.length > 1 ? 'Together they stand' : 'Stands'} in for the ${summarized} messages above the cutoff. They stay in the chat but leave the prompt.`
                 : 'Every message is still in the prompt.'}
             </p>
             <div className="flex flex-wrap items-center gap-2">
@@ -77,9 +108,9 @@ export function MemoryPanel({ chat, open, onOpenChange }: { chat: Chat; open: bo
                 {busy === 'compact' ? <CircleNotch className="size-3.5 animate-spin" /> : <Sparkle className="size-3.5" />}
                 Compact now
               </Button>
-              <Button size="sm" variant="outline" disabled={busy !== null || chat.compactions === 0} onClick={() => void run('redo')}>
+              <Button size="sm" variant="outline" disabled={busy !== null || !canRedo} onClick={() => void run('redo')}>
                 {busy === 'redo' ? <CircleNotch className="size-3.5 animate-spin" /> : <ArrowsClockwise className="size-3.5" />}
-                Redo
+                {parts.length > 1 ? 'Redo last' : 'Redo'}
               </Button>
               <Button size="sm" variant="outline" disabled={busy !== null || chat.compactions === 0} onClick={() => void run('undo')}>
                 {busy === 'undo' ? <CircleNotch className="size-3.5 animate-spin" /> : <ArrowCounterClockwise className="size-3.5" />}
@@ -92,7 +123,7 @@ export function MemoryPanel({ chat, open, onOpenChange }: { chat: Chat; open: bo
             <div className="flex flex-col gap-0.5">
               <FieldLabel htmlFor="auto-compact">Compact automatically</FieldLabel>
               <p className="text-xs text-muted-foreground">
-                When the chat outgrows the context, or every {summaryCfg.interval} messages. Keeps the last {summaryCfg.keepRecent}.
+                When the chat outgrows the context, or every {summaryCfg.interval} messages. Keeps the last {summaryCfg.keepRecent}. Earlier summaries are left as written.
               </p>
             </div>
             <Switch
@@ -130,7 +161,7 @@ function FactsSection({ chatId, open }: { chatId: string; open: boolean }) {
         <CaretDown className={cn('ml-auto size-4 text-muted-foreground transition-transform', expanded && 'rotate-180')} />
       </CollapsibleTrigger>
       <CollapsibleContent className="flex flex-col gap-2 px-3 pb-3">
-        <p className="text-xs text-muted-foreground">Pinned facts ride every prompt. The rest come back when the chat mentions them.</p>
+        <p className="text-xs text-muted-foreground">Pinned facts ride every prompt. The rest come back when the chat uses their words. To keep a whole scene, use Save scene in a message's menu.</p>
         {facts?.map((m) => (
           <div key={m.id} className="flex items-start gap-1.5 rounded-md border border-border p-2">
             <p className="min-w-0 flex-1 text-xs leading-relaxed">{m.text}</p>

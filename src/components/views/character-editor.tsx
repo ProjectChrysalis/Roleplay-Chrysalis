@@ -22,7 +22,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { useApp } from '@/lib/store'
 import { useBackClose } from '@/hooks/use-back-close'
 import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
-import { characterToCard, fileToDataUrl, fetchEdgeVoices } from '@/lib/engine'
+import { characterToCard, fileToDataUrl, fetchEdgeVoices, j } from '@/lib/engine'
 import { dominantColor } from '@/lib/image-gen'
 import { STANDARD_EXPRESSIONS, expressionNameFromFile } from '@/lib/expressions'
 import { speakText, edgeVoiceLabel, ENGINE_VOICES } from '@/lib/tts'
@@ -46,10 +46,28 @@ function variantIndex(variants: { id: string }[], id?: string): number {
 export function CharacterEditor({ character, onClose }: { character: Character; onClose: () => void }) {
   useBackClose(true, onClose)
   const c = character
+  const [importingLore, setImportingLore] = useState(false)
+  const retainedBook = !!c.cardExtras?.character_book
+  const importLore = async () => {
+    if (importingLore) return
+    setImportingLore(true)
+    try {
+      await j('/import/embedded-lorebook', { method: 'POST', body: JSON.stringify({ characterId: c.id, import: true }) })
+      await useApp.getState().hydrate()
+      toast.success('Lorebook imported and linked')
+    } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) }
+    finally { setImportingLore(false) }
+  }
   const updateCharacter = useApp((s) => s.updateCharacter)
   const duplicateCharacter = useApp((s) => s.duplicateCharacter)
   const lorebooks = useApp((s) => s.lorebooks)
   const regexScripts = useApp((s) => s.regexScripts)
+  const updateRegex = useApp((s) => s.updateRegex)
+  const focusRegex = useApp((s) => s.focusRegex)
+  const focusLorebook = useApp((s) => s.focusLorebook)
+  const [tab, setTab] = useState('core')
+  const characterScripts = regexScripts.filter((r) => r.scope === 'character' && r.scopeTargetId === c.id)
+  const embeddedBook = lorebooks.find((b) => b.id === c.embeddedLorebookId)
   const chats = useApp((s) => s.chats)
   const startChatAndOpen = useApp((s) => s.startChatAndOpen)
   const [tokenReportOpen, setTokenReportOpen] = useState(false)
@@ -147,7 +165,7 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* header + tab strip scroll WITH the tab content (mobile keyboard room) */}
-      <Tabs defaultValue="core" className="flex min-h-0 flex-1 flex-col">
+      <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
         <ScrollArea className="min-h-0 flex-1">
       <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
         <Button variant="ghost" size="sm" onClick={onClose} aria-label="Back to characters">
@@ -177,7 +195,10 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
           </Button>
         </div>
       </header>
-
+      {(c.embeddedLorebookId || retainedBook || characterScripts.length > 0) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+        {(c.embeddedLorebookId || retainedBook) && <Button variant="outline" size="sm" onClick={() => setTab('lorebook')}>{embeddedBook ? `${embeddedBook.name}: ${embeddedBook.entries.length} entries, linked` : c.embeddedLorebookId ? 'Embedded lorebook missing' : 'Embedded lorebook: not imported'}</Button>}
+        {characterScripts.length > 0 && <Button variant="outline" size="sm" onClick={() => setTab('regex')}>Regex: {characterScripts.filter((r) => r.enabled).length}/{characterScripts.length} enabled</Button>}
+      </div>}
         <div
           className="mt-2 max-w-full overflow-x-auto overscroll-x-contain px-4 no-scrollbar"
           onWheel={(e) => {
@@ -321,8 +342,10 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
 
             <TabsContent value="lorebook" className="flex flex-col gap-3">
               <p className="text-xs text-muted-foreground">
-                Embedded book: {c.embeddedLorebookId ? lorebooks.find((b) => b.id === c.embeddedLorebookId)?.name ?? 'none' : 'none'}
+                {embeddedBook ? `${embeddedBook.name}: ${embeddedBook.entries.length} entries, imported and linked to this character.` : c.embeddedLorebookId ? 'The linked embedded lorebook is missing.' : retainedBook ? 'Embedded lorebook kept in the card. Not active.' : 'No embedded lorebook.'}
               </p>
+              {!c.embeddedLorebookId && !!retainedBook && <Button variant="outline" size="sm" disabled={importingLore} onClick={() => void importLore()}>{importingLore ? 'Importing…' : 'Import embedded lorebook'}</Button>}
+              {embeddedBook && <Button variant="outline" size="sm" onClick={() => focusLorebook(embeddedBook.id)}>Manage lorebooks</Button>}
               <Label className="text-xs">Additional linked lorebooks</Label>
               <div className="flex flex-col gap-1.5">
                 {lorebooks.filter((b) => !b.isEmbedded).map((b) => (
@@ -533,12 +556,14 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
             </TabsContent>
 
             <TabsContent value="regex" className="flex flex-col gap-2">
-              <p className="text-xs text-muted-foreground">Character-scoped regex scripts. Manage all scripts in the Regex tab.</p>
-              {regexScripts.filter((r) => r.scope === 'character' && r.scopeTargetId === c.id).map((r) => (
+              <p className="text-xs text-muted-foreground">These scripts apply only to this character.</p>
+
+              {characterScripts.length === 0 && <p className="text-xs text-muted-foreground">No character regex scripts.</p>}
+              {characterScripts.map((r) => (
                 <div key={r.id} className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm">
                   <code className="text-xs text-muted-foreground">/{r.find}/{r.flags}</code>
-                  <span>{r.name}</span>
-                  <Badge variant={r.enabled ? 'secondary' : 'outline'} className="ml-auto text-[10px]">{r.enabled ? 'on' : 'off'}</Badge>
+                  <Button variant="ghost" size="sm" onClick={() => focusRegex(r.id)}>{r.name}</Button>
+                  <Switch checked={r.enabled} onCheckedChange={(enabled) => updateRegex(r.id, { enabled })} aria-label={`Enable ${r.name}`} className="ml-auto" />
                 </div>
               ))}
             </TabsContent>

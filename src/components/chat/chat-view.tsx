@@ -1,6 +1,6 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, MagnifyingGlass, Note, BookOpenText, GitBranch, GearSix, X, CaretUp, CaretDown, BookmarkSimple, Brain, UserPlus, DotsThreeVertical, ImageSquare, Trash, Lightning, Storefront, ArrowRight } from '@phosphor-icons/react'
+import { ArrowLeft, MagnifyingGlass, Note, BookOpenText, GitBranch, GearSix, X, CaretUp, CaretDown, Brain, UserPlus, DotsThreeVertical, ImageSquare, Trash, Lightning, Storefront, ArrowRight } from '@phosphor-icons/react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -13,7 +13,6 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
@@ -40,6 +39,9 @@ import { HelpDialog } from './help-dialog'
 import { ExpressionPanel } from './expression-panel'
 import { ConvertToGroupDialog } from './convert-to-group-dialog'
 
+const embeddedNotices = new Set<string>()
+const regexToast = createToast('regex')
+const loreToast = createToast('lorebooks')
 const toast = createToast('chat')
 const appearanceToast = createToast('appearance')
 const speechToast = createToast('speech')
@@ -104,11 +106,32 @@ function captureAnchor(el: HTMLElement | null, doomed?: Set<ID>): ScrollAnchor |
 
 export function ChatView() {
   const activeChatId = useApp((s) => s.activeChatId)
+  const focusChatMessage = useApp((s) => s.focusChatMessage)
   const chat = useChat(activeChatId)
   const character = useCharacter(chat?.characterId ?? null)
   const chats = useApp((s) => s.chats)
   const characters = useApp((s) => s.characters)
   const closeChat = useApp((s) => s.closeChat)
+  const scopedScripts = useApp((s) => s.regexScripts)
+  const lorebooks = useApp((s) => s.lorebooks)
+  const presets = useApp((s) => s.presets)
+  useEffect(() => {
+    if (!chat || !character) return
+    const preset = presets.find((p) => p.id === chat.presetId)
+    for (const owner of [{ scope: 'character', id: character.id, name: character.name }, ...(preset ? [{ scope: 'preset', id: preset.id, name: preset.name }] : [])]) {
+      const key = `${owner.scope}:${owner.id}`
+      if (embeddedNotices.has(key)) continue
+      const scripts = scopedScripts.filter((r) => r.scope === owner.scope && r.scopeTargetId === owner.id)
+      const book = owner.scope === 'character' ? lorebooks.find((b) => b.id === character.embeddedLorebookId) : undefined
+      if (!scripts.length && !book) continue
+      embeddedNotices.add(key)
+      const details = [book ? `${book.name}: ${book.entries.length} entries, imported and linked` : '', scripts.length ? `Regex: ${scripts.filter((r) => r.enabled).length}/${scripts.length} enabled` : ''].filter(Boolean).join('. ')
+      const script = scripts.find((r) => !r.enabled) ?? scripts[0]
+      const notify = script ? regexToast : loreToast
+      notify.info(owner.name, { description: details, action: script ? { label: 'Review regex', onClick: () => useApp.getState().focusRegex(script.id) } : book ? { label: 'Open lorebook', onClick: () => useApp.getState().focusLorebook(book.id) } : undefined })
+    }
+  }, [chat, character, scopedScripts, lorebooks, presets])
+
   // primitives only: subscribing to the streaming OBJECT re-rendered this
   // whole view (and every visible row with it) on every token
   const isStreaming = useApp((s) => s.streaming !== null)
@@ -134,7 +157,6 @@ export function ChatView() {
   const [lorebooksOpen, setLorebooksOpen] = useState(false)
   const [branchesOpen, setBranchesOpen] = useState(false)
   const [displayOpen, setDisplayOpen] = useState(false)
-  const [bookmarksOpen, setBookmarksOpen] = useState(false)
   const [summaryOpen, setSummaryOpen] = useState(false)
   const [convertOpen, setConvertOpen] = useState(false)
   // group auto mode: keep the scene moving while this chat is open — a bare
@@ -188,7 +210,6 @@ export function ChatView() {
     pinnedRef.current = v
     if (scrollRef.current) scrollRef.current.dataset.pinned = String(v)
   }
-  const presets = useApp((s) => s.presets)
 
   const { swipeFx, onSwipeFx } = useSwipeAnimation(scrollRef, activeChatId, settings.reducedMotion)
 
@@ -376,6 +397,21 @@ export function ChatView() {
     if (el) { pendingMatch.current = null; scrollToMatch(el, findQuery, match.n) }
   }, [visibleCount, findQuery])
 
+  useEffect(() => {
+    if (!chat || focusChatMessage?.chatId !== chat.id) return
+    const idx = chat.messages.findIndex((m) => m.id === focusChatMessage.messageId)
+    if (idx < 0) return
+    setPinned(false)
+    if (scrollRaf.current !== null) { cancelAnimationFrame(scrollRaf.current); scrollRaf.current = null }
+    if (visibleCount < chat.messages.length - idx) { setVisibleCount(chat.messages.length - idx); return }
+    const el = document.getElementById(`msg-${focusChatMessage.messageId}`)
+    if (!el) return
+    el.scrollIntoView({ block: 'center' })
+    el.classList.add('chat-search-target')
+    useApp.setState({ focusChatMessage: null })
+    setTimeout(() => el.classList.remove('chat-search-target'), 3000)
+  }, [chat, focusChatMessage, visibleCount])
+
   // Paints every rendered hit, and the current one brighter, as CSS custom
   // highlights: ranges over the text, so the markdown DOM is never rewritten.
   // Repaints whenever the log's text changes (pagination, streaming, a block
@@ -538,9 +574,6 @@ export function ChatView() {
       )}
       <DropdownMenuItem onClick={() => setBranchesOpen(true)}>
         <GitBranch className="size-4" aria-hidden="true" /> Branches
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => setBookmarksOpen(true)}>
-        <BookmarkSimple className="size-4" aria-hidden="true" /> Bookmarks
       </DropdownMenuItem>
       <DropdownMenuItem onClick={() => setDisplayOpen(true)}>
         <GearSix className="size-4" aria-hidden="true" /> Display settings
@@ -1107,27 +1140,6 @@ export function ChatView() {
           </div>
         </SheetContent>
       </Sheet>
-
-      {/* Bookmarks */}
-      <Dialog open={bookmarksOpen} onOpenChange={setBookmarksOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Bookmarks</DialogTitle>
-          </DialogHeader>
-          {chat.messages.filter((m) => m.bookmarked).length === 0 ? (
-            <p className="text-sm text-muted-foreground">No bookmarks yet. Use the bookmark action on any message.</p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {chat.messages.filter((m) => m.bookmarked).map((m) => (
-                <li key={m.id} className="rounded-md border border-border p-2.5">
-                  <p className="text-sm font-medium">{m.bookmarkLabel ?? 'Bookmark'}</p>
-                  <p className="line-clamp-2 text-xs text-muted-foreground">{m.swipes[m.activeSwipe]?.content.replace(/[*>#`]/g, '')}</p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </DialogContent>
-      </Dialog>
 
       {/* Display settings */}
       <Sheet open={displayOpen} onOpenChange={setDisplayOpen}>

@@ -200,3 +200,43 @@ test('a snapshot read before an edit cannot overwrite that edit when it arrives 
   expect(useApp.getState().characters[0]?.name).toBe('Latest')
   expect(useApp.getState().settings.showTimestamps).toBe(false)
 })
+
+test('a chat reads its summaries as parts, and an edit sends the parts instead of the flat text', async () => {
+  const { chatPatchOf } = await import('../src/lib/engine')
+  const base = { id: 'sum-chat', title: 'Test', characterId: 'test' }
+  const parts = [{ id: 'a', text: 'They met.', from: null, to: 'm4' }, { id: 'b', text: 'They argued.', from: 'm4', to: 'm9' }]
+  expect(engineChatToUI({ ...base, summary: 'They met.\n\nThey argued.', summaryParts: parts }, []).summaryParts).toEqual(parts)
+  // a chat from before parts, or one whose summary was rewritten on disk: one part
+  expect(engineChatToUI({ ...base, summary: 'Old running summary.' }, []).summaryParts).toEqual([{ id: 's0', text: 'Old running summary.' }])
+  expect(engineChatToUI({ ...base, summary: 'Rewritten by hand.', summaryParts: parts }, []).summaryParts).toEqual([{ id: 's0', text: 'Rewritten by hand.' }])
+  expect(engineChatToUI(base, []).summaryParts).toEqual([])
+  expect(chatPatchOf({ summaryParts: [{ ...parts[0]!, text: 'They met at the bar.' }, parts[1]!], summary: 'ignored' }))
+    .toEqual({ summaryParts: [{ id: 'a', text: 'They met at the bar.' }, { id: 'b', text: 'They argued.' }] })
+  expect(chatPatchOf({ summary: 'typed with no parts yet' })).toEqual({ summary: 'typed with no parts yet' })
+})
+
+test('saving a scene writes the whole lorebook once, then binds it to the chat', async () => {
+  const meta = { id: 'scene-chat', title: 'Harbor night', characterId: 'test' }
+  useApp.setState({ chats: [engineChatToUI(meta, [])], lorebooks: [] })
+  const calls: { method: string; url: string; body: Record<string, unknown> }[] = []
+  globalThis.fetch = (async (input, init) => {
+    calls.push({ method: String(init?.method), url: String(input), body: JSON.parse(String(init?.body ?? '{}')) })
+    return Response.json({ ok: true })
+  }) as typeof fetch
+  const entry = { title: 'The compass', keys: ['compass', 'brass'], content: 'The traveler gave Aria a brass compass.' }
+  const bookId = await useApp.getState().saveSceneEntry(meta.id, entry, null)
+  // a new book named after the chat, already holding the entry when it is first stored
+  expect(calls.map((c) => c.method)).toEqual(['PUT', 'PATCH'])
+  expect(calls[0]!.url).toContain(`/lorebooks/${bookId}`)
+  expect(calls[1]!.body).toEqual({ chatLorebookIds: [bookId] })
+  const book = useApp.getState().lorebooks.find((b) => b.id === bookId)!
+  expect(book.name).toBe('Harbor night scenes')
+  expect(book.entries[0]).toMatchObject({ ...entry, status: 'normal', enabled: true })
+  expect(useApp.getState().chats[0]!.chatLorebookIds).toEqual([bookId])
+  // a second scene goes into the same book, on top, with no second binding
+  calls.length = 0
+  await useApp.getState().saveSceneEntry(meta.id, { ...entry, title: 'The storm' }, bookId)
+  expect(calls.map((c) => c.method)).toEqual(['PUT'])
+  expect(useApp.getState().lorebooks.find((b) => b.id === bookId)!.entries.map((e) => e.title)).toEqual(['The storm', 'The compass'])
+  await expect(useApp.getState().saveSceneEntry(meta.id, entry, 'missing-book')).rejects.toThrow('Lorebook not found')
+})

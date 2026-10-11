@@ -30,6 +30,12 @@ function runJob(job: Job) {
 }
 
 describe("regex worker semantics", () => {
+  it("honors first-match, global, and sticky flags", () => {
+    expect(runJob({ find: "a", flags: "", replace: "b", input: "aaa" }).output).toBe("baa");
+    expect(runJob({ find: "a", flags: "g", replace: "b", input: "aaa" }).output).toBe("bbb");
+    expect(runJob({ find: "a", flags: "y", replace: "b", input: "aaa" }).output).toBe("baa");
+    expect(runJob({ find: "a", flags: "gy", replace: "b", input: "aa aa" }).output).toBe("bb aa");
+  });
   it("substitutes captures, named groups, {{match}} and trim strings", () => {
     expect(runJob({ find: "a(b)", replace: "[$1]", input: "xaby" }).output).toBe("x[b]y");
     expect(runJob({ find: "(?<word>\\w+)", replace: "<$<word>>", input: "hi there" }).output).toBe("<hi> <there>");
@@ -42,6 +48,10 @@ describe("regex worker semantics", () => {
     expect(runJob({ find: "X", replace: "{{char}}", macros: { user: "Alice", char: "Bob" }, input: "X" }).output).toBe("Bob");
     // $& is not a studio token: it stays literal, and macros still apply
     expect(runJob({ find: "X", replace: "$&{{user}}", macros: { user: "Alice", char: "Bob" }, input: "X" }).output).toBe("$&Alice");
+  });
+
+  it("advances Unicode empty matches past whole code points", () => {
+    expect(runJob({ find: "(?:)", flags: "gu", replace: "|", input: "🙂" }).output).toBe("|🙂|");
   });
 
   it("survives zero-length matches without hanging", () => {

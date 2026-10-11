@@ -80,14 +80,14 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
           {numParams.map(({ key, label, min, max, step }) => {
             const p = sp[key]
             return (
-              <div key={key} className={cn('flex items-center gap-2', !p.enabled && 'opacity-50')}>
+              <div key={key} className={cn('sampler-control', !p.enabled && 'opacity-50')}>
                 <Switch checked={p.enabled} disabled={ro} onCheckedChange={(v) => up({ [key]: { ...p, enabled: v } } as never)} aria-label={`Send ${label}`} />
-                <Label className="w-36 shrink-0 text-xs">{label}</Label>
-                <Slider value={[p.value]} min={min} max={max} step={step} disabled={ro || !p.enabled} onValueChange={(vs) => up({ [key]: { ...p, value: Array.isArray(vs) ? vs[0] : vs } } as never)} aria-label={label} className="flex-1" />
+                <Label className="sampler-control-label text-xs">{label}</Label>
+                <Slider value={[p.value]} min={min} max={max} step={step} disabled={ro || !p.enabled} onValueChange={(vs) => up({ [key]: { ...p, value: Array.isArray(vs) ? vs[0] : vs } } as never)} aria-label={label} className="sampler-control-slider" />
                 <Input
                   type="number" value={p.value} min={min} max={max} step={step} disabled={ro || !p.enabled}
                   onChange={(e) => up({ [key]: { ...p, value: Number(e.target.value) } } as never)}
-                  className="h-6 w-18 text-[11px]" aria-label={`${label} value`}
+                  className="sampler-control-value h-8 w-20 text-xs" aria-label={`${label} value`}
                 />
               </div>
             )
@@ -113,9 +113,9 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
           <div className="flex flex-col gap-1.5">
             <Label className="text-xs">Logit bias</Label>
             {sp.logitBias.map((b, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <Input value={b.token} disabled={ro} onChange={(e) => up({ logitBias: sp.logitBias.map((x, j) => j === i ? { ...x, token: e.target.value } : x) })} className="h-7 w-40 font-mono text-xs" aria-label="Token" />
-                <Slider value={[b.bias]} min={-100} max={100} step={1} disabled={ro} onValueChange={(vs) => { const v = Array.isArray(vs) ? vs[0] : vs; up({ logitBias: sp.logitBias.map((x, j) => j === i ? { ...x, bias: v } : x) }) }} aria-label="Bias" className="flex-1" />
+              <div key={i} className="sampler-bias-control">
+                <Input value={b.token} disabled={ro} onChange={(e) => up({ logitBias: sp.logitBias.map((x, j) => j === i ? { ...x, token: e.target.value } : x) })} className="sampler-bias-token h-8 min-w-0 font-mono text-xs" aria-label="Token" />
+                <Slider value={[b.bias]} min={-100} max={100} step={1} disabled={ro} onValueChange={(vs) => { const v = Array.isArray(vs) ? vs[0] : vs; up({ logitBias: sp.logitBias.map((x, j) => j === i ? { ...x, bias: v } : x) }) }} aria-label="Bias" className="sampler-bias-slider" />
                 <span className="w-10 text-right text-xs">{b.bias}</span>
                 <Button variant="ghost" size="sm" className="h-6 px-1.5 text-xs" disabled={ro} onClick={() => up({ logitBias: sp.logitBias.filter((_, j) => j !== i) })}>remove</Button>
               </div>

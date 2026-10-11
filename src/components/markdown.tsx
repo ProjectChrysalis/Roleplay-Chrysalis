@@ -1,6 +1,6 @@
 
 import { Children, createContext, isValidElement, cloneElement, memo, useContext, type ReactNode, type ReactElement } from 'react'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import remarkBreaks from 'remark-breaks'
@@ -154,7 +154,7 @@ const mdComponents = {
 
 // memoized: re-parses markdown (remark/rehype/KaTeX/highlight) ONLY when the
 // content string actually changes — not on every parent re-render
-export const Markdown = memo(function Markdown({ content, className, scope }: { content: string; className?: string; scope?: string }) {
+export const Markdown = memo(function Markdown({ content, className, scope, allowStyles = true, imageUrl, imageComponent }: { content: string; className?: string; scope?: string; allowStyles?: boolean; imageUrl?: (url: string) => string; imageComponent?: Components['img'] }) {
   return (
     <div
       className={cn(
@@ -183,11 +183,11 @@ export const Markdown = memo(function Markdown({ content, className, scope }: { 
             // raw HTML parsed, then sanitized BEFORE katex/highlight so their
             // generated markup isn't stripped by the allowlist
             rehypeRaw,
-            [rehypeSanitize, htmlSchema],
+            [rehypeSanitize, allowStyles ? htmlSchema : defaultSchema],
             rehypeKatex,
             [rehypeHighlight, { detect: false, ignoreMissing: true }],
           ]}
-          components={mdComponents}
+          components={imageComponent ? { ...mdComponents, img: imageComponent } : imageUrl ? { ...mdComponents, img: ({ src, alt }) => <img src={typeof src === 'string' ? imageUrl(src) : undefined} alt={alt ?? ''} loading="lazy" /> } : mdComponents}
         >
           {content}
         </ReactMarkdown>

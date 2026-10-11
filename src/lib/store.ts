@@ -21,6 +21,7 @@ import type {
 import {
   seedThemes, defaultSettings,
   buildDefaultPreset, DEFAULT_MAIN_PROMPT, DEFAULT_UTILITY_PROMPTS,
+  RETIRED_SUMMARY_PROMPT, newLoreEntry, newLorebook,
 } from './seed'
 import { uid } from './tokens'
 import { DEFAULT_AVATAR } from './utils'
@@ -110,11 +111,14 @@ interface AppState {
   /** open section drawer (null = closed): any page on desktop, only over an open chat on mobile */
   drawer: ViewKey | null
   activeChatId: ID | null
+  focusChatMessage: { chatId: ID; messageId: ID } | null
   activeCharacterId: ID | null
   focusPresetId: ID | null
   focusPersonaId: ID | null
+  focusRegexId: ID | null
+  focusLorebookId: ID | null
   selectedSettingsSection: string
-  streaming: { chatId: ID; messageId: ID; operation?: 'send' | 'swipe' | 'continue' | 'next'; prefix?: string; full: string; shown: number; startedAt: number; thinking?: string; thinkingT0?: number; thinkingMs?: number; marks?: Array<{ kind: 'tool'; at: number; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean } | { kind: 'think'; at: number; text: string; t0: number; ms?: number }> } | null
+  streaming: { chatId: ID; messageId: ID; model?: string; operation?: 'send' | 'swipe' | 'continue' | 'next'; prefix?: string; full: string; shown: number; startedAt: number; thinking?: string; thinkingT0?: number; thinkingMs?: number; marks?: Array<{ kind: 'tool'; at: number; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean } | { kind: 'think'; at: number; text: string; t0: number; ms?: number }> } | null
   /** one-shot: suppress the swipe animation for this messageId:swipeIndex
    *  (set when a cancelled regen appends its frozen swipe) */
   swipeFxSkip: string | null
@@ -140,12 +144,14 @@ interface AppState {
   setView: (v: ViewKey) => void
   closeDrawer: () => void
   navigate: (v: ViewKey) => void
-  openChat: (chatId: ID) => void
+  openChat: (chatId: ID, messageId?: ID) => void
   ensureChatMessages: (chatId: ID) => Promise<void>
   closeChat: () => void
   openCharacter: (charId: ID | null) => void
   focusPreset: (presetId: ID) => void
   focusPersona: (personaId: ID) => void
+  focusRegex: (scriptId: ID) => void
+  focusLorebook: (bookId: ID) => void
   setSettingsSection: (s: string) => void
   updateSettings: (patch: Partial<AppSettings>) => void
   // chat actions
@@ -168,7 +174,6 @@ interface AppState {
   setDeleteMode: (on: boolean) => void
   toggleHidden: (chatId: ID, messageId: ID) => void
   setMessageTranslation: (chatId: ID, messageId: ID, translation: string | null) => void
-  toggleBookmark: (chatId: ID, messageId: ID, label?: string) => void
   moveMessage: (chatId: ID, messageId: ID, dir: -1 | 1) => void
   impersonate: (chatId: ID) => void
   continueReply: (chatId: ID) => void
@@ -186,15 +191,21 @@ interface AppState {
   pushInputHistory: (s: string) => void
   /** Fire quick replies whose auto-execute flag matches the event (real hooks). */
   runAutoExecutes: (event: 'onStartup' | 'onUser' | 'onAi' | 'onChatChange', chatId?: ID | null) => void
-  /** Fold the next stretch of the chat into its summary and move the cutoff
-   *  (keeps the newest turns, or everything from `upTo` on). `redo` rewrites
-   *  the latest summary over the same messages. */
+  /** Summarize the next stretch of the chat as a new summary and move the
+   *  cutoff (keeps the newest turns, or everything from `upTo` on). Earlier
+   *  summaries are left as written. `redo` rewrites the latest summary over
+   *  the same messages. */
   compactChat: (chatId: ID, opts?: { redo?: boolean; upTo?: ID }) => Promise<{ summary: string; covered: number }>
-  /** Restore the summary and cutoff from before the latest compaction. */
+  /** Take the latest compaction back: its summary goes, the cutoff returns
+   *  to where it was, and summaries it merged come back as they were. */
   undoCompaction: (chatId: ID) => Promise<void>
+  /** Keep a scene as a lorebook entry this chat reads. `bookId` null makes a
+   *  lorebook for the chat. The book is bound to the chat if it was not.
+   *  Returns the book's id. */
+  saveSceneEntry: (chatId: ID, entry: { title: string; keys: string[]; content: string }, bookId: ID | null) => Promise<ID>
   /** Import a portable preset file; regex scripts it carries become scripts
    *  bound to the new preset. `base` fills whatever the file leaves out. */
-  importPreset: (json: unknown, name: string, base?: Preset) => Promise<{ preset: Preset; scripts: number }>
+  importPreset: (json: unknown, name: string, base?: Preset, enableEmbeddedRegex?: boolean) => Promise<{ preset: Preset; scripts: number }>
   /** Post a generated picture as the chat's last speaker (and keep it in
    *  that character's gallery when the setting says so). */
   postPicture: (chatId: ID, image: GeneratedImage) => Promise<void>
@@ -221,7 +232,7 @@ interface AppState {
   duplicateLorebook: (id: ID) => ID
   deleteLorebook: (id: ID) => void
   updateRegex: (id: ID, patch: Partial<RegexScript>) => void
-  addRegex: (scope: RegexScript['scope']) => ID
+  addRegex: (scope: RegexScript['scope'], scopeTargetId?: ID | null) => ID
   deleteRegex: (id: ID) => void
   updateQRSet: (id: ID, patch: Partial<QuickReplySet>) => void
   addQRSet: () => ID
@@ -335,9 +346,12 @@ export const useApp = create<AppState>()(
       view: 'home',
       drawer: null,
       activeChatId: null,
+      focusChatMessage: null,
       activeCharacterId: null,
       focusPresetId: null,
       focusPersonaId: null,
+      focusRegexId: null,
+      focusLorebookId: null,
       selectedSettingsSection: 'appearance',
       streaming: null,
       swipeFxSkip: null,
@@ -587,6 +601,9 @@ export const useApp = create<AppState>()(
               const own = legacy.prompts?.find((x) => !x.marker && x.role === 'system')?.content?.trim()
               cur.prompt = own && !own.startsWith('Summarize the most important facts and events in the story so far.') ? own : d.prompt
             }
+            // the default from when one summary was rewritten every time asks
+            // for the whole story again; summaries are now one per stretch
+            if (cur.prompt.startsWith(RETIRED_SUMMARY_PROMPT)) cur.prompt = d.prompt
             delete (cur as typeof legacy).prompts
             delete (cur as typeof legacy).paused
             delete (cur as typeof legacy).notify
@@ -795,10 +812,10 @@ export const useApp = create<AppState>()(
         else set({ view: 'chats', activeChatId: null, drawer: null })
       },
       setComposerDraft: (text) => set({ composerDraft: text }),
-      openChat: (chatId) => {
+      openChat: (chatId, messageId) => {
         sessionOpenedChats.add(chatId)
         const chat = get().chats.find((c) => c.id === chatId)
-        set({ view: 'chat', activeChatId: chatId, activeCharacterId: chat?.characterId ?? null, drawer: null })
+        set({ view: 'chat', activeChatId: chatId, activeCharacterId: chat?.characterId ?? null, drawer: null, focusChatMessage: messageId ? { chatId, messageId } : null })
         void get().ensureChatMessages(chatId).then(() => get().runAutoExecutes('onChatChange', chatId))
       },
       ensureChatMessages: async (chatId) => {
@@ -828,6 +845,14 @@ export const useApp = create<AppState>()(
       focusPersona: (personaId) => {
         if (opensAsDrawer(get().view)) set({ focusPersonaId: personaId, drawer: 'personas' })
         else set({ view: 'personas', focusPersonaId: personaId })
+      },
+      focusRegex: (scriptId) => {
+        set({ focusRegexId: scriptId })
+        get().navigate('extensions')
+      },
+      focusLorebook: (bookId) => {
+        set({ focusLorebookId: bookId })
+        get().navigate('lorebooks')
       },
       setSettingsSection: (s) => {
         if (opensAsDrawer(get().view)) set({ selectedSettingsSection: s, drawer: 'settings' })
@@ -1090,19 +1115,6 @@ export const useApp = create<AppState>()(
           method: 'PATCH', body: JSON.stringify({ translation }),
         }).catch(() => undefined) // translation is cosmetic — no error toast
       },
-      toggleBookmark: (chatId, messageId, label) => {
-        const chat = get().chats.find((c) => c.id === chatId)
-        const msg = chat?.messages.find((m) => m.id === messageId)
-        if (!msg) return
-        const next = !msg.bookmarked
-        bumpMutate()
-        set((s) => ({ chats: s.chats.map((c) => c.id !== chatId ? c : {
-          ...c, messages: c.messages.map((m) => (m.id === messageId ? { ...m, bookmarked: next, bookmarkLabel: label ?? m.bookmarkLabel } : m)),
-        }) }))
-        void j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-          method: 'PATCH', body: JSON.stringify({ bookmarked: next, bookmarkLabel: label ?? msg.bookmarkLabel }),
-        }).catch((e) => toast.error(String((e as Error).message ?? e)))
-      },
       moveMessage: (chatId, messageId, dir) => {
         bumpMutate()
         set((s) => ({ chats: s.chats.map((c) => {
@@ -1342,7 +1354,23 @@ export const useApp = create<AppState>()(
         await j(`/chats/${encodeURIComponent(chatId)}/compact/undo`, { method: 'POST' })
         await refreshChat(set, get, chatId)
       },
-      importPreset: async (json, name, base) => {
+      saveSceneEntry: async (chatId, entry, bookId) => {
+        const chat = get().chats.find((c) => c.id === chatId)
+        if (!chat) throw new Error('Chat not found')
+        const known = bookId ? get().lorebooks.find((b) => b.id === bookId) : undefined
+        if (bookId && !known) throw new Error('Lorebook not found')
+        const base = known ?? newLorebook(uid('book'), `${chat.title || 'Chat'} scenes`)
+        const book: Lorebook = { ...base, entries: [{ ...newLoreEntry(), ...entry }, ...base.entries] }
+        // one write for the whole book, awaited: binding a book the engine
+        // has not stored yet would point the chat at nothing
+        await j(`/lorebooks/${encodeURIComponent(book.id)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(book), id: book.id }) })
+        bumpMutate()
+        set((s) => ({ lorebooks: known ? s.lorebooks.map((b) => (b.id === book.id ? book : b)) : [...s.lorebooks, book] }))
+        const bound = chat.chatLorebookIds ?? []
+        if (!bound.includes(book.id)) await get().setChatLorebooks(chatId, [...bound, book.id])
+        return book.id
+      },
+      importPreset: async (json, name, base, enableEmbeddedRegex = false) => {
         const fill = base ?? get().presets.find((p) => !p.readOnly) ?? get().presets[0]
         const preset = fill ? presetImport(json, name, fill) : null
         if (!preset) throw new Error('Not a recognizable preset file')
@@ -1354,7 +1382,7 @@ export const useApp = create<AppState>()(
         for (const item of Array.isArray(embedded) ? embedded : []) {
           const rx = regexImport(item)
           if (!rx) continue
-          const script: RegexScript = { ...rx, id: uid('rx'), scope: 'preset', scopeTargetId: preset.id, order: scripts.length }
+          const script: RegexScript = { ...rx, enabled: enableEmbeddedRegex && rx.enabled, id: uid('rx'), scope: 'preset', scopeTargetId: preset.id, order: scripts.length }
           await j(`/regex/${encodeURIComponent(script.id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id: script.id }) })
           scripts.push(script)
         }
@@ -1619,12 +1647,7 @@ export const useApp = create<AppState>()(
       addLorebook: () => {
         bumpMutate()
         const id = uid('book')
-        const book: Lorebook = {
-          id, name: 'New Lorebook', folderId: null, globalActive: false, linkedCharacterIds: [], entries: [],
-          settings: { scanDepth: 4, contextPercent: 25, budgetCap: 0, minActivations: 0, maxRecursion: 2, insertionStrategy: 'character_first', caseSensitive: false, wholeWords: true, groupScoring: false, recursiveScan: true, includeNames: true, overflowAlert: true },
-          vectorized: { embedding: 'all-MiniLM-L6-v2', queryMessages: 2, scoreThreshold: 0.35, topK: 10 }, isEmbedded: false,
-          formatTemplate: '',
-        }
+        const book = newLorebook(id, 'New Lorebook')
         set((s) => ({ lorebooks: [...s.lorebooks, book] }))
         writeThrough('lorebooks', 'lorebook', j(`/lorebooks/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...lorebookToEngine(book), id }) }))
         return id
@@ -1655,11 +1678,11 @@ export const useApp = create<AppState>()(
         void j(`/regex/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(r), id }) })
           .catch((e) => regexToast.error(String((e as Error).message ?? e)))
       },
-      addRegex: (scope) => {
+      addRegex: (scope, scopeTargetId = null) => {
         bumpMutate()
         const id = uid('rx')
         const script: RegexScript = {
-          id, name: 'New script', scope, scopeTargetId: null, find: '', replace: '', flags: 'g',
+          id, name: 'New script', scope, scopeTargetId: scope === 'global' ? null : scopeTargetId, find: '', replace: '', flags: 'g',
           placements: { userInput: false, aiOutput: true, slash: false, wi: false, reasoning: false },
           markdownOnly: false, promptOnly: false,
           minDepth: null, maxDepth: null, trimStrings: [], runOnEdit: false, macroMode: 'none', enabled: true,
@@ -1854,7 +1877,7 @@ function freezeCancelledStream(
           // nothing streamed at all: a staged bubble vanishes, an in-place
           // regen keeps its old swipes untouched
           if (!keep) return isStaged ? null : m
-          const frozenSwipe = { id: uid('sw'), content: text, model: m.swipes[m.activeSwipe]?.model ?? '', genTimeMs: genMs, timestamp: Date.now(), ...(parts.length ? { parts } : {}) }
+          const frozenSwipe = { id: uid('sw'), content: text, model: st.model ?? m.swipes[m.activeSwipe]?.model ?? '', genTimeMs: genMs, timestamp: Date.now(), ...(parts.length ? { parts } : {}) }
           const swipes = st.operation === 'continue'
             ? m.swipes.map((sw, i) => i === m.activeSwipe ? { ...frozenSwipe, id: sw.id } : sw)
             : isStaged || m.swipes.length === 0 ? [frozenSwipe] : [...m.swipes, frozenSwipe]
@@ -1892,7 +1915,7 @@ async function preserveInterruptedStream(
           method: 'POST',
           body: JSON.stringify({
             text: frozen.text, parts: frozen.parts, genMs: frozen.genMs,
-            model: get().model ?? '', operation: st.operation,
+            model: st.model ?? get().model ?? '', operation: st.operation,
             ...(frozen.isStaged ? {
               replyMessageId: st.messageId.replace(/^pending-/, ''), charId: target?.characterId,
               userMessageId: user?.id.replace(/^pending-/, ''), userText: user?.swipes[0]?.content,
@@ -1994,7 +2017,7 @@ async function runGeneration(
     const target = chat.messages.find((m) => m.id === inPlaceId)
     const content = target?.swipes[target.activeSwipe]?.content ?? ''
     const prefix = op === 'continue' ? content + (content && !/\s$/.test(content) ? ' ' : '') : ''
-    set(() => ({ streaming: { chatId, messageId: inPlaceId, operation: op, prefix, full: prefix, shown: prefix.length, startedAt: Date.now() } }))
+    set(() => ({ streaming: { chatId, messageId: inPlaceId, model: String(body.model ?? get().model ?? ''), operation: op, prefix, full: prefix, shown: prefix.length, startedAt: Date.now() } }))
     return runStream(set, get, chatId, op, { ...body, expectedSwipes: target?.swipes.length, expectedText: content }, ctrl, chat, bookIds)
   }
   const pendingId = `pending-${uid('reply')}`
@@ -2017,7 +2040,7 @@ async function runGeneration(
   }
   bumpMutate() // staged bubbles must survive any in-flight hydrate
   set((s) => ({
-    streaming: { chatId, messageId: pendingId, operation: op, full: '', shown: 0, startedAt: Date.now() },
+    streaming: { chatId, messageId: pendingId, model: String(body.model ?? get().model ?? ''), operation: op, full: '', shown: 0, startedAt: Date.now() },
     chats: s.chats.map((c) => (c.id === chatId ? {
       ...c,
       messages: [...c.messages, ...(stageUser ? [stageUser] : []), pendingMsg],
@@ -2037,7 +2060,7 @@ async function runStream(
   try {
     // keep the engine's chat meta in sync with the UI's lorebook bindings
     await j(`/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify({ lorebookIds: bookIds }), signal: ctrl.signal })
-    const model = get().model
+    const model = get().streaming?.chatId === chatId ? get().streaming?.model : get().model
     const res = await j<Record<string, unknown>>(`/chats/${encodeURIComponent(chatId)}/${op}`, {
       method: 'POST',
       body: JSON.stringify({ ...body, ...(model ? { model } : {}) }),
@@ -2135,7 +2158,7 @@ async function runStream(
             compacting.add(chatId)
             void get().compactChat(chatId)
               .then((r) => memoryToast.success('Chat compacted', {
-                description: `${r.covered} messages folded into the summary`,
+                description: `${r.covered} messages summarized`,
                 action: { label: 'Undo', onClick: () => { void get().undoCompaction(chatId).catch((e) => memoryToast.error(String((e as Error).message ?? e))) } },
               }))
               .catch((e) => memoryToast.error('Automatic compaction failed', { description: String((e as Error).message ?? e) }))

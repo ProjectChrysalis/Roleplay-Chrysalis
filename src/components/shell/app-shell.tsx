@@ -12,6 +12,7 @@ import { useBackClose } from '@/hooks/use-back-close'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
+import { EmbeddedLorebookPrompt } from '@/components/shell/embedded-lorebook-prompt'
 import { HomeView } from '@/components/views/home-view'
 import { CharactersView } from '@/components/views/characters-view'
 import { MarketplaceView } from '@/components/views/marketplace-view'
@@ -145,6 +146,7 @@ export function AppShell() {
           generating…
         </span>
       )}
+      <EmbeddedLorebookPrompt />
       <Toaster position={notificationPosition} mobileOffset={{ bottom: "calc(4rem + env(safe-area-inset-bottom))" }} visibleToasts={isDesktop ? 3 : 1} closeButton />
     </div>
   )
@@ -172,9 +174,11 @@ function renderView(v: ViewKey) {
 
 /** Section drawer: the page behind stays mounted (a chat keeps its scroll and
  *  any running stream) and closing the drawer drops you right back into it.
- *  Desktop: slides over the left part of the screen beside the rail and stops
- *  short of the right edge; clicking the uncovered side or Esc closes it.
- *  Mobile: covers the open chat below its section bar, full width. */
+ *  Desktop: slides out from under the rail over the left part of the screen
+ *  and stops short of the right edge; clicking the uncovered side or Esc
+ *  closes it and it slides back under the rail.
+ *  Mobile: drops down from under the chat's section bar, full width, and
+ *  retracts up under it. */
 function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
   const drawer = useApp((s) => s.drawer)
   const closeDrawer = useApp((s) => s.closeDrawer)
@@ -193,11 +197,14 @@ function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
         // never over it: it stays clickable to flip sections or close
         overlayClassName={isDesktop ? 'left-12' : 'top-11'}
         onOverlayClick={closeDrawer}
+        // clipped to the same area, so it slides out from under the rail (or
+        // down from under the bar) and goes back under it on close
+        clipClassName={isDesktop ? 'inset-y-0 left-12 right-0' : 'inset-x-0 top-11 bottom-0'}
         className={cn(
           'gap-0',
           isDesktop
-            ? 'data-[side=left]:left-12 data-[side=left]:w-[min(720px,75vw)] data-[side=left]:sm:max-w-none'
-            : 'data-[side=top]:top-11 data-[side=top]:bottom-0 data-[side=top]:max-h-none',
+            ? 'data-[side=left]:w-[min(720px,75vw)] data-[side=left]:sm:max-w-none'
+            : 'data-[side=top]:bottom-0 data-[side=top]:max-h-none',
         )}
         // mobile: the section bar's lit icon is the title, and tapping it again closes
         showCloseButton={isDesktop}

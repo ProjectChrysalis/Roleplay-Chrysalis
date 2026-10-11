@@ -15,9 +15,7 @@ Preset helpers also synchronize portable/editor values; chat helpers preserve
 inactive swipes and generation metadata. Structural chat actions use app routes.
 
 The app publishes its current entity IDs to the shell for explicit attachment
-in agent Settings. Use as agent context sits near the bottom of the message menu,
-above the move controls with a paperclip icon, and selects that message and its active swipe. Preset
-focus follows the selected preset. The attachment preview shows its type and name. Attached
+in agent Settings. Preset focus follows the selected preset. The attachment preview shows its type and name. Attached
 selection is evidence, not permission, and is consumed by the next message.
 
 For creation or unfamiliar fields, consult `data/_catalog.json`: entity paths, routes, complete templates, and
@@ -68,7 +66,10 @@ update at all.
 The roleplay studio, v4: a power-user roleplay UI. Left icon rail (Home / Chats / Characters / Marketplace / Personas /
 Presets / Lorebooks / Shortcuts / Tools / Connections / Settings) + Ctrl+K
 command palette. Sections open as drawers over the page (components/shell/
-sections.ts is the one list); on mobile, only over an open chat, whose header
+sections.ts is the one list). A drawer slides its whole width out from under
+the rail and back under it; sheets everywhere travel their full size with no
+fade (components/ui/sheet.tsx, `clipClassName` is the box a sheet beside a
+bar is clipped to). On mobile, only over an open chat, whose header
 becomes a row of section icons (tap to drop the section down over the chat,
 tap again to close); elsewhere on mobile a section is the page, reached from
 the bottom tab bar. Views are components/views/*, the chat experience lives in
@@ -97,6 +98,18 @@ matches at a time. `chatLorebookIds`
 stores explicit chat bindings separately from the inherited `lorebookIds` scope.
 Both prompt assembly and semantic preparation include them; backups remap the
 explicit bindings through `_chatLorebookNames`. Forks inherit the selection.
+The preset and lorebook editors keep one line of everyday controls and fold
+the rest. A preset prompt shows name, role, a macro button (inserts at the
+cursor) and its text. Position, group, condition, triggers and forbid overrides
+sit under Options, which names whatever is set away from the default while
+closed. Groups are created from a prompt's Group picker. A lorebook entry shows
+title, status, keys, content, position, order and trigger chance. Secondary
+keys, timing, inclusion group, recursion flags, extra scan sources and the
+automation id sit under More options the same way. Both folds are one
+remembered switch for every row. Book and preset actions that are not everyday
+are in the header's menu. The position picker offers only the three places an
+entry can be sent to. Keyword test matches with `lib/lore-match.ts`, which
+follows the engine plugin's key rules: change the two together.
 Stored avatar URLs must pass through `lib/avatar-media.ts` before the UI kit
 preloads them. Detached image preloaders cannot carry the frame’s session; the
 resolver shares authenticated fetches and gives the component a blob URL.
@@ -109,8 +122,20 @@ and interrupted replies stay in place. One transition runs at a time.
 Preferences live in settings.ui.notifications; missing keys
 are enabled for older settings. settings.ui.notificationPosition chooses
 the popup position, defaulting to bottom-center.
+The composer’s Speak as submenu shows titles to the right when same-name personas have different titles.
 State is a zustand store (lib/store.ts) hydrated from the engine and mirrored
-to it on every change. Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
+to it on every change. Chats search uses POST /chats/search to search saved active message text, names
+and titles, including unloaded transcripts. Words must all occur somewhere in the
+chat; quoted phrases stay intact. Results are paginated with matched-message
+snippets, character/folder filters and a transient message focus for jumping to
+older turns. Pictures and inactive swipes are excluded. Missing/corrupt data is
+reported. Search responses do not hydrate whole transcripts. The composer skips
+hidden-frame measurements, keeps a one-line minimum and refits on visibility,
+width, viewport and font changes.
+Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
+
+Markdown horizontal rules use a brighter line. Thinking disclosure and panel borders
+use the standard muted theme styles.
 
 Expanded thinking panels have a Copy button and an actions menu above the scrollable
 text. Edit thinking and Remove all thinking live in that menu; collapsed panels
@@ -136,7 +161,7 @@ Older replies retain readable thinking but cannot recover missing signatures.
   hydrates from the engine and mirrors every mutation optimistically.
   Generation is real (send/swipe/continue/next/impersonate stay open while
   the kernel runs the model; deltas render live; Stop aborts). Characters,
-  chats, swipes (set/generate/delete), messages (edit/hide/bookmark/move/
+  chats, swipes (set/generate/delete), messages (edit/hide/move/
   truncate), forks+branch tree, groups (mute/strategy/force-speak),
   personas (the default in settings is what a NEW chat starts with; every
   chat pins its own persona and only an explicit switch changes it), presets (sections ⇄ portable prompts[]),
@@ -166,7 +191,8 @@ room for, so a restore on another machine is not lossy:
   carry (`hidden`, `bookmark`, `picture`, `translation`, `extra`) ride in
   `extra.chry`.
 - `settings.json` carries `settings` (the real `ui` object), `library.json`
-  the local collections, `databank/` the retrieval chunks.
+  the local collections, `variables.json` the shared macro variables (merged
+  into what is already there on restore), `databank/` the retrieval chunks.
 
 IDS DO NOT TRAVEL. Anything pointing at another entity exports a `_…Names`
 sibling and the importer re-resolves it; ids are re-minted on the way in.
@@ -182,18 +208,39 @@ earlier ones by name.
 
 ## Memory, pictures, regex, groups, MCP (how they work now)
 
-- Memory = one running summary per chat + a cutoff (meta.summary,
-  meta.memoryCutoffMessageId). POST /chats/:id/compact folds the turns between
-  the cutoff and the newest `keepRecent` into the summary and moves the
-  cutoff; every compaction pushes the prior state onto meta.compactions (max
-  20) so /compact/undo restores it and {redo:true} rewrites the latest one
-  from the same start. Messages above the cutoff stay in the chat (dimmed)
-  but leave the prompt. Auto mode compacts when a send reports `trimmed`
-  (history fell out of the context) or every `interval` turns. The per-chat
-  facts vault (/memories) is unchanged, shown under Memory → Facts.
-  Summaries and fact extraction (manual and automatic) run on
-  ui.memory.model when set (memoryModelOf in the engine plugin), otherwise on
-  the chat's model.
+- Memory = summaries in parts + a cutoff (meta.summaryParts,
+  meta.memoryCutoffMessageId). POST /chats/:id/compact summarizes ONLY the
+  turns between the cutoff and the newest `keepRecent` as a new part
+  ({ id, text, from, to }: message ids, `to` not included) and moves the
+  cutoff. Earlier parts go to the model as context and are never rewritten,
+  so old detail does not wear away with each compaction. Only when the parts
+  would pass ui.summary.maxWords is the oldest half merged into one, by a
+  second request in the same pass (a failed merge is skipped). meta.summary
+  is always the parts joined, which is what the prompt and {{summary}} read;
+  summaryParts()/setSummaryParts() in the engine plugin keep the two in
+  step. A summary written straight into meta.summary (an older chat, an edit
+  on disk, PATCH {summary}) counts as one part. PATCH {summaryParts:
+  [{id,text}]} edits parts in place; one left out or emptied is gone. Every
+  compaction records what it did on meta.compactions (max 20) so
+  /compact/undo takes it back exactly, merged parts included, and
+  {redo:true} rewrites the latest part over the same messages. Messages
+  above the cutoff stay in the chat (dimmed) but leave the prompt. Auto mode
+  compacts when a send reports `trimmed` (history fell out of the context)
+  or every `interval` turns. The Memory panel shows one box per part.
+- Facts: the per-chat vault (/memories, Memory → Facts). Pinned facts ride
+  every prompt, the rest come back when the recent chat shares words with
+  them. Words only: facts are not embedded, so recalling them costs no extra
+  call. Embeddings are used for one thing, lorebook entries whose status is
+  Vectorized, and only when a connection offers them.
+- Scenes: POST /chats/:id/scene { from, to } has the model draft a lorebook
+  entry (title, keys, content) from that stretch and saves nothing. The
+  Save scene dialog (a message's menu) edits the draft and stores it with
+  the store's saveSceneEntry: one PUT of the whole book, then the book is
+  bound to the chat (chatLorebookIds). A chat with no lorebook of its own
+  gets one named after it. The usual key scan brings the entry back.
+- Summaries, fact extraction (manual and automatic) and scene drafts run on
+  ui.memory.model when set (memoryModelOf in the engine plugin), otherwise
+  on the chat's model.
 - Pictures: /chats/:id/image-prompt has the chat model describe the scene
   (modes scene/character/face/user/background); the engine's /v1/images
   draws it into the asset store (/v1/assets/<sha>); POST /chats/:id/messages
@@ -201,6 +248,15 @@ earlier ones by name.
   target) and it lands in the character's gallery. The tools plugin's
   built-in `generate_image` lets the model ask for one mid-reply; the client
   draws it after the reply commits.
+- Character imports report imported/linked lorebooks and regex counts. Embedded
+  scripts start disabled unless enableEmbeddedRegex is true; source-disabled scripts
+  stay disabled. Both card and preset import paths extract scoped scripts. Character
+  and preset editors expose switches; focusRegex/focusLorebook open the selected
+  item directly. Opening a chat reports linked lore and scoped regex once per
+  owner per page session, with review shortcuts. Regex search includes owner names and scope. URL imports also accept
+  catalog JSON and additional PNG card sources declared in the import manifest.
+  Explicit empty regex flags mean one replacement; missing legacy flags keep g.
+  The display worker preserves flags and advances Unicode empty matches safely.
 - Regex has two axes like the portable format: placement = where
   (user_input, ai_output, slash, wi, reasoning), markdownOnly/promptOnly =
   when. Neither flag rewrites text as it is SAVED (send, reply, greeting,
@@ -208,6 +264,26 @@ earlier ones by name.
   runs at assembly (history + world info). Preset text is never regexed.
   Scripts saved before the flags read via regexAxes(). Imported cards and
   presets bring their embedded scripts as character/preset-scoped scripts.
+- Macros: expandMacros(text, mc) in the engine plugin walks the text once, in
+  document order, so a variable set earlier in the prompt is visible to
+  everything after it (sections expand in prompt order and share one context).
+  `{{name}}`, `{{name::a::b}}` and `{{name a}}` are calls; arguments are
+  trimmed and may hold nested macros. Blocks: `{{if cond}}…{{else}}…{{/if}}`
+  (also spelled `{{#if}}`), and the block forms of setvar / addvar /
+  setglobalvar / addglobalvar / trim. A condition is false when it is empty,
+  `0`, `false` or `off`; `!` negates; it can be a nested macro, a variable
+  (`.name` chat-local, `$name` shared) or a bare macro name. Variable
+  shorthand: `{{.name}}` reads, `{{.name = v}}` assigns, `+= -= ++ --` change,
+  `== != > >= < <=` compare, `|| ??` fall back. Block output is trimmed and
+  dedented unless the opener carries `#`. `{{// note}}` and
+  `{{//}}…{{///}}` are comments. Anything unknown, a block missing its closer,
+  or a variable call missing its name stays as written, so a typo shows up in
+  the prompt peek instead of vanishing. Chat variables live in the chat meta
+  (`chatVars`); shared variables live in `data/variables.json`. Both are only
+  written when a turn is saved: a prompt peek works on copies, and a
+  generation carries its changes in the stash until pass B. Deleting stores
+  `null` so the write survives that merge, then the null is stripped. New
+  macros go in the MACROS table; test/rp-macros.test.ts covers the language.
 - Groups: groupTurnPlan() decides a turn. list = every unmuted member in
   order; natural = members named in the user's message, else one pick
   weighted by card talkativeness (never who just spoke). Send answers the
@@ -257,7 +333,8 @@ apps/roleplay/
 │  └─ lib/              store.ts (zustand+persist), types.ts, seed.ts,
 │                       tokens.ts (real BPE counts, o200k), interop.ts
 │                       (portable-format import/export), card-fields.ts, export.ts,
-│                       image-gen.ts, utils.ts (cn)
+│                       image-gen.ts, lore-match.ts (which entries a text
+│                       switches on), utils.ts (cn)
 ├─ plugins/             engine/ (chats, characters, presets, generation) +
 │                       studio-import/ — import/marketplace backend
 └─ data/                characters/, presets/, personas/, settings.json
@@ -292,6 +369,7 @@ authoritative map (updates deliver this file; `data/README.md` is the copy a
 fresh install seeds). Keep both in step. Small state is in TWO files:
 `data/settings.json` (`ui` = the whole AppSettings) and `data/library.json`
 (quick replies, themes, backgrounds, tags, folders, connection profiles).
+`data/variables.json` holds the variables every chat shares (see Macros).
 Big collections stay in their subdirectories (characters/ chats/ groups/
 presets/ lorebooks/ regex/ personas/ databank/). The tree below is the summary:
 
@@ -306,12 +384,16 @@ data/
 │                       AppSettings object (theme, fonts, hotkeys, TTS,
 │                       translation, chat behavior…). Edit a key → the UI
 │                       applies it live. (UI writes back on user changes.)
+├─ variables.json       { name: value } shared macro variables (`{{$name}}`,
+│                       getglobalvar / setglobalvar). Absent until one is set.
 ├─ characters/<id>/card.json   full character cards (portable card fields + `studio` bag:
 │                       favorites, colors, stats, sprites, gallery, versions,
 │                       descVariants/personalityVariants/scenarioVariants)
 ├─ chats/<id>.jsonl     one message per line; <id>.meta.json holds title,
 │                       folderId, personaId, presetId, model, branch
-│                       parentage (parentChatId/parentMessageId), summary,
+│                       parentage (parentChatId/parentMessageId), summaryParts
+│                       (one summary per compacted stretch) and summary
+│                       (their text joined; edit it alone = one part),
 ├─ groups/<id>.json     { memberIds, mode, mutedIds }
 ├─ presets/<id>.json    portable shape (prompts[] + prompt_order[]) + `studio` bag
 │                       (library, variables, samplers, utility prompts)
@@ -361,3 +443,36 @@ Rules of thumb:
 - Writes you make through the app's own HTTP routes (POST /v1/apps/roleplay/…)
   commit to the app's git automatically; direct file edits stay pending until
   you commit them (or the engine sweeps them under an `out-of-band:` label).
+
+## Section position and model browsing
+
+`src/lib/view-memory.ts` keeps editor navigation in session storage, including
+selected lorebooks/personas/presets, detail state, preset tabs, lore entries and
+scroll positions. Explicit focus links override the remembered selection.
+Connections renders 40 model rows initially and appends batches as its scroll
+sentinel approaches the viewport; its search still filters the full catalog. Streaming state snapshots the requested model for message badges and
+interrupted replies. Company icons are local paths with the license in
+`licenses/model-icons.txt`.
+
+Marketplace also supports Wyvern public search/detail/import through the import
+plugin, preserving advanced greetings, embedded lore and regex. Image requests
+use declared hosts. Hidden definition fields block imports. Source failures
+surface as errors, and catalog counts/metrics come from the response.
+
+Character Tavern uses serialized public page data for search and previews, with
+deferred fields decoded from response chunks. Imports download the complete PNG
+card. Guest content preferences remain the catalog's own. Marketplace previews
+render sanitized Markdown without author styles, proxy remote images, and keep
+import controls outside the scrolling content. Daily picks rotate by local
+calendar day across the full library, independent of listing order.
+
+Marketplace card tabs live in `marketplace-card-content.tsx`. Public lorebook
+previews are bounded to 100 entries; the reported total and complete imports
+remain intact. `ui/image-lightbox.tsx` is shared by chat portraits, attachments
+and marketplace artwork, with pinch zoom and constrained panning.
+
+New card imports set deferEmbeddedLore and preserve character_book. The shell queues Import / Later prompts from studio.embeddedLorebookPending. POST /import/embedded-lorebook persists the choice; Later creates no book, and importing links one book without overwriting existing books. The character editor can import retained lore later. Archive restores retain their existing import behavior.
+
+Preset regex appears only as a compact shortcut for the active preset. RegexImportChoice supplies the Enable / Keep off dialog for preset and standalone imports. The Regex manager lists scripts in four fixed scope sections (Global, Preset, Character, Chat), each with a one-line hint, an enabled/total tally and its own add button; scoped sections group by owner, with the open chat's preset, character and chat marked current, sorted first and expanded, and scripts whose owner is unset or gone gathered in one group since they never run. Folders are sub-headings inside an owner. Each row has a direct switch, and each owner (and Global) has a menu to turn all on, turn all off or export. Adding from a scoped section assigns the current owner (addRegex takes an optional target). Collapse state is kept in view memory; folder metadata survives portable and engine saves. Sampler and bias sliders use full-width rows in narrow panels.
+
+Tools uses one page scroller for its header, tab strip and Regex workspace. Regex passes pageScroll to MasterDetail and uses content-sized panes so nested scrollers do not trap the tab strip.

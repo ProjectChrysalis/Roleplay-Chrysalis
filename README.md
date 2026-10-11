@@ -33,7 +33,7 @@ Roleplay 4.19.0 requires Chrysalis 1.0.3 or newer.
 - Anthropic prompt caching pinned at a set depth, with a 5m or 1h window
 - Lorebooks (world info), global or linked to a character or persona
 - Regex scripts for input, output, prompts and display
-- Chat memory: a running summary with undo, plus a per-chat facts vault
+- Chat memory: a summary per stretch of the chat that later ones never rewrite, with undo, a per-chat facts vault, and scenes saved as lorebook entries
 - Data bank: attach documents a chat can draw on
 - Macros and chat-local variables
 

@@ -1,7 +1,7 @@
-import { focusAgentContext } from '@/lib/agent-context'
+import { ImageLightbox } from '@/components/ui/image-lightbox'
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { CaretDown, PencilSimple, Copy, Trash, ArrowsClockwise, Translate, SpeakerHigh, Ghost, GitBranch, BookmarkSimple, Eye, CaretLeft, CaretRight, Info, Scan, Brain, DotsThree, CircleNotch, Square, ArrowsOut, Wrench, ArrowUp, ArrowDown, Paperclip } from '@phosphor-icons/react'
+import { CaretDown, PencilSimple, Copy, Trash, ArrowsClockwise, Translate, SpeakerHigh, Ghost, GitBranch, Eye, CaretLeft, CaretRight, Info, Scan, Brain, DotsThree, CircleNotch, Square, ArrowsOut, Wrench, ArrowUp, ArrowDown, BookOpenText } from '@phosphor-icons/react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,7 @@ import { Markdown } from '@/components/markdown'
 import { detectExpressionLabels, resolveExpressionSprite } from '@/lib/expressions'
 import { AttachmentGallery } from '@/components/chat/attachment-gallery'
 import { PromptPeekDialog } from '@/components/chat/prompt-peek-dialog'
+import { SaveSceneDialog } from '@/components/chat/save-scene-dialog'
 import { ModelMark } from '@/components/model-mark'
 import { useTouchUi } from '@/hooks/use-touch-ui'
 import { useApp } from '@/lib/store'
@@ -163,7 +164,7 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit, onRemove }: {
       <div className="mt-1 flex items-start gap-1">
         <CollapsibleTrigger
           render={
-            <button type="button" className="flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+            <button type="button" className="thinking-trigger flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
               <Brain className="size-3" aria-hidden="true" />
               {ms != null && ms > 0
                 ? `Thought for ${(ms / 1000) < 10 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000)}s`
@@ -192,7 +193,7 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit, onRemove }: {
             </div>
           </div>
         ) : (
-          <div className="mt-1 overflow-hidden rounded-md border border-border bg-muted/30">
+          <div className="thinking-panel mt-1 overflow-hidden rounded-md border border-border bg-muted/30">
             {!live && <ThinkingActions text={text} onEdit={onEdit ? () => { setDraft(text); setEditing(true) } : undefined} onRemove={onRemove} />}
             <div
               ref={(el) => { boxRef.current = el; trapWheel(el) }}
@@ -231,7 +232,7 @@ export const MessageRow = memo(function MessageRow({
   onSwipeFx?: (index: number, dir: 1 | -1, swap: () => void) => boolean
 }) {
   const settings = useApp((s) => s.settings)
-  const activeModel = useApp((s) => s.model)
+  const streamingModel = useApp((s) => s.streaming?.messageId === message.id ? s.streaming.model : undefined)
   const characters = useApp((s) => s.characters)
   const setSwipe = useApp((s) => s.setSwipe)
   const sendMessage = useApp((s) => s.sendMessage)
@@ -239,7 +240,6 @@ export const MessageRow = memo(function MessageRow({
   const editMessage = useApp((s) => s.editMessage)
   const deleteMessage = useApp((s) => s.deleteMessage)
   const toggleHidden = useApp((s) => s.toggleHidden)
-  const toggleBookmark = useApp((s) => s.toggleBookmark)
   const moveMessage = useApp((s) => s.moveMessage)
   const forkAndOpen = useApp((s) => s.forkAndOpen)
   const compactChat = useApp((s) => s.compactChat)
@@ -250,6 +250,7 @@ export const MessageRow = memo(function MessageRow({
   const [draft, setDraft] = useState('')
   const [peekOpen, setPeekOpen] = useState(false)
   const [genOpen, setGenOpen] = useState(false)
+  const [sceneOpen, setSceneOpen] = useState(false)
   const [swipesOpen, setSwipesOpen] = useState(false)
   // touch has no hover: the toolbar is always shown there, but minimal
   // (edit + more menu) so it doesn't eat the screen. Subscribed live so
@@ -346,6 +347,7 @@ export const MessageRow = memo(function MessageRow({
   const swipeFxSkip = useApp((s) => s.swipeFxSkip)
   const consumeSwipeFxSkip = useApp((s) => s.consumeSwipeFxSkip)
   const swipe = message.swipes[shownSwipe]
+  const displayedModel = isStreamingThis ? streamingModel || '' : swipe?.model || ''
   useLayoutEffect(() => {
     const commit = () => {
       pinAtSwapRef.current = readerAtBottom()
@@ -464,7 +466,7 @@ export const MessageRow = memo(function MessageRow({
       else if (r.macroMode === 'escaped') {
         find = find.replace(/\{\{(user|char)\}\}/gi, (_, k: string) => escapeLiteral(k.toLowerCase() === 'user' ? userName : charName))
       }
-      resolved.push({ find, flags: r.flags || 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
+      resolved.push({ find, flags: r.flags ?? 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
     }
     return resolved
   }, [regexScripts, message.role, personas, chat, character, index])
@@ -590,10 +592,6 @@ export const MessageRow = memo(function MessageRow({
               Regenerate
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onClick={() => toggleBookmark(chat.id, message.id, `Bookmark at #${index}`)}>
-            <BookmarkSimple className="size-4" aria-hidden="true" />
-            {message.bookmarked ? 'Remove bookmark' : 'Bookmark'}
-          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => { void forkAndOpen(chat.id, message.id); toast.success('Branched from here') }}>
             <GitBranch className="size-4" aria-hidden="true" />
             Fork here
@@ -609,6 +607,10 @@ export const MessageRow = memo(function MessageRow({
           <DropdownMenuItem onClick={() => toggleHidden(chat.id, message.id)}>
             {message.hidden ? <Eye className="size-4" aria-hidden="true" /> : <Ghost className="size-4" aria-hidden="true" />}
             {message.hidden ? 'Unhide from AI' : 'Hide from AI'}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setSceneOpen(true)}>
+            <BookOpenText className="size-4" aria-hidden="true" />
+            Save scene
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => setPeekOpen(true)}>
             <Scan className="size-4" aria-hidden="true" />
@@ -638,10 +640,6 @@ export const MessageRow = memo(function MessageRow({
               Summarize everything above
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onClick={() => { focusAgentContext({ kind: 'message', id: message.id, chatId: chat.id }); toast.info('Message selected for agent context') }}>
-            <Paperclip className="size-4" aria-hidden="true" />
-            Use as agent context
-          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => moveMessage(chat.id, message.id, -1)}>
             <ArrowUp className="size-4" aria-hidden="true" />
             Move up
@@ -755,17 +753,7 @@ export const MessageRow = memo(function MessageRow({
           </Popover>
           {/* Full-size portrait view: uncropped, click the popover image or the
               expand badge to open. */}
-          <Dialog open={lightboxOpen} onOpenChange={setLightboxOpen}>
-            <DialogContent className="w-full max-w-[min(92vw,720px)] gap-0 border-border/40 bg-black/85 p-2 backdrop-blur">
-              <img
-                src={shownAvatar || DEFAULT_AVATAR}
-                alt={`${name} portrait`}
-                className="max-h-[80dvh] w-full rounded-md object-contain"
-              />
-              <p className="pt-2 pb-1 text-center text-sm font-medium">{name}</p>
-              <p className="pb-1 text-center text-xs text-muted-foreground">{isUser ? 'Your persona' : 'Character'}</p>
-            </DialogContent>
-          </Dialog>
+          <ImageLightbox open={lightboxOpen} onOpenChange={setLightboxOpen} src={shownAvatar || DEFAULT_AVATAR} alt={`${name} portrait`} caption={isUser ? 'Your persona' : 'Character'} />
           {/* per-message stats UNDER the profile: id → seconds → tokens
               (greeting/manual turns have no seconds; cached read joins the
               name line with the time and model badge). All hidden while THIS
@@ -800,21 +788,21 @@ export const MessageRow = memo(function MessageRow({
               {settings.showCache && !isStreamingThis && realUsage && (realUsage.cacheRead ?? 0) > 0 && (
                 <span className="text-muted-foreground">{formatTokens(realUsage.cacheRead ?? 0)} cached</span>
               )}
-              {settings.showModelIcons && !isUser && !!(swipe?.model || (isStreamingThis ? activeModel : '')) && (
+              {settings.showModelIcons && !isUser && !!displayedModel && (
                 <Popover>
                   <PopoverTrigger
                     render={
                       <button
                         type="button"
-                        title={shortModel(swipe?.model || activeModel || '')}
-                        aria-label={`Model: ${shortModel(swipe?.model || activeModel || '')}`}
+                        title={shortModel(displayedModel)}
+                        aria-label={`Model: ${shortModel(displayedModel)}`}
                         className="-mx-1.5 flex h-5 w-5 items-center justify-center rounded text-muted-foreground/60 transition-colors hover:text-muted-foreground"
                       >
-                        <ModelMark model={swipe?.model || activeModel || ''} className="size-4" />
+                        <ModelMark model={displayedModel} className="size-4" />
                       </button>
                     }
                   />
-                  <PopoverContent className="w-auto p-2 font-mono text-[10px]">{shortModel(swipe?.model || activeModel || '')}</PopoverContent>
+                  <PopoverContent className="w-auto p-2 font-mono text-[10px]">{shortModel(displayedModel)}</PopoverContent>
                 </Popover>
               )}
               {settings.hideAvatars && settings.showGenTimer && !isUser && !isStreamingThis && swipe && swipe.genTimeMs > 0 && (
@@ -829,7 +817,6 @@ export const MessageRow = memo(function MessageRow({
                   hidden from AI
                 </span>
               )}
-              {message.bookmarked && <BookmarkSimple weight="fill" className="size-3 text-primary" aria-hidden="true" />}
             </div>
           )}
 
@@ -839,7 +826,7 @@ export const MessageRow = memo(function MessageRow({
             <Collapsible open={thinkOpen[0] ?? settings.reasoningAutoExpand} onOpenChange={(o) => thinkToggle(0, o)}>
               <CollapsibleTrigger
                 render={
-                  <button type="button" className="mt-1 flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+                  <button type="button" className="thinking-trigger mt-1 flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
                     {streamingFull ? (
                       `Thought for ${((streamingThinkMs ?? 0) / 1000) < 10 ? ((streamingThinkMs ?? 0) / 1000).toFixed(1) : Math.round((streamingThinkMs ?? 0) / 1000)}s`
                     ) : (
@@ -855,7 +842,7 @@ export const MessageRow = memo(function MessageRow({
                 <div
                   ref={(el) => { thinkBoxRef.current = el; trapWheel(el) }}
                   onScroll={onThinkScroll}
-                  className="think-text mt-1 max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-2 text-xs italic text-muted-foreground"
+                  className="thinking-panel think-text mt-1 max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-2 text-xs italic text-muted-foreground"
                 >
                   <Markdown content={streamingThinking} />
                 </div>
@@ -874,7 +861,7 @@ export const MessageRow = memo(function MessageRow({
               <div className="mt-1 flex items-start gap-1">
                 <CollapsibleTrigger
                   render={
-                    <button type="button" className="flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+                    <button type="button" className="thinking-trigger flex items-center gap-1.5 rounded-md border border-border bg-muted/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
                       <Brain className="size-3" aria-hidden="true" />
                       {swipe.reasoningTime != null
                         ? `Thought for ${swipe.reasoningTime < 10 ? swipe.reasoningTime.toFixed(1) : Math.round(swipe.reasoningTime)}s`
@@ -899,7 +886,7 @@ export const MessageRow = memo(function MessageRow({
                     </div>
                   </div>
                 ) : (
-                  <div className="mt-1 overflow-hidden rounded-md border border-border bg-muted/30">
+                  <div className="thinking-panel mt-1 overflow-hidden rounded-md border border-border bg-muted/30">
                     <ThinkingActions
                       text={swipe.reasoning}
                       onEdit={() => { setReasonDraft(swipe.reasoning ?? ''); setReasonEditing(true) }}
@@ -1098,6 +1085,9 @@ export const MessageRow = memo(function MessageRow({
         messageId={message.id}
         title={`Prompt peek: message #${index}`}
       />
+
+      {/* mounted only while open: one per message would be a dialog per row */}
+      {sceneOpen && <SaveSceneDialog chat={chat} messageId={message.id} open onOpenChange={setSceneOpen} />}
 
       {/* Generation data */}
       <Dialog open={genOpen} onOpenChange={setGenOpen}>

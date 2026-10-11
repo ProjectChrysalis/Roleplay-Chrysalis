@@ -435,7 +435,7 @@ function STImportSection() {
     if (cards.length) {
       try {
         // the studio-import plugin normalizes raw card JSON into card.json files
-        const r = await j<{ characters: string[]; regex: string[] }>("/import/batch", { method: "POST", body: JSON.stringify({ cards }) })
+        const r = await j<{ characters: string[]; regex: string[] }>("/import/batch", { method: "POST", body: JSON.stringify({ cards, deferEmbeddedLore: true }) })
         // regex scripts a card carries arrive as that character's scripts
         const nScripts = r.regex?.length ?? 0
         toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? "" : "s"}${nScripts ? `, ${nScripts} regex script${nScripts === 1 ? "" : "s"}` : ""}`)

@@ -1,12 +1,14 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ImgHTMLAttributes } from 'react'
-import { MagnifyingGlass, Storefront, DownloadSimple, CircleNotch, ArrowSquareOut, Check, Heart, X, CaretLeft, CaretRight, BookOpenText, BookBookmark, User, Tag, Plus, SlidersHorizontal, Fire, Chats } from '@phosphor-icons/react'
+import { MagnifyingGlass, Storefront, DownloadSimple, CircleNotch, ArrowSquareOut, Check, Heart, X, BookBookmark, User, Tag, Plus, SlidersHorizontal, Fire, Chats } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Separator } from '@/components/ui/separator'
+import { MarketplaceCardContent, type MarketplaceDetail } from './marketplace-card-content'
+import { ImageLightboxTrigger } from '@/components/ui/image-lightbox'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -14,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { useApp } from '@/lib/store'
 import { DEFAULT_AVATAR, cn } from '@/lib/utils'
+import { cardImportDetails, type CardImportResult } from '@/lib/import-feedback'
 import { j, proxyUrl, downscaleRemoteImage } from '@/lib/engine'
 
 const toast = createToast('imports')
@@ -40,24 +43,6 @@ type MarketplaceItem = {
   createdAt: string | null
 }
 type SearchResponse = { source: string; count: number; page: number; first: number; results: MarketplaceItem[] }
-/** Full card definition, fetched when a listing is opened for preview. */
-type MarketplaceDetail = {
-  id: string
-  greeting: string
-  alternateGreetings: string[]
-  personality: string
-  traits?: string
-  scenario: string
-  exampleDialogs: string
-  creatorNotes: string
-  systemPrompt: string
-  postHistoryInstructions: string
-  lorebookEntries: number
-  importable?: boolean
-  importReason?: string | null
-  avatar?: string | null
-}
-
 /** Orderings the catalog accepts. Download order is also its default, and a
  *  search term narrows the pool before any ordering applies, so there is no
  *  separate relevance mode. "Trending" is deliberately absent: it is not an
@@ -65,7 +50,10 @@ type MarketplaceDetail = {
 const SORTS = ['downloads', 'rating', 'newest', 'updated', 'tokens', 'name', 'random', 'score', 'chats'] as const
 type SortKey = (typeof SORTS)[number]
 /** Sources supported by the marketplace plugin. */
-const SOURCES = [{ value: 'chub', label: 'Chub' }, { value: 'datacat', label: 'Datacat' }] as const
+const SOURCES = [{ value: 'chub', label: 'Chub' }, { value: 'datacat', label: 'Datacat' }, { value: 'wyvern', label: 'Wyvern' }, { value: 'tavern', label: 'Character Tavern' }] as const
+function sourceUrl(source: (typeof SOURCES)[number]['value'], id: string) {
+  return source === 'tavern' ? `https://character-tavern.com/character/${id}` : source === 'wyvern' ? `https://app.wyvern.chat/characters/${id}` : source === 'datacat' ? `https://datacat.run/characters/${id}` : `https://chub.ai/characters/${id}`
+}
 const PAGE_SIZE = 24
 const MAX_TAGS = 6
 
@@ -160,7 +148,7 @@ function loadBrowse(): Browse {
       source,
       query: str(p.query),
       applied: str(p.applied),
-      sort: source === 'datacat' ? (p.sort === 'chats' && p.creator ? 'chats' : p.sort === 'score' ? 'score' : 'newest') : SORTS.includes(p.sort as SortKey) && p.sort !== 'score' ? p.sort as SortKey : NO_BROWSE.sort,
+      sort: source === 'tavern' ? (['newest', 'updated', 'downloads', 'rating'].includes(p.sort ?? '') ? p.sort as SortKey : 'newest') : source === 'wyvern' ? (['downloads', 'newest', 'rating', 'chats'].includes(p.sort ?? '') ? p.sort as SortKey : 'downloads') : source === 'datacat' ? (p.sort === 'chats' && p.creator ? 'chats' : p.sort === 'score' ? 'score' : 'newest') : SORTS.includes(p.sort as SortKey) && p.sort !== 'score' ? p.sort as SortKey : NO_BROWSE.sort,
       trending: source === 'chub' && p.trending === true,
       tags: Array.isArray(p.tags) ? p.tags.filter((t): t is string => typeof t === 'string').slice(0, MAX_TAGS) : [],
       tagsMode: p.tagsMode === 'any' ? 'any' : 'all',
@@ -292,14 +280,15 @@ export function MarketplaceView() {
   const [page, setPage] = useState(restored.page)
   const [items, setItems] = useState<MarketplaceItem[]>([])
   const [count, setCount] = useState(0)
+  const [pageSize, setPageSize] = useState(PAGE_SIZE)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [detail, setDetail] = useState<MarketplaceItem | null>(null)
   const [detailData, setDetailData] = useState<MarketplaceDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
-  const [greetingIdx, setGreetingIdx] = useState(0)
   const [downloading, setDownloading] = useState<Record<string, boolean>>({})
+  const [enableEmbeddedRegex, setEnableEmbeddedRegex] = useState(false)
   const [downloaded, setDownloaded] = useState<Set<string>>(new Set())
   const reqId = useRef(0)
 
@@ -362,13 +351,16 @@ export function MarketplaceView() {
       method: 'POST',
       body: JSON.stringify(source === 'datacat'
         ? { source, search: applied, sort: sort === 'score' ? 'score' : 'newest', page, first: PAGE_SIZE, tagIds: tagIds ? tagIds.split(',').map(Number) : [], nsfw: filters.maturity !== 'safe', nsfwOnly: filters.maturity === 'only', minTokens: filters.minTokens, ...(creator ? { creator } : {}) }
+        : source === 'tavern' ? { source, search: creator ? `${applied} ${creator}`.trim() : applied, sort, page, tags }
+        : source === 'wyvern' ? { source, search: creator ? `${applied} ${creator}`.trim() : applied, sort, page, first: PAGE_SIZE, tags, nsfw: filters.maturity !== 'safe', nsfwOnly: filters.maturity === 'only' }
         : { source, search: applied, sort: sort === 'score' ? 'downloads' : sort, trending, page, first: PAGE_SIZE, tags, tagsMode, ...filterBody(filters), ...(creator ? { creator } : {}) }),
     })
       .then((r) => {
         if (id !== reqId.current) return // stale response (params changed mid-flight)
         setItems(r.results)
         setCount(r.count)
-        if (source === 'chub') setTagVocab((prev) => {
+        setPageSize(r.first)
+        if (source !== 'datacat') setTagVocab((prev) => {
           const by = new Map(prev.map((v) => [v.tag, v.n]))
           for (const it of r.results) for (const t of it.topics) by.set(t, (by.get(t) ?? 0) + 1)
           return [...by.entries()]
@@ -393,7 +385,6 @@ export function MarketplaceView() {
     let live = true
     setDetailData(null)
     setDetailError(null)
-    setGreetingIdx(0)
     setDetailLoading(true)
     j<MarketplaceDetail>('/marketplace/detail', {
       method: 'POST',
@@ -405,7 +396,7 @@ export function MarketplaceView() {
     return () => { live = false }
   }, [detail, source])
 
-  const pages = Math.max(1, Math.ceil(count / PAGE_SIZE))
+  const pages = Math.max(1, Math.ceil(count / pageSize))
 
   const submit = (e?: FormEvent) => {
     e?.preventDefault()
@@ -432,16 +423,16 @@ export function MarketplaceView() {
       // full-res card image, downscaled to a sane avatar size; fall back to
       // the listing thumbnail if the full-res fetch fails
       let avatar: string | undefined
-      const artwork = source === 'datacat' ? detailData?.avatar || item.maxRes || item.avatar : item.maxRes
+      const artwork = source !== 'chub' ? detailData?.avatar || item.maxRes || item.avatar : item.maxRes
       if (artwork) {
         try { avatar = await downscaleRemoteImage(artwork) } catch { /* keep the thumbnail */ }
       }
-      const r = await j<{ characters: string[]; name?: string; warning?: string }>(source === 'datacat' ? '/marketplace/import' : '/import/url', {
+      const r = await j<CardImportResult>(source !== 'chub' ? '/marketplace/import' : '/import/url', {
         method: 'POST',
-        body: JSON.stringify(source === 'datacat' ? { source, id: item.id, ...(avatar ? { avatar } : {}) } : { url: `https://chub.ai/characters/${item.id}`, ...(avatar ? { avatar } : {}) }),
+        body: JSON.stringify(source !== 'chub' ? { source, id: item.id, deferEmbeddedLore: true, enableEmbeddedRegex, ...(avatar ? { avatar } : {}) } : { url: sourceUrl(source, item.id), deferEmbeddedLore: true, enableEmbeddedRegex, ...(avatar ? { avatar } : {}) }),
       })
       setDownloaded((s) => new Set(s).add(item.id))
-      toast.success(`${r.name ?? item.name} added to Characters`)
+      toast.success(`${r.name ?? item.name} added to Characters`, { description: cardImportDetails(r, enableEmbeddedRegex) })
       if (r.warning) toast.warning(r.warning)
       await hydrate()
     } catch (e) {
@@ -451,7 +442,6 @@ export function MarketplaceView() {
     }
   }
 
-  const greetings = detailData ? [detailData.greeting, ...detailData.alternateGreetings].filter((g) => g.trim()) : []
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-x-clip [overflow-wrap:anywhere]">
@@ -462,8 +452,8 @@ export function MarketplaceView() {
           <h1 className="text-sm font-semibold">Marketplace</h1>
           {!loading && !error && <Badge variant="secondary">{fmtCount(count)}</Badge>}
           <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5 sm:ml-auto sm:w-auto">
-            <Select value={source} onValueChange={(v) => { setSource(v as typeof source); setTags([]); setCreator(null); setTrending(false); setSort(v === 'datacat' ? 'newest' : 'downloads'); setPage(1); setDetail(null) }}>
-              <SelectTrigger className="h-8 w-24 text-xs" aria-label="Marketplace source">
+            <Select value={source} onValueChange={(v) => { setSource(v as typeof source); setTags([]); setCreator(null); setTrending(false); setSort(v === 'datacat' || v === 'tavern' ? 'newest' : 'downloads'); setPage(1); setDetail(null); setDownloaded(new Set()); setDownloading({}) }}>
+              <SelectTrigger className="h-8 w-36 text-xs" aria-label="Marketplace source">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -486,10 +476,20 @@ export function MarketplaceView() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {source === 'datacat' ? <>
+                {source === 'tavern' ? <>
+                  <SelectItem value="newest">Newest</SelectItem>
+                  <SelectItem value="updated">Updated</SelectItem>
+                  <SelectItem value="downloads">Popular</SelectItem>
+                  <SelectItem value="rating">Top rated</SelectItem>
+                </> : source === 'datacat' ? <>
                   {creator && <SelectItem value="chats">Most chats</SelectItem>}
                   <SelectItem value="newest">Recently added</SelectItem>
                   <SelectItem value="score">Recommended</SelectItem>
+                </> : source === 'wyvern' ? <>
+                  <SelectItem value="downloads">Popular</SelectItem>
+                  <SelectItem value="newest">Newest</SelectItem>
+                  <SelectItem value="rating">Most liked</SelectItem>
+                  <SelectItem value="chats">Most messages</SelectItem>
                 </> : <>
                 <SelectItem value="downloads">Most downloaded</SelectItem>
                 <SelectItem value="rating">Top rated</SelectItem>
@@ -689,22 +689,20 @@ export function MarketplaceView() {
       </ScrollArea>
 
       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
-        <DialogContent className="max-h-[85dvh] min-w-0 overflow-x-hidden overflow-y-auto [overflow-wrap:anywhere] sm:max-w-2xl">
+        <DialogContent className="marketplace-preview min-w-0 [overflow-wrap:anywhere]">
           {detail && (
             <>
-              <DialogHeader>
-                <div className="flex gap-4">
-                  <ProxyImage
-                    url={detail.avatar}
-                    alt={detail.name}
-                    className="size-24 shrink-0 rounded-lg border border-border object-cover sm:size-28"
-                  />
+              <DialogHeader className="marketplace-preview-header">
+                <div className="flex gap-4 pr-6">
+                  <ImageLightboxTrigger src={detail.maxRes || detail.avatar} alt={detail.name} remote>
+                    <ProxyImage url={detail.avatar} alt={detail.name} className="size-24 rounded-lg border border-border object-cover sm:size-28" />
+                  </ImageLightboxTrigger>
                   <div className="flex min-w-0 flex-col items-start gap-1.5">
-                    <DialogTitle className="leading-tight">{detail.name}</DialogTitle>
+                    <DialogTitle className="line-clamp-2 leading-tight">{detail.name}</DialogTitle>
                     <DialogDescription className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                       <button
                         type="button"
-                        onClick={() => { if (detail.creator) { if (source === 'datacat' && detail.creatorId) { setCreator(detail.creatorId); setQuery(''); setApplied(''); setTags([]); setSort('chats'); setFilters({ ...NO_FILTERS, maturity: 'include' }) } else if (source === 'datacat') { setCreator(null); setQuery(detail.creator); setApplied(detail.creator) } else setCreator(detail.creator); setPage(1); setDetail(null) } }}
+                        onClick={() => { if (detail.creator) { if (source === 'datacat' && detail.creatorId) { setCreator(detail.creatorId); setQuery(''); setApplied(''); setTags([]); setSort('chats'); setFilters({ ...NO_FILTERS, maturity: 'include' }) } else if (source === 'datacat') { setCreator(null); setQuery(detail.creator); setApplied(detail.creator) } else if (source === 'tavern') { setQuery(`@${detail.creator}`); setApplied(`@${detail.creator}`) } else if (source === 'wyvern') { setQuery(detail.creator); setApplied(detail.creator) } else setCreator(detail.creator); setPage(1); setDetail(null) } }}
                         title={`Browse everything by ${detail.creator}`}
                         className="inline-flex min-w-0 items-center gap-1 [overflow-wrap:anywhere] underline-offset-2 hover:underline"
                       >
@@ -726,7 +724,7 @@ export function MarketplaceView() {
                         you may already have a character with this name
                       </span>
                     )}
-                    <span className="mt-0.5 flex flex-wrap gap-1">
+                    <span className="marketplace-preview-tags mt-0.5 flex flex-wrap gap-1">
                       {detail.topics.slice(0, 12).map((t) => (
                         <button
                           key={t}
@@ -743,99 +741,37 @@ export function MarketplaceView() {
                   </div>
                 </div>
               </DialogHeader>
-              {detail.tagline && detail.tagline.trim() && (
-                <p className="text-xs italic text-muted-foreground">{detail.tagline}</p>
-              )}
-              {detail.description && (
-                <p className="whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{detail.description}</p>
-              )}
-
-              <div className="flex flex-col gap-3 border-t border-border pt-3">
-                <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Card preview</h3>
-                {detailLoading && (
-                  <p className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <CircleNotch className="size-3.5 animate-spin" aria-hidden="true" />Loading the card…
-                  </p>
-                )}
-                {detailError && (
-                  <p className="text-xs text-destructive">Couldn&apos;t load the full card ({detailError}). The download still uses the source card.</p>
-                )}
-                {detailData && (
-                  <>
-                    {greetings.length > 0 && (
-                      <section className="flex flex-col gap-1.5">
-                        <span className="flex items-center justify-between">
-                          <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">First message</h4>
-                          {greetings.length > 1 && (
-                            <span className="flex items-center gap-1">
-                              <span className="text-[10px] tabular-nums text-muted-foreground">{greetingIdx + 1}/{greetings.length}</span>
-                              <Button variant="outline" size="sm" className="size-6 p-0" disabled={greetingIdx === 0} onClick={() => setGreetingIdx((i) => i - 1)} aria-label="Previous greeting"><CaretLeft className="size-3.5" aria-hidden="true" /></Button>
-                              <Button variant="outline" size="sm" className="size-6 p-0" disabled={greetingIdx >= greetings.length - 1} onClick={() => setGreetingIdx((i) => i + 1)} aria-label="Next greeting"><CaretRight className="size-3.5" aria-hidden="true" /></Button>
-                            </span>
-                          )}
-                        </span>
-                        <div className="max-h-56 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md bg-accent/40 px-3 py-2 text-xs leading-5">
-                          {greetings[greetingIdx]}
-                        </div>
-                      </section>
-                    )}
-                    <CardSection title="Description" text={detailData.personality} />
-                    <CardSection title="Personality" text={detailData.traits || ''} />
-                    <CardSection title="Scenario" text={detailData.scenario} />
-                    <CardSection title="Example dialogue" text={detailData.exampleDialogs} />
-                    <CardSection title="Creator notes" text={detailData.creatorNotes} />
-                    <CardSection title="System prompt" text={detailData.systemPrompt} />
-                    <CardSection title="Post-history instructions" text={detailData.postHistoryInstructions} />
-                    {detailData.lorebookEntries > 0 && (
-                      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                        <BookOpenText className="size-3.5" aria-hidden="true" />
-                        Includes an embedded lorebook ({detailData.lorebookEntries} entries), imported on download.
-                      </p>
-                    )}
-                  </>
-                )}
-              </div>
-
-              {source === 'datacat' && detailData?.importReason && <p className="text-xs text-muted-foreground">{detailData.importReason}</p>}
+              <MarketplaceCardContent key={`${source}:${detail.id}`} data={detailData} loading={detailLoading} error={detailError} tagline={detail.tagline} description={detail.description} />
+              <footer className="marketplace-preview-footer">
+              <label className="flex items-center gap-2 text-xs"><Checkbox checked={enableEmbeddedRegex} onCheckedChange={(v) => setEnableEmbeddedRegex(v === true)} />Enable embedded regex on import</label>
+              {source !== 'chub' && detailData?.importReason && <p className="text-xs text-muted-foreground">{detailData.importReason}</p>}
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <a
-                  href={source === 'datacat' ? `https://datacat.run/characters/${detail.id}` : `https://chub.ai/characters/${detail.id}`}
+                  href={sourceUrl(source, detail.id)}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-xs font-medium hover:bg-accent"
                 >
-                  <ArrowSquareOut className="size-3.5" aria-hidden="true" />Open on {source === 'datacat' ? 'Datacat' : 'Chub'}
+                  <ArrowSquareOut className="size-3.5" aria-hidden="true" />Open on {SOURCES.find(s => s.value === source)?.label}
                 </a>
                 {downloaded.has(detail.id) ? (
                   <Button size="sm" onClick={() => { setDetail(null); setView('characters') }}>
                     <Check className="size-4" aria-hidden="true" />Open Characters
                   </Button>
                 ) : (
-                  <Button size="sm" disabled={downloading[detail.id] || (source === 'datacat' && (!detailData?.importable || detailLoading))} onClick={() => void download(detail)}>
+                  <Button size="sm" disabled={downloading[detail.id] || (source !== 'chub' && (!detailData?.importable || detailLoading))} onClick={() => void download(detail)}>
                     {downloading[detail.id]
-                      ? <><CircleNotch className="size-4 animate-spin" aria-hidden="true" />Downloading…</>
-                      : <><DownloadSimple className="size-4" aria-hidden="true" />{source === 'datacat' ? 'Import' : 'Download'}</>}
+                      ? <><CircleNotch className="size-4 animate-spin" aria-hidden="true" />Importing…</>
+                      : <><DownloadSimple className="size-4" aria-hidden="true" />Import character</>}
                   </Button>
                 )}
               </div>
+              </footer>
             </>
           )}
         </DialogContent>
       </Dialog>
     </div>
-  )
-}
-
-function CardSection({ title, text }: { title: string; text: string }) {
-  const trimmed = text.trim()
-  if (!trimmed) return null
-  return (
-    <section className="flex flex-col gap-1.5">
-      <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h4>
-      <div className="max-h-56 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md bg-accent/40 px-3 py-2 text-xs leading-5">
-        {trimmed}
-      </div>
-    </section>
   )
 }
 
@@ -965,7 +901,7 @@ function TagsPicker(props: {
 /** The catalog's narrowing controls. Edits collect in a draft so a
  *  half-typed number never fires a search; Apply commits the whole set. */
 function FiltersPanel(props: {
-  source: 'chub' | 'datacat'
+  source: (typeof SOURCES)[number]['value']
   filters: Filters
   open: boolean
   onOpen: (open: boolean) => void
@@ -973,7 +909,7 @@ function FiltersPanel(props: {
 }) {
   const [draft, setDraft] = useState<Filters>(props.filters)
   const [excludeText, setExcludeText] = useState(props.filters.excludeTags.join(', '))
-  const active = props.source === 'datacat' ? Number(props.filters.maturity !== 'include') + Number(!!props.filters.minTokens.trim()) : countFilters(props.filters)
+  const active = props.source === 'tavern' ? 0 : props.source === 'wyvern' ? Number(props.filters.maturity !== 'safe') : props.source === 'datacat' ? Number(props.filters.maturity !== 'include') + Number(!!props.filters.minTokens.trim()) : countFilters(props.filters)
   const set = <K extends keyof Filters>(key: K, value: Filters[K]) => setDraft((d) => ({ ...d, [key]: value }))
   const parseTags = (s: string) => s.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 12)
   const apply = () => props.onApply({ ...draft, excludeTags: parseTags(excludeText) })
@@ -1023,7 +959,7 @@ function FiltersPanel(props: {
       />
       <PopoverContent align="end" className="w-80 max-w-[calc(100vw-1.5rem)] p-0">
         <div className="max-h-[min(70dvh,32rem)] space-y-3 overflow-y-auto p-3">
-          <div className="flex flex-col gap-1">
+          {props.source === 'tavern' ? <p className="text-xs text-muted-foreground">Results use the catalog’s guest content settings.</p> : <div className="flex flex-col gap-1">
             <span className="text-[11px] text-muted-foreground">Adult cards</span>
             <div className="flex gap-1">
               {([['safe', 'Hide'], ['include', 'Include'], ['only', 'Only']] as const).map(([v, label]) => (
@@ -1042,6 +978,7 @@ function FiltersPanel(props: {
             </div>
           </div>
 
+          }
           {props.source === 'chub' && <>
           <label className="flex items-center gap-2 text-xs">
             <Checkbox checked={draft.nsfl} onCheckedChange={(v) => set('nsfl', v === true)} />
@@ -1055,10 +992,10 @@ function FiltersPanel(props: {
           <Separator />
 
           </>}
-          <div className="flex gap-2">
+          {props.source !== 'wyvern' && props.source !== 'tavern' && <div className="flex gap-2">
             {num('minTokens', 'Min tokens', 'any')}
             {props.source === 'chub' && num('maxTokens', 'Max tokens', 'any')}
-          </div>
+          </div>}
           {props.source === 'chub' && <>
           <div className="flex gap-2">
             {num('maxDaysAgo', 'Created within (days)', 'any')}

@@ -1,7 +1,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { PuzzlePiece, Asterisk, Translate, Image, Waveform, Database, SquaresFour, DiceFive, Wrench, Lightning, BookOpenText, Plug } from '@phosphor-icons/react'
-import { cn } from '@/lib/utils'
+import { useApp } from '@/lib/store'
 import { j } from '@/lib/engine'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -29,7 +29,9 @@ export function ExtensionsView() {
   // first makes plugin tabs PREPEND a frame later and yank the selection —
   // the visible "Regex flashes then jumps to Tool Calling" glitch
   const [ready, setReady] = useState(false)
-  const pickedTab = useRef(false)
+  const focusRegexId = useApp((s) => s.focusRegexId)
+  const pickedTab = useRef(!!focusRegexId)
+  useEffect(() => { if (focusRegexId) { pickedTab.current = true; setTab('regex') } }, [focusRegexId])
   const reloadPanels = () => j<{ panels: PluginPanelDescriptor[] }>('/__panels')
     .then((r) => { setPanels(Array.isArray(r.panels) ? r.panels : []); setReady(true) })
     .catch(() => { setPanels([]); setReady(true) })
@@ -40,10 +42,7 @@ export function ExtensionsView() {
     if (!pickedTab.current && firstPanelValue) setTab(firstPanelValue)
   }, [firstPanelValue])
 
-  // Header + tab strip scroll WITH the tab content (mobile keyboard room).
-  // The regex tab is a full master/detail workspace with its own internal
-  // scrolling — there the strip stays pinned above it so leaving the
-  // workspace is always possible.
+  // The workspace shares the page scroll with the header and tab strip.
   const headerRow = (
     <header className="flex items-center gap-2 border-b border-border px-4 py-2.5">
       <PuzzlePiece className="size-4 text-primary" aria-hidden="true" />
@@ -87,21 +86,14 @@ export function ExtensionsView() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {headerRow}
-      {!ready ? null : (
+      {!ready ? headerRow : (
       <Tabs value={tab} onValueChange={(v) => { if (v) { pickedTab.current = true; setTab(v) } }} className="flex min-h-0 flex-1 flex-col">
-        {tab === 'regex' && (
-          <>
-            {strip}
-            {/* Regex is a full master/detail workspace, so it renders full-bleed
-                rather than inside the narrow settings column. */}
-            <TabsContent value="regex" className="mt-0 min-h-0 flex-1 data-[state=inactive]:hidden">
-              <RegexView />
-            </TabsContent>
-          </>
-        )}
-        <ScrollArea className={cn('min-h-0 flex-1', tab === 'regex' && 'hidden')}>
+        <ScrollArea className="min-h-0 flex-1">
+          {headerRow}
           {strip}
+          <TabsContent value="regex" className="mt-0">
+            <RegexView />
+          </TabsContent>
           <div className="mx-auto max-w-3xl p-4">
             <TabsContent value="translation" className="mt-0"><TranslationTab /></TabsContent>
             <TabsContent value="image-gen" className="mt-0"><ImageGenTab /></TabsContent>

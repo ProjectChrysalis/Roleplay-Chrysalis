@@ -88,7 +88,7 @@ const COLLECTION_DIRS = new Set([
   "novelai settings", "instruct", "context", "quickreplies", "user avatars",
 ]);
 /** Files that mean something at a backup's root (and nowhere else). */
-const ROOT_FILES = new Set(["card.json", "settings.json", "personas.json", "library.json", "meta.json"]);
+const ROOT_FILES = new Set(["card.json", "settings.json", "personas.json", "library.json", "variables.json", "meta.json"]);
 
 /** A zip entry's path as our tree sees it, wrapper folders removed. Unknown
  *  paths ride through untouched — a name we don't recognize is skipped later
@@ -134,6 +134,7 @@ function normalizeCard(raw, avatarDataUrl) {
   const isV3 = raw.spec === "chara_card_v3" || d.spec === "chara_card_v3";
   return {
     spec: isV3 ? "chara_card_v3" : "chara_card_v2", name: d.name,
+    ...(d.character_book && typeof d.character_book === "object" ? { character_book: d.character_book } : {}),
     ...(isV3 ? { spec_version: "3.0" } : {}),
     ...passthrough,
     description: firstOf(d.description), personality: firstOf(d.personality),
@@ -349,6 +350,7 @@ function normalizePreset(raw, fallbackName) {
   const num = (k) => (typeof raw[k] === "number" ? raw[k] : undefined);
   const preset = {
     name: label,
+    ...(raw.extensions && typeof raw.extensions === "object" ? { extensions: raw.extensions } : {}),
     temperature: num("temperature") ?? num("temp") ?? undefined,
     // token/context ceilings come under several names depending on the source UI
     openai_max_tokens: num("openai_max_tokens") ?? num("max_tokens") ?? num("max_length") ?? num("n_predict") ?? undefined,
@@ -451,14 +453,16 @@ const PLACEMENT = { 1: "user_input", 2: "ai_output", 3: "slash", 5: "wi", 6: "re
 function normalizeRegex(raw) {
   if (!raw || typeof raw.findRegex !== "string") return null;
   let find = raw.findRegex;
-  let flags;
+  let flags = "";
   const m = /^\/(.*)\/([a-z]*)$/s.exec(find);
-  if (m) { find = m[1]; flags = m[2] || undefined; }
+  if (m) { find = m[1]; flags = m[2]; }
   const placement = Array.isArray(raw.placement)
     ? Array.from(new Set(raw.placement.map((n) => PLACEMENT[n]).filter(Boolean)))
     : ["ai_output"];
   return {
     scriptName: typeof raw.scriptName === "string" ? raw.scriptName : "imported",
+    ...(typeof raw.folder === "string" && raw.folder.trim() ? { folder: raw.folder.trim() } : {}),
+    ...(raw._studioScope && typeof raw._studioScope === "object" ? { _studioScope: raw._studioScope } : {}),
     findRegex: find, replaceString: typeof raw.replaceString === "string" ? raw.replaceString : "",
     placement,
     // WHEN it applies: neither flag = the saved text is rewritten
@@ -466,7 +470,7 @@ function normalizeRegex(raw) {
     promptOnly: raw.promptOnly === true,
     runOnEdit: raw.runOnEdit === true,
     trimStrings: Array.isArray(raw.trimStrings) ? raw.trimStrings.map(String) : [],
-    ...(flags ? { flags } : {}),
+    flags,
     minDepth: typeof raw.minDepth === "number" && raw.minDepth >= -1 ? raw.minDepth : null,
     maxDepth: typeof raw.maxDepth === "number" && raw.maxDepth >= 0 ? raw.maxDepth : null,
     disabled: raw.disabled === true,
@@ -636,7 +640,7 @@ function datacatRoute(req, host) {
       const image = results.avatar;
       const mime = image?.contentType?.split(";")[0];
       if (!avatar && image?.ok && image.base64 && /^image\/(png|jpeg|webp|gif)$/.test(mime)) avatar = "data:" + mime + ";base64," + image.base64;
-      const imported = handleRoute({ ...req, path: "/import/batch", body: { cards: [{ card, avatar }] } }, host);
+      const imported = handleRoute({ ...req, path: "/import/batch", body: { cards: [{ card, avatar }], enableEmbeddedRegex: b.enableEmbeddedRegex === true, deferEmbeddedLore: b.deferEmbeddedLore === true } }, host);
       if (!imported.json?.characters?.length) return { status: 500, json: { error: imported.json?.errors?.[0] || "Card import failed" } };
       return { ...imported, json: { ...imported.json, name: d.name, ...(avatar ? {} : { warning: "Card imported without its image." }) } };
     }
@@ -648,6 +652,7 @@ function datacatRoute(req, host) {
       personality: clip(d.description || c.personality, 24000), traits: clip(d.personality, 24000), scenario: clip(d.scenario || c.scenario, 8000),
       exampleDialogs: clip(d.mes_example, 16000), creatorNotes: clip(d.creator_notes || c.description, 8000),
       systemPrompt: clip(d.system_prompt, 8000), postHistoryInstructions: clip(d.post_history_instructions, 8000),
+      lorebook: previewLorebook(book),
       lorebookEntries: book ? (Array.isArray(book.entries) ? book.entries.length : Object.keys(book.entries || {}).length) : 0,
     } };
   }
@@ -681,10 +686,231 @@ function storeMedia(value, fsx) {
   return out;
 }
 
+function previewLorebook(book) {
+  if (!book || typeof book !== "object") return null;
+  const rows = Array.isArray(book.entries) ? book.entries : Object.values(book.entries || {});
+  return { name: catalogText(book.name, 500), entries: rows.slice(0, 100).filter(entry => entry && typeof entry === "object").map(entry => ({
+    name: catalogText(entry.name || entry.comment || entry.title, 500),
+    keys: (Array.isArray(entry.keys) ? entry.keys : Array.isArray(entry.key) ? entry.key : []).filter(key => typeof key === "string").slice(0, 40).map(key => key.slice(0, 200)),
+    content: catalogText(entry.content || entry.text, 8000), enabled: entry.enabled !== false && entry.disable !== true,
+  })) };
+}
+
+function catalogText(value, limit) { return typeof value === "string" ? value.slice(0, limit) : ""; }
+
+const WYVERN_BASE = "https://app.wyvern.chat/api";
+const WYVERN_ID = /^[a-zA-Z0-9_-]{6,100}$/;
+
+function wyvernCard(c) {
+  const greetings = c.enable_advanced_greetings && Array.isArray(c.greetings)
+    ? c.greetings.filter(g => g?.id !== "default" && typeof g?.content === "string" && g.content.trim()).map(g => g.content)
+    : Array.isArray(c.alternate_greetings) ? c.alternate_greetings.filter(g => typeof g === "string") : [];
+  const books = Array.isArray(c.lorebooks) ? c.lorebooks : [];
+  const entries = books.flatMap(book => {
+    const rows = Array.isArray(book.entries) ? book.entries : Object.values(book.entries || {});
+    return rows.map((entry, i) => ({ ...entry, id: i, keys: Array.isArray(entry.keys) ? entry.keys : [], content: entry.content || "", enabled: entry.enabled !== false, insertion_order: entry.insertion_order ?? 100, position: entry.position === "after_char" ? "after_char" : "before_char" }));
+  });
+  return { spec: "chara_card_v2", spec_version: "2.0", data: {
+    name: String(c.chat_name || c.name || "").trim(), description: [c.description, c.shared_info].filter(v => typeof v === "string" && v).join("\n\n"),
+    personality: c.personality || "", scenario: c.scenario || "", first_mes: c.first_mes || "", mes_example: c.mes_example || "",
+    creator_notes: c.creator_notes || "", system_prompt: c.pre_history_instructions || "", post_history_instructions: c.post_history_instructions || "",
+    creator: c.creator?.displayName || c.creator?.username || "", tags: Array.isArray(c.tags) ? c.tags : [], alternate_greetings: greetings,
+    extensions: { wyvern: { id: c.id, url: "https://app.wyvern.chat/characters/" + c.id },
+      ...(c.character_note ? { depth_prompt: { prompt: c.character_note, depth: 4, role: "system" } } : {}),
+      ...(Array.isArray(c.regex_scripts) ? { regex_scripts: c.regex_scripts } : {}),
+    },
+    ...(entries.length ? { character_book: { ...books[0], name: books.map(b => b.name).filter(Boolean).join(", "), entries: entries.map((entry, i) => ({ ...entry, id: i })) } } : {}),
+  } };
+}
+
+function wyvernAvatar(c) {
+  const avatar = c.avatar_url || c.avatar;
+  if (typeof avatar !== "string") return null;
+  if (/^https:\/\/(?:imagedelivery\.net|api\.wyvern\.chat)\//i.test(avatar)) return avatar;
+  return /^[a-zA-Z0-9_-]+$/.test(avatar) ? "https://imagedelivery.net/Dv4koOwHQU3XnXLqtl0aVQ/" + avatar + "/public" : null;
+}
+
+function wyvernRoute(req, host) {
+  if (!host.net) return { status: 503, json: { error: "Network permission not granted" } };
+  const b = req.body || {};
+  const searching = req.path === "/marketplace/search";
+  if (!searching && !WYVERN_ID.test(String(b.id || ""))) return { status: 400, json: { error: "Invalid character id" } };
+  const page = Math.max(1, Math.min(10000, Math.floor(Number(b.page) || 1)));
+  const first = Math.max(1, Math.min(48, Math.floor(Number(b.first) || 24)));
+  if (!host.net.results.catalog && !req.stash?.character) {
+    const params = new URLSearchParams({ page: String(page), limit: String(first) });
+    const query = String(b.search || "").trim().slice(0, 120);
+    if (query) params.set("query", query);
+    params.set("sort", b.sort === "newest" ? "dateCreated" : b.sort === "rating" ? "total_likes" : b.sort === "chats" ? "total_messages" : "total_views");
+    params.set("order", "DESC");
+    if (b.nsfw) params.set("show_nsfw", "true");
+    if (!b.nsfw) params.set("rating", "none");
+    else if (b.nsfwOnly) params.set("rating", "explicit");
+    if (Array.isArray(b.tags) && b.tags.length) params.set("tags", b.tags.slice(0, 6).map(t => String(t).slice(0, 80)).join(","));
+    host.net.request("catalog", { url: searching ? WYVERN_BASE + "/characters/public?" + params : WYVERN_BASE + "/characters/" + encodeURIComponent(b.id), json: true, maxBytes: 8 * 1024 * 1024, headers: { "Accept": "application/json" } });
+    return { __llmPending: true };
+  }
+  const response = host.net.results.catalog;
+  if (!req.stash?.character && !response.ok) return { status: 502, json: { error: "Wyvern request failed: " + (response.status || response.error || "no response") } };
+  const data = req.stash?.character || response.json;
+  if (searching) {
+    if (!Array.isArray(data?.characters) || typeof data.total !== "number" || !Number.isFinite(data.total) || data.total < 0) return { status: 502, json: { error: "Invalid Wyvern search results" } };
+    const metric = v => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+    return { status: 200, json: { source: "wyvern", count: data.total, page, first, results: data.characters.filter(c => WYVERN_ID.test(String(c.id || ""))).map(c => {
+      const stats = c.statistics_record || c.entity_statistics || {};
+      return { id: c.id, name: catalogText(c.name || c.chat_name, 500), creator: catalogText(c.creator?.displayName || c.creator?.username, 200),
+        tagline: catalogText(c.tagline, 1000), description: catalogText(c.creator_notes || c.description, 12000), topics: Array.isArray(c.tags) ? c.tags.filter(t => typeof t === "string") : [],
+        downloads: null, favorites: metric(stats.likes ?? stats.total_likes ?? c.likes), tokens: metric(c.token_count), rating: null, ratingCount: null,
+        chats: metric(stats.chats ?? stats.total_chats), messages: metric(stats.messages ?? stats.total_messages), nsfw: c.rating === "explicit" || c.rating === "mature", avatar: wyvernAvatar(c), maxRes: wyvernAvatar(c), createdAt: c.created_at || null };
+    }) } };
+  }
+  const c = data?.character || data;
+  if (!c || typeof c !== "object" || !c.id) return { status: 502, json: { error: "Invalid Wyvern character" } };
+  const card = wyvernCard(c), d = card.data;
+  const blocked = Array.isArray(c.secretFields) && c.secretFields.length ? "Some definition fields are private." : c.visibility && c.visibility !== "public" ? "This character is not public." : !d.name || (!d.description && !d.personality && !d.first_mes && !d.scenario) ? "The public definition is unavailable." : null;
+  if (req.path === "/marketplace/import") {
+    if (blocked) return { status: 403, json: { error: blocked } };
+    let avatar = typeof b.avatar === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/.test(b.avatar) && b.avatar.length < 1024 * 1024 ? b.avatar : null;
+    const imageUrl = wyvernAvatar(c);
+    if (!avatar && imageUrl && !host.net.results.avatar) {
+      host.net.request("avatar", { url: imageUrl, binary: true, maxBytes: 8 * 1024 * 1024 });
+      return { __llmPending: true, stash: { character: c } };
+    }
+    const image = host.net.results.avatar, mime = image?.contentType?.split(";")[0];
+    if (!avatar && image?.ok && image.base64 && /^image\/(png|jpeg|webp|gif)$/.test(mime)) avatar = "data:" + mime + ";base64," + image.base64;
+    const imported = handleRoute({ ...req, path: "/import/batch", body: { cards: [{ card, avatar }], enableEmbeddedRegex: b.enableEmbeddedRegex === true, deferEmbeddedLore: b.deferEmbeddedLore === true } }, host);
+    if (!imported.json?.characters?.length) return { status: 500, json: { error: imported.json?.errors?.[0] || "Card import failed" } };
+    return { ...imported, json: { ...imported.json, name: d.name, ...(avatar ? {} : { warning: "Card imported without its image." }) } };
+  }
+  return { status: 200, json: { source: "wyvern", id: b.id, importable: !blocked, importReason: blocked, avatar: wyvernAvatar(c),
+    greeting: catalogText(d.first_mes, 16000), alternateGreetings: d.alternate_greetings.slice(0, 40).map(g => g.slice(0, 16000)),
+    personality: catalogText(d.description, 24000), traits: catalogText(d.personality, 24000), scenario: catalogText(d.scenario, 8000), exampleDialogs: catalogText(d.mes_example, 16000),
+    creatorNotes: catalogText(d.creator_notes, 8000), systemPrompt: catalogText(d.system_prompt, 8000), postHistoryInstructions: catalogText(d.post_history_instructions, 8000), lorebook: previewLorebook(d.character_book), lorebookEntries: d.character_book?.entries.length || 0 } };
+}
+
+const TAVERN_BASE = "https://character-tavern.com";
+const TAVERN_PATH = /^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,99}\/[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,199}$/;
+function tavernImage(id) { return "https://ct-cards.storage.character-tavern.com/" + id + ".png"; }
+
+function catalogPageData(text) {
+  const messages = String(text || "").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+  const values = messages[0]?.nodes?.findLast(node => node.type === "data")?.data;
+  const chunks = new Map(messages.filter(message => message.type === "chunk").map(message => [message.id, message.data]));
+  function decode(values, startDepth) {
+    if (!Array.isArray(values) || values.length > 100000) throw new Error("Invalid catalog page data");
+    const seen = new Map();
+    function read(index, depth) {
+      if (index === -1) return undefined;
+      if (!Number.isInteger(index) || index < 0 || index >= values.length || depth > 100) throw new Error("Invalid catalog data reference");
+      if (seen.has(index)) return seen.get(index);
+      const value = values[index];
+      if (!value || typeof value !== "object") return value;
+      if (Array.isArray(value) && typeof value[0] === "string") {
+        if (value[0] === "Date") return value[1];
+        if (value[0] === "Promise") {
+          const chunk = chunks.get(read(value[1], depth + 1));
+          return chunk ? decode(chunk, depth + 1) : undefined;
+        }
+        throw new Error("Unsupported catalog data value");
+      }
+      const out = Array.isArray(value) ? [] : Object.create(null);
+      seen.set(index, out);
+      if (Array.isArray(value)) for (const ref of value) out.push(read(ref, depth + 1));
+      else for (const [key, ref] of Object.entries(value)) out[key] = read(ref, depth + 1);
+      return out;
+    }
+    return read(0, startDepth);
+  }
+  return decode(values, 0);
+}
+
+function tavernRoute(req, host) {
+  if (!host.net) return { status: 503, json: { error: "Network permission not granted" } };
+  const b = req.body || {}, searching = req.path === "/marketplace/search";
+  if (!searching && !TAVERN_PATH.test(String(b.id || ""))) return { status: 400, json: { error: "Invalid character path" } };
+  const page = Math.max(1, Math.min(10000, Math.floor(Number(b.page) || 1)));
+  if (!host.net.results.catalog && !req.stash?.character) {
+    const params = new URLSearchParams({ "x-sveltekit-invalidated": "001", page: String(page), sort: b.sort === "updated" ? "recently_updated" : b.sort === "rating" ? "most_liked" : b.sort === "downloads" ? "popular" : "newest" });
+    if (b.search) params.set("query", String(b.search).trim().slice(0, 120));
+    if (Array.isArray(b.tags) && b.tags.length) params.set("tags", b.tags.slice(0, 12).map(String).join(","));
+    host.net.request("catalog", { url: TAVERN_BASE + (searching ? "/search/cards" : "/character/" + b.id) + "/__data.json?" + params, json: false, maxBytes: 8 * 1024 * 1024, headers: { Accept: "application/json" } });
+    return { __llmPending: true };
+  }
+  const response = host.net.results.catalog;
+  if (!req.stash?.character && !response?.ok) return { status: 502, json: { error: "Character Tavern request failed: " + (response?.status || response?.error || "no response") } };
+  let data;
+  try { data = req.stash?.character || catalogPageData(response.text); }
+  catch (e) { return { status: 502, json: { error: String(e.message || e) } }; }
+  if (searching) {
+    const result = data.searchResults;
+    if (!Array.isArray(result?.hits) || !Number.isFinite(result.totalHits) || result.totalHits < 0 || !Number.isInteger(result.hitsPerPage) || result.hitsPerPage < 1) return { status: 502, json: { error: "Invalid Character Tavern search results" } };
+    return { status: 200, json: { source: "tavern", count: result.totalHits, page, first: result.hitsPerPage, results: result.hits.filter(c => TAVERN_PATH.test(c.path)).map(c => ({
+      id: c.path, name: catalogText(c.name, 500), creator: catalogText(c.author, 200), tagline: catalogText(c.tagline, 1000), description: "", topics: [],
+      downloads: null, favorites: null, tokens: typeof c.permanentTokens === "number" ? c.permanentTokens : null, rating: null, ratingCount: null, chats: null, messages: null,
+      nsfw: Array.isArray(c.contentWarnings) && c.contentWarnings.length > 0, avatar: tavernImage(c.path), maxRes: tavernImage(c.path), createdAt: null,
+    })) } };
+  }
+  const c = data.character;
+  if (!c || typeof c !== "object") return { status: 502, json: { error: "Invalid Character Tavern character" } };
+  const blocked = c.visibility && c.visibility !== "public" ? "This character is not public." : !c.definition_character_description && !c.definition_first_message ? "The public definition is unavailable." : null;
+  if (req.path === "/marketplace/import") {
+    if (blocked) return { status: 403, json: { error: blocked } };
+    if (!host.net.results.png) {
+      host.net.request("png", { url: tavernImage(b.id), binary: true, maxBytes: 16 * 1024 * 1024 });
+      return { __llmPending: true, stash: { character: data } };
+    }
+    const image = host.net.results.png;
+    let card = null, artwork = null;
+    if (image.ok && image.base64) {
+      if (!host.fs?.image) return { status: 409, json: { error: "Update Chrysalis to import compressed card images." } };
+      try {
+        const decoded = host.fs.image("data:image/png;base64," + image.base64);
+        artwork = decoded.url;
+        for (const key of ["ccv3", "chara"]) {
+          const payload = decoded.metadata[key];
+          if (!payload) continue;
+          try { card = JSON.parse(payload.trimStart().startsWith("{") ? payload : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)))); break; } catch { /* next metadata field */ }
+        }
+      } catch (e) { return { status: 502, json: { error: String(e.message || e) } }; }
+    }
+    if (!card) return { status: 502, json: { error: "The downloadable card is unavailable." } };
+    const imported = handleRoute({ ...req, path: "/import/batch", body: { cards: [{ card, avatar: artwork }], enableEmbeddedRegex: b.enableEmbeddedRegex === true, deferEmbeddedLore: b.deferEmbeddedLore === true } }, host);
+    if (!imported.json?.characters?.length) return { status: 500, json: { error: imported.json?.errors?.[0] || "Card import failed" } };
+    return { ...imported, json: { ...imported.json, name: c.name } };
+  }
+  return { status: 200, json: { source: "tavern", id: b.id, importable: !blocked, importReason: blocked, avatar: tavernImage(b.id),
+    greeting: catalogText(c.definition_first_message, 16000), alternateGreetings: (Array.isArray(data.alternativeGreetings) ? data.alternativeGreetings : []).map(g => catalogText(typeof g === "string" ? g : g.message || g.content || g.firstMessage, 16000)),
+    personality: catalogText(c.definition_character_description, 24000), traits: catalogText(c.definition_personality, 24000), scenario: catalogText(c.definition_scenario, 8000), exampleDialogs: catalogText(c.definition_example_messages, 16000),
+    creatorNotes: catalogText(c.description, 8000), systemPrompt: catalogText(c.definition_system_prompt, 8000), postHistoryInstructions: catalogText(c.definition_post_history_prompt, 8000), lorebook: previewLorebook(data.lorebook), lorebookEntries: data.lorebook ? (Array.isArray(data.lorebook.entries) ? data.lorebook.entries.length : Object.keys(data.lorebook.entries || {}).length) : 0,
+  } };
+}
+
+function importEmbeddedBook(card, book, writeJson, uid, summary) {
+  const world = book ? embeddedBookToWorld(book) : null;
+  if (world) {
+    const n = normalizeBook(world, (typeof book.name === "string" && book.name) || card.name + " lore");
+    if (n) {
+      n.isEmbedded = true;
+      // card-spec book-level knobs — full settings shape so the client's
+      // replace-on-read doesn't lose the other defaults
+      const st = { scanDepth: 4, contextPercent: 25, budgetCap: 0, minActivations: 0, maxRecursion: 2, insertionStrategy: "character_first", caseSensitive: false, wholeWords: true, groupScoring: false, recursiveScan: true, includeNames: true, overflowAlert: true };
+      if (typeof book.scan_depth === "number" && book.scan_depth >= 0) st.scanDepth = Math.floor(book.scan_depth);
+      if (book.recursive_scanning === false) st.recursiveScan = false;
+      n.settings = st;
+      const id = uid(slug(n.name), "lorebooks");
+      writeJson("lorebooks/" + id + ".json", { ...n, id });
+      summary.lorebooks.push(id);
+      card.studio = { ...card.studio, embeddedLorebookId: id };
+    }
+  }
+}
+
 export function handleRoute(req, host) {
   if (req.method !== "POST") return null;
+  if (["/marketplace/search", "/marketplace/detail", "/marketplace/import"].includes(req.path) && req.body?.source === "tavern") return tavernRoute(req, host);
+  if (["/marketplace/search", "/marketplace/detail", "/marketplace/import"].includes(req.path) && req.body?.source === "wyvern") return wyvernRoute(req, host);
   if (req.path.startsWith("/marketplace/") && req.body?.source === "datacat" && ["/marketplace/search", "/marketplace/detail", "/marketplace/tags", "/marketplace/import"].includes(req.path)) return datacatRoute(req, host);
-  if (req.path !== "/import/batch" && req.path !== "/import/zip" && req.path !== "/import/url" && req.path !== "/import/finish" && req.path !== "/marketplace/search" && req.path !== "/marketplace/detail") return null;
+  if (req.path !== "/import/embedded-lorebook" && req.path !== "/import/batch" && req.path !== "/import/zip" && req.path !== "/import/url" && req.path !== "/import/finish" && req.path !== "/marketplace/search" && req.path !== "/marketplace/detail") return null;
   // ---------- Marketplace search (chub.ai today; source id keeps the
   // client shape ready for more storefronts) ----------
   // gateway.chub.ai/search is the catalog the chub frontend itself queries —
@@ -853,6 +1079,7 @@ export function handleRoute(req, host) {
         creatorNotes: clip(d.description, 8000),
         systemPrompt: clip(d.system_prompt, 8000),
         postHistoryInstructions: clip(d.post_history_instructions, 8000),
+        lorebook: previewLorebook(book),
         lorebookEntries: bookEntries,
       },
     };
@@ -876,6 +1103,20 @@ export function handleRoute(req, host) {
     return id;
   };
 
+  if (req.path === "/import/embedded-lorebook") {
+    const id = String(req.body?.characterId || "");
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return { status: 400, json: { error: "Invalid character ID" } };
+    const card = readJson("characters/" + id + "/card.json", null);
+    if (!card) return { status: 404, json: { error: "Character not found" } };
+    if (req.body?.import !== false && !card.studio?.embeddedLorebookId) {
+      if (!card.character_book || !embeddedBookToWorld(card.character_book)) return { status: 400, json: { error: "No embedded lorebook entries" } };
+      importEmbeddedBook(card, card.character_book, writeJson, uid, summary);
+    }
+    card.studio = { ...card.studio, embeddedLorebookPending: false };
+    writeJson("characters/" + id + "/card.json", card);
+    return { status: 200, json: { lorebookId: card.studio.embeddedLorebookId || null } };
+  }
+
   // ---------- URL import (chub / CharacterHub card links) ----------
   // Page link → character detail JSON + the embedded-card PNG from the CDN
   // (both two-phase host.net fetches, no credentials, manifest allowlist
@@ -887,13 +1128,38 @@ export function handleRoute(req, host) {
     if (!url.startsWith("https://")) return { status: 400, json: { error: "https URL required" } };
     if (!host.net) return { status: 503, json: { error: "network permission not granted" } };
     const UA = BROWSER_UA;
-    const page = /^https:\/\/(?:www\.)?(?:chub\.ai|characterhub\.(?:ai|org))\/characters\/([^/\s?#]+)\/([^/\s?#]+)/.exec(url)
-      || /^https:\/\/api\.chub\.ai\/api\/characters\/([^/\s?#]+)\/([^/\s?#]+)/.exec(url);
+    const page = /^https:\/\/(?:www\.)?(?:chub\.ai|characterhub\.(?:ai|org))\/characters\/([^/\s?#]+)\/([^/\s?#]+)\/?(?:[?#].*)?$/.exec(url)
+      || /^https:\/\/api\.chub\.ai\/api\/characters\/([^/\s?#]+)\/([^/\s?#]+)\/?(?:[?#].*)?$/.exec(url);
     if (!page) {
-      if (/^https:\/\/[^/]*chub\.ai|^https:\/\/[^/]*characterhub\.(?:ai|org)/.test(url)) {
-        return { status: 400, json: { error: "not a character link — use https://chub.ai/characters/<user>/<name>" } };
+      const tavern = /^https:\/\/character-tavern\.com\/character\/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)\/?(?:[?#].*)?$/.exec(url);
+      if (tavern) return tavernRoute({ ...req, path: "/marketplace/import", body: { ...req.body, source: "tavern", id: tavern[1] } }, host);
+      const wyvern = /^https:\/\/(?:app\.)?wyvern\.chat\/(?:characters|character)\/([a-zA-Z0-9_-]{6,100})\/?(?:[?#].*)?$/.exec(url);
+      if (wyvern) return wyvernRoute({ ...req, path: "/marketplace/import", body: { ...req.body, source: "wyvern", id: wyvern[1] } }, host);
+      const catalog = /^https:\/\/(?:www\.)?pygmalion\.chat\/[^?#]*?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?:[/?#]|$)/i.exec(url);
+      const realm = /^https:\/\/realm\.risuai\.net\/character\/([a-f0-9-]+)\/?(?:[?#].*)?$/i.exec(url);
+      const image = /^https:\/\/(?:www\.)?aicharactercards\.com\/(?:[^/?#]+\/)*([^/?#]+)\/([^/?#]+)\/?(?:[?#].*)?$/i.exec(url);
+      const spec = catalog ? { url: "https://server.pygmalion.chat/api/export/character/" + catalog[1] + "/v2", json: true }
+        : realm ? { url: "https://realm.risuai.net/api/v1/download/png-v3/" + realm[1] + "?non_commercial=true", binary: true }
+        : image ? { url: "https://aicharactercards.com/wp-json/pngapi/v1/image/" + encodeURIComponent(image[1]) + "/" + encodeURIComponent(image[2]), binary: true } : null;
+      if (spec) {
+        if (!host.net.results.card) {
+          host.net.request("card", { ...spec, maxBytes: 16 * 1024 * 1024, headers: { "user-agent": UA } });
+          return { __llmPending: true };
+        }
+        const result = host.net.results.card;
+        if (!result.ok) return { status: 502, json: { error: "card download failed: " + (result.status || result.error || "unknown error") } };
+        const raw = spec.binary ? cardFromPngBase64(result.base64 || "") : result.json?.character;
+        const n = normalizeCard(raw);
+        if (!n) return { status: 502, json: { error: "the source did not return a recognizable card" } };
+        const avatar = spec.binary && result.base64 ? "data:image/png;base64," + result.base64 : raw?.data?.avatar;
+        if (typeof avatar === "string" && /^(?:data:image\/|https:\/\/)/.test(avatar)) n.avatar = avatar;
+        writeCardWithBook(n, raw, null, spec.binary && result.base64 ? "data:image/png;base64," + result.base64 : n.avatar);
+        return { status: 200, json: { ...summary, name: n.name } };
       }
-      return { status: 400, json: { error: "not a chub / CharacterHub character link" } };
+      if (/^https:\/\/[^/]*chub\.ai|^https:\/\/[^/]*characterhub\.(?:ai|org)/.test(url)) {
+        return { status: 400, json: { error: "Use https://chub.ai/characters/<user>/<name>" } };
+      }
+      return { status: 400, json: { error: "Unsupported card URL. Use a supported source or import a PNG or JSON file." } };
     }
     const [, user, nameSlug] = page;
     // optional client-downscaled avatar (data URI). Wins over the 200px
@@ -969,14 +1235,16 @@ export function handleRoute(req, host) {
     writeJson("characters/" + id + "/card.json", card);
     summary.characters.push(id);
     if (req.body?.importId && fsx.lookup) { fsx.lookup(req.body.importId + "_characters", String(card.name).toLowerCase(), id); fsx.lookup(req.body.importId + "_characters", slug(card.name), id); }
-    if (characterNames) characterNames.set(String(card.name).toLowerCase(), id);
+    if (!characterNames) characterNames = new Map();
+    characterNames.set(String(card.name).toLowerCase(), id);
+    characterNames.set(slug(card.name), id);
     // regex scripts a card carries run for that character only
     const embedded = card.extensions && Array.isArray(card.extensions.regex_scripts) ? card.extensions.regex_scripts : [];
     embedded.forEach((raw, i) => {
       const n = normalizeRegex(raw);
       if (!n) return;
       const rid = uid(slug(n.scriptName), "regex");
-      writeJson("regex/" + rid + ".json", { ...n, id: rid, scope: "character", scopeTargetId: id, order: i });
+      writeJson("regex/" + rid + ".json", { ...n, id: rid, disabled: n.disabled || req.body?.enableEmbeddedRegex !== true, scope: "character", scopeTargetId: id, order: i });
       summary.regex.push(rid);
     });
   }
@@ -988,23 +1256,10 @@ export function handleRoute(req, host) {
     if (!card) return;
     const src = raw && raw.data && typeof raw.data === "object" && raw.data.character_book ? raw.data : raw;
     const book = src && src.character_book && typeof src.character_book === "object" ? src.character_book : null;
-    const world = book ? embeddedBookToWorld(book) : null;
-    if (world) {
-      const n = normalizeBook(world, (typeof book.name === "string" && book.name) || card.name + " lore");
-      if (n) {
-        n.isEmbedded = true;
-        // card-spec book-level knobs — full settings shape so the client's
-        // replace-on-read doesn't lose the other defaults
-        const st = { scanDepth: 4, contextPercent: 25, budgetCap: 0, minActivations: 0, maxRecursion: 2, insertionStrategy: "character_first", caseSensitive: false, wholeWords: true, groupScoring: false, recursiveScan: true, includeNames: true, overflowAlert: true };
-        if (typeof book.scan_depth === "number" && book.scan_depth >= 0) st.scanDepth = Math.floor(book.scan_depth);
-        if (book.recursive_scanning === false) st.recursiveScan = false;
-        n.settings = st;
-        const id = uid(slug(n.name), "lorebooks");
-        writeJson("lorebooks/" + id + ".json", { ...n, id });
-        summary.lorebooks.push(id);
-        card.studio = { ...card.studio, embeddedLorebookId: id };
-      }
-    }
+    if (book && embeddedBookToWorld(book) && req.body?.deferEmbeddedLore === true) {
+      card.character_book = book;
+      card.studio = { ...card.studio, embeddedLorebookId: null, embeddedLorebookPending: true };
+    } else if (book) importEmbeddedBook(card, book, writeJson, uid, summary);
     if (Array.isArray(card.assets)) {
       const resolved = resolveCardAssets(card, assetDict || {}, sourceAvatar || null);
       if (resolved.avatar) card.avatar = resolved.avatar;
@@ -1064,11 +1319,24 @@ export function handleRoute(req, host) {
     writeJson("presets/" + id + ".json", { ...n, id });
     presetIdByName.set(lower(n.name), id);
     summary.presets.push(id);
+    const embedded = Array.isArray(n.extensions?.regex_scripts) ? n.extensions.regex_scripts : [];
+    embedded.forEach((raw, order) => {
+      const script = normalizeRegex(raw);
+      if (!script) return;
+      const rid = uid(slug(script.scriptName), "regex");
+      writeJson("regex/" + rid + ".json", { ...script, id: rid, disabled: script.disabled || req.body?.enableEmbeddedRegex !== true, scope: "preset", scopeTargetId: id, order });
+      summary.regex.push(rid);
+    });
   };
   const writeRegex = (n) => {
     if (!n) return;
     const id = uid(slug(n.scriptName), "regex");
-    writeJson("regex/" + id + ".json", { ...n, id });
+    const { _studioScope: saved, ...script } = n;
+    const scope = saved && ["global", "character", "preset", "chat"].includes(saved.scope) ? saved.scope : "global";
+    const target = scope === "character" ? charIdByName().get(lower(saved.targetName))
+      : scope === "preset" ? presetIdByName.get(lower(saved.targetName)) : null;
+    writeJson("regex/" + id + ".json", { ...script, id, scope, scopeTargetId: target || null, order: saved?.order ?? 0,
+      ...(scope === "chat" && saved?.chatId ? { _restoreChatId: saved.chatId, _restoreImportId: importId } : {}) });
     summary.regex.push(id);
   };
   /** A persona from a backup. `full` is the complete record when the zip
@@ -1148,6 +1416,15 @@ export function handleRoute(req, host) {
       writeJson("chats/" + id + ".memories.json", n.memories);
     }
     summary.chats.push(id);
+    if (saved?.id) {
+      for (const file of fsx.list("regex").filter((f) => f.endsWith(".json"))) {
+        const script = readJson("regex/" + file, null);
+        if (script?.scope !== "chat" || script._restoreChatId !== saved.id || script._restoreImportId !== importId) continue;
+        delete script._restoreChatId;
+        delete script._restoreImportId;
+        writeJson("regex/" + file, { ...script, scopeTargetId: id });
+      }
+    }
     return id;
   };
 
@@ -1273,10 +1550,6 @@ export function handleRoute(req, host) {
         for (const [presetName, preset] of Object.entries(all ?? {})) writePreset(restorePreset(preset, presetName));
       } catch { summary.errors.push("presets failed"); }
     }
-    for (const rname of Object.keys(entries)) {
-      if (!rname.startsWith("User Settings/regex/") || !rname.endsWith(".json") || !isText(entries[rname])) continue;
-      try { writeRegex(normalizeRegex(JSON.parse(entries[rname]))); } catch { summary.errors.push("regex failed: " + rname); }
-    }
     // The flat {name: description} map is the lowest common denominator; skip
     // it when the zip also carries full persona records, or every persona
     // would be imported twice — once whole, once as a bare name.
@@ -1308,7 +1581,7 @@ export function handleRoute(req, host) {
     // and books by NAME, and a persona resolves its books and bound cards the
     // same way. One pass in whatever order the zip's central directory
     // happened to list things left half of those unresolved.
-    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "extensions/regex/", "regex/", "personas/", "groups/", "chats/", "databank/"];
+    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "extensions/regex/", "regex/", "user settings/regex/", "personas/", "groups/", "chats/", "databank/"];
     const phaseOf = (n) => {
       const l = n.toLowerCase();
       for (let i = 0; i < PHASES.length; i++) if (l.startsWith(PHASES[i])) return i;
@@ -1374,7 +1647,7 @@ export function handleRoute(req, host) {
         } catch { summary.errors.push("preset failed: " + name); }
         continue;
       }
-      if (name.startsWith("regex/") && name.endsWith(".json") && isText(entries[name])) {
+      if ((name.startsWith("regex/") || name.startsWith("User Settings/regex/")) && name.endsWith(".json") && isText(entries[name])) {
         try {
           const raw = JSON.parse(entries[name]);
           for (const one of Array.isArray(raw) ? raw : [raw]) writeRegex(normalizeRegex(one));
@@ -1520,6 +1793,16 @@ export function handleRoute(req, host) {
           summary.library = true;
         }
       } catch { summary.errors.push("library failed"); }
+    }
+    // variables every chat shares: the backup's values win, the rest stay
+    if (isText(entries["variables.json"])) {
+      try {
+        const vars = JSON.parse(entries["variables.json"]);
+        if (vars && typeof vars === "object" && !Array.isArray(vars) && Object.keys(vars).length) {
+          writeJson("variables.json", { ...readJson("variables.json", {}), ...vars });
+          summary.variables = Object.keys(vars).length;
+        }
+      } catch { summary.errors.push("variables failed"); }
     }
     return { status: 200, json: summary };
   }

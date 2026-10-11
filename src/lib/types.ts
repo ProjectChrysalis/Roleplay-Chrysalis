@@ -180,7 +180,12 @@ export interface Chat {
     includeInWIScan: boolean
   }
   memoryCutoffMessageId: ID | null
+  /** every summary joined, oldest first: what the prompt carries */
   summary: string
+  /** the summaries that stand in for the messages above the cutoff, oldest
+   *  first. Each covers its own stretch and is never rewritten by a later
+   *  compaction. */
+  summaryParts: SummaryPart[]
   /** compactions that can be undone, newest last (engine keeps up to 20) */
   compactions: number
   temporary: boolean
@@ -379,6 +384,17 @@ export type EntryStatus = 'constant' | 'normal' | 'vectorized'
 export type EntryLogic = 'AND_ANY' | 'AND_ALL' | 'NOT_ANY' | 'NOT_ALL'
 export type EntryPosition = 'before_char' | 'after_char' | 'before_em' | 'after_em' | 'before_an' | 'after_an' | 'at_depth' | 'before_examples' | 'after_examples'
 
+/** One summary of a stretch of a chat. `from` (null = the first message) up
+ *  to, not including, `to`. A summary written by hand has no stretch. */
+export interface SummaryPart {
+  id: ID
+  text: string
+  from?: ID | null
+  to?: ID | null
+  /** how many summaries were merged into this one */
+  merged?: number
+}
+
 /** One durable fact in a chat's long-term memory vault. */
 export interface MemoryEntry {
   id: string
@@ -482,6 +498,7 @@ export interface QuickReplySet {
 
 // ── Regex ──
 export interface RegexScript {
+  folder?: string
   id: ID
   name: string
   scope: 'global' | 'character' | 'chat' | 'preset'
@@ -692,9 +709,10 @@ export interface AppSettings {
    *  `prompts` (ordered list — one chatHistory marker + editable instruction
    *  prompts with {{summary}} / {{words}} / {{limit}} macros), stores the
    *  result on the chat meta and injects it per `position`. */
-  /** Compaction: the running summary stands in for messages above the chat's
-   *  cutoff. The engine builds the summarize request from `prompt`
-   *  ({{summary}} / {{words}} / {{user}} / {{char}}). */
+  /** Compaction: summaries stand in for messages above the chat's cutoff,
+   *  one per compacted stretch. The engine builds each summarize request
+   *  from `prompt` ({{summary}} = the earlier summaries, {{words}},
+   *  {{user}}, {{char}}). */
   summary: {
     /** auto compacts when history no longer fits the context, or every
      *  `interval` turns past the cutoff */
@@ -702,8 +720,11 @@ export interface AppSettings {
     interval: number
     /** newest turns that always stay verbatim when compacting */
     keepRecent: number
-    /** {{words}} budget fed to the summary prompt */
+    /** {{words}} budget fed to the summary prompt, per summary */
     targetLength: number
+    /** words all of a chat's summaries may add up to; past it the oldest
+     *  ones are merged into one */
+    maxWords: number
     prompt: string
     /** injection template — must contain {{summary}} */
     template: string

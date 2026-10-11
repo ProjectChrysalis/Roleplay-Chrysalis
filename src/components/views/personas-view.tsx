@@ -1,3 +1,4 @@
+import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Trash, Copy, UploadSimple, DownloadSimple, SealCheck, ChartBar, CheckCircle } from '@phosphor-icons/react'
@@ -33,10 +34,11 @@ export function PersonasView() {
   const addPersona = useApp((s) => s.addPersona)
   const duplicatePersona = useApp((s) => s.duplicatePersona)
   const deletePersona = useApp((s) => s.deletePersona)
-  const __focus = useApp.getState().focusPersonaId
-  useEffect(() => { if (__focus) useApp.setState({ focusPersonaId: null }) }, [])
-  const [selectedId, setSelectedId] = useState(__focus ?? personas[0]?.id ?? null)
-  const [detailOpen, setDetailOpen] = useState(false)
+  const __focus = useApp((s) => s.focusPersonaId)
+  const [selectedId, setSelectedId] = useViewMemory<string | null>('personas.selected', __focus ?? personas[0]?.id ?? null)
+  const [detailOpen, setDetailOpen] = useViewMemory('personas.detail', false)
+  useEffect(() => { if (__focus) { setSelectedId(__focus); setDetailOpen(true); useApp.setState({ focusPersonaId: null }) } }, [__focus, setSelectedId, setDetailOpen])
+  const scrollRef = useViewScroll(`personas.${selectedId}.detail`, detailOpen)
   const [statsOpen, setStatsOpen] = useState(false)
   const [confirm, confirmDialog] = useConfirm()
   const importInput = useRef<HTMLInputElement>(null)
@@ -89,11 +91,12 @@ export function PersonasView() {
 
     // years of use → thousands of personas; the sidebar pages through them
   const PERSONA_PAGE = 100
-  const [personaPage, setPersonaPage] = useState(0)
+  const [personaPage, setPersonaPage] = useViewMemory('personas.page', 0)
   const pagedPersonas = personas.slice(clampPage(personaPage, personas.length, PERSONA_PAGE) * PERSONA_PAGE, (clampPage(personaPage, personas.length, PERSONA_PAGE) + 1) * PERSONA_PAGE)
 
   return (
     <MasterDetail
+      memoryKey={`personas.${selectedId}`}
       detailOpen={detailOpen && !!p}
       onBack={() => setDetailOpen(false)}
       detailTitle={p?.name}
@@ -154,7 +157,7 @@ export function PersonasView() {
       detail={
         <>
       {p ? (
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
           <div className="mx-auto flex max-w-2xl flex-col gap-4 p-4">
             <div className="flex items-center gap-3">
               <Avatar className="size-16 rounded-lg">

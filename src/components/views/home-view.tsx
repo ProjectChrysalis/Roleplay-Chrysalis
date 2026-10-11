@@ -1,5 +1,5 @@
 
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Sparkle, Chats, Plus, Trophy, TrendUp, Star } from '@phosphor-icons/react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -13,6 +13,7 @@ import { useApp } from '@/lib/store'
 import { timeAgo } from '@/lib/tokens'
 import type { Achievement } from '@/lib/types'
 import { createToast } from '@/lib/notifications'
+import { calendarDay, dailyCharacter } from '@/lib/daily-character'
 import { DEFAULT_AVATAR } from '@/lib/utils'
 
 const toast = createToast('chat')
@@ -38,10 +39,22 @@ export function HomeView() {
     return [...groups.entries()].slice(0, 4)
   }, [chats])
 
-  const cotd = useMemo(() => {
-    const solo = characters.filter((c) => !c.isGroup)
-    return solo[new Date().getDate() % Math.max(1, solo.length)]
-  }, [characters])
+  const [day, setDay] = useState(calendarDay)
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = () => {
+      clearTimeout(timer)
+      setDay(calendarDay())
+      const now = new Date()
+      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+      timer = setTimeout(refresh, midnight.getTime() - now.getTime() + 100)
+    }
+    refresh()
+    window.addEventListener('pageshow', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { clearTimeout(timer); window.removeEventListener('pageshow', refresh); document.removeEventListener('visibilitychange', refresh) }
+  }, [])
+  const cotd = useMemo(() => dailyCharacter(characters, day), [characters, day])
 
   // Everything here comes off the chat list metas. Transcripts are not loaded
   // at boot any more, and the home screen is not worth reading every one back

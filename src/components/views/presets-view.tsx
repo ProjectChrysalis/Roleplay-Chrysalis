@@ -1,3 +1,4 @@
+import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 import { focusAgentContext } from '@/lib/agent-context'
 
 import { useEffect, useRef, useState } from 'react'
@@ -19,12 +20,13 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { useConfirm } from '@/components/ui/confirm'
 import { useApp } from '@/lib/store'
 import { useDragList } from '@/lib/drag-list'
-import { presetExport, downloadJson } from '@/lib/interop'
+import { presetExport, downloadJson, regexImport } from '@/lib/interop'
 import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
 import { cn } from '@/lib/utils'
 import type { Preset, PromptSection, SectionGroup, ID } from '@/lib/types'
 import { SamplersPanel } from '@/components/views/samplers-panel'
 import { MasterDetail } from '@/components/shell/master-detail'
+import { RegexImportChoice } from '@/components/regex/import-choice-dialog'
 import { PresetDiffDialog } from '@/components/presets/preset-diff-dialog'
 import { ShapingPanel } from '@/components/presets/shaping-panel'
 import { PromptPeekDialog } from '@/components/chat/prompt-peek-dialog'
@@ -74,17 +76,19 @@ export function PresetsView() {
   const activeChatId = useApp((s) => s.activeChatId)
   const chats = useApp((s) => s.chats)
   const composerDraft = useApp((s) => s.composerDraft)
-  const __focus = useApp.getState().focusPresetId
-  useEffect(() => { if (__focus) useApp.setState({ focusPresetId: null }) }, [])
+  const __focus = useApp((s) => s.focusPresetId)
   // the preset in use right now: the open chat's own, else the one new chats
   // start with. The view opens on it, since that's the one you're about to tweak.
   const activePresetId = chats.find((c) => c.id === activeChatId)?.presetId
   const activeId = activePresetId && presets.some((p) => p.id === activePresetId)
     ? activePresetId
     : (presets.find((p) => p.isDefault)?.id ?? null)
-  const [selectedId, setSelectedId] = useState(__focus ?? activeId ?? presets[0]?.id ?? null)
+  const [selectedId, setSelectedId] = useViewMemory<string | null>('presets.selected', __focus ?? activeId ?? presets[0]?.id ?? null)
   useEffect(() => { if (selectedId) focusAgentContext({ kind: 'preset', id: selectedId }); return () => focusAgentContext(null) }, [selectedId])
-  const [detailOpen, setDetailOpen] = useState(false)
+  const [detailOpen, setDetailOpen] = useViewMemory('presets.detail', false)
+  const [editorTab, setEditorTab] = useViewMemory(`preset.${selectedId}.tab`, 'prompts')
+  useEffect(() => { if (__focus) { setSelectedId(__focus); setDetailOpen(true); useApp.setState({ focusPresetId: null }) } }, [__focus, setSelectedId, setDetailOpen])
+  const scrollRef = useViewScroll(`presets.${selectedId}.${editorTab}`, detailOpen)
   const [peekOpen, setPeekOpen] = useState(false)
   const [confirm, confirmDialog] = useConfirm()
   const [diffOpen, setDiffOpen] = useState(false)
@@ -97,25 +101,43 @@ export function PresetsView() {
   }
 
   const importPreset = useApp((st) => st.importPreset)
+  const regexScripts = useApp((st) => st.regexScripts)
+  const presetScripts = regexScripts.filter((r) => r.scope === 'preset' && r.scopeTargetId === preset?.id)
+  const [pendingImport, setPendingImport] = useState<{ json: unknown; name: string; count: number } | null>(null)
+  const [importBusy, setImportBusy] = useState(false)
+  const finishImport = async (json: unknown, name: string, enableEmbeddedRegex: boolean) => {
+    if (importBusy) return
+    setImportBusy(true)
+    try {
+      const r = await importPreset(json, name, preset, enableEmbeddedRegex)
+      setSelectedId(r.preset.id)
+      setPendingImport(null)
+      toast.success(`Imported ${r.preset.name}`, { description: r.scripts ? `${r.scripts} regex scripts, ${enableEmbeddedRegex ? 'enabled unless disabled in the file' : 'off until enabled in Regex'}` : undefined })
+      setDetailOpen(true)
+    } catch (e) { toast.error(String((e as Error).message ?? e)) }
+    finally { setImportBusy(false) }
+  }
   const handleImport = async (files: FileList | null) => {
     const file = files?.[0]
     if (!file || !preset) return
     let json: unknown
     try { json = JSON.parse(await file.text()) } catch { toast.error('Invalid JSON file'); return }
-    try {
-      const r = await importPreset(json, file.name.replace(/\.json$/i, ''), preset)
-      setSelectedId(r.preset.id)
-      toast.success(`Imported ${r.preset.name} (${r.preset.sections.length} prompts${r.scripts ? `, ${r.scripts} regex scripts` : ''})`)
-    } catch (e) { toast.error(String((e as Error).message ?? e)) }
+    const embedded = (json as { extensions?: { regex_scripts?: unknown[] } } | null)?.extensions?.regex_scripts
+    const count = (Array.isArray(embedded) ? embedded : []).filter((r) => regexImport(r)).length
+    if (Array.isArray(embedded) && count < embedded.length) toast.error(`${embedded.length - count} unsupported regex scripts in ${file.name}`)
+    const name = file.name.replace(/\.json$/i, '')
+    if (count) setPendingImport({ json, name, count })
+    else await finishImport(json, name, false)
   }
 
     // presets accumulate for years; the sidebar pages through them
   const PRESET_PAGE = 100
-  const [presetPage, setPresetPage] = useState(0)
+  const [presetPage, setPresetPage] = useViewMemory('presets.page', 0)
   const pagedPresets = presets.slice(clampPage(presetPage, presets.length, PRESET_PAGE) * PRESET_PAGE, (clampPage(presetPage, presets.length, PRESET_PAGE) + 1) * PRESET_PAGE)
 
   return (
     <MasterDetail
+      memoryKey={`presets.${selectedId}`}
       detailOpen={detailOpen && !!preset}
       onBack={() => setDetailOpen(false)}
       detailTitle={preset?.name}
@@ -201,63 +223,69 @@ export function PresetsView() {
         preset ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* header + section tabs scroll WITH the editor (mobile keyboard room) */}
-          <Tabs defaultValue="prompts" className="flex min-h-0 flex-1 flex-col">
-          <ScrollArea className="min-h-0 flex-1">
+          <Tabs value={editorTab} onValueChange={setEditorTab} className="flex min-h-0 flex-1 flex-col">
+          <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
           <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
             <Input
               value={preset.name}
               disabled={preset.readOnly}
               onChange={(e) => updatePreset(preset.id, { name: e.target.value })}
-              className="h-8 w-full text-sm font-medium md:w-52"
+              className="h-8 min-w-0 flex-1 basis-40 text-sm font-medium md:max-w-64"
               aria-label="Preset name"
             />
-            {preset.readOnly && <Badge variant="outline">stock · read-only</Badge>}
+            {preset.readOnly && <Badge variant="outline">read-only</Badge>}
             {preset.id === activeId && <Badge variant="secondary">currently using</Badge>}
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
-              <Button variant="outline" size="sm" className="text-xs" onClick={() => setPeekOpen(true)}>
-                <Eye className="size-3.5" aria-hidden="true" />Prompt peek
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                disabled={presets.length < 2}
-                onClick={() => setDiffOpen(true)}
-              >
-                <GitDiff className="size-3.5" aria-hidden="true" />Compare
-              </Button>
-              <Button variant="outline" size="sm" className="text-xs" onClick={() => importRef.current?.click()}>
-                <UploadSimple className="size-3.5" aria-hidden="true" />Import
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                onClick={() => { downloadJson(presetExport(preset, useApp.getState().regexScripts), `${preset.name.replace(/[^\w-]+/g, '_')}.json`); toast.success('Exported preset') }}
-              >
-                <DownloadSimple className="size-3.5" aria-hidden="true" />Export
-              </Button>
+            <div className="ml-auto flex items-center gap-1">
               {preset.readOnly ? (
                 <Button size="sm" className="text-xs" onClick={() => { const id = duplicatePreset(preset.id); setSelectedId(id); toast.success('Editable copy created') }}>
                   Create editable copy
                 </Button>
-              ) : (
-                <>
-                  <Button variant="ghost" size="sm" onClick={() => { const id = duplicatePreset(preset.id); setSelectedId(id) }} aria-label="Duplicate preset">
-                    <Copy className="size-4" aria-hidden="true" />
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => { usePreset(preset.id); toast.success(`Using preset: ${preset.name}`) }} disabled={preset.id === activeId}>Use this preset</Button>
-                  <Button variant="ghost" size="sm" className="text-destructive" onClick={() => void confirm({
-                    title: `Delete ${preset.name}?`,
-                    description: 'The preset file is removed from disk. Chats that used it fall back to the default.',
-                  }).then((yes) => {
-                    if (!yes) return
-                    deletePreset(preset.id); setSelectedId(presets.find((p) => p.id !== preset.id)?.id ?? ""); setDetailOpen(false)
-                  })} aria-label="Delete preset">
-                    <Trash className="size-4" aria-hidden="true" />
-                  </Button>
-                </>
+              ) : preset.id !== activeId && (
+                <Button variant="outline" size="sm" className="text-xs" onClick={() => { usePreset(preset.id); toast.success(`Using preset: ${preset.name}`) }}>
+                  Use this preset
+                </Button>
               )}
+              <Button variant="ghost" size="sm" className="text-xs" onClick={() => setPeekOpen(true)}>
+                <Eye className="size-3.5" aria-hidden="true" />Prompt peek
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger render={
+                  <Button variant="ghost" size="icon-sm" className="text-muted-foreground" aria-label={`More actions for ${preset.name}`}>
+                    <DotsThreeVertical className="size-4" aria-hidden="true" />
+                  </Button>
+                } />
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem disabled={presets.length < 2} onClick={() => setDiffOpen(true)}>
+                    <GitDiff className="size-4" aria-hidden="true" />Compare
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => importRef.current?.click()}>
+                    <UploadSimple className="size-4" aria-hidden="true" />Import
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => { downloadJson(presetExport(preset, useApp.getState().regexScripts), `${preset.name.replace(/[^\w-]+/g, '_')}.json`); toast.success('Exported preset') }}>
+                    <DownloadSimple className="size-4" aria-hidden="true" />Export
+                  </DropdownMenuItem>
+                  {!preset.readOnly && (
+                    <>
+                      <DropdownMenuItem onClick={() => { const id = duplicatePreset(preset.id); setSelectedId(id) }}>
+                        <Copy className="size-4" aria-hidden="true" />Duplicate
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        className="text-destructive"
+                        disabled={preset.id === 'default' || presets.length <= 1}
+                        onClick={() => void confirm({
+                          title: `Delete ${preset.name}?`,
+                          description: 'The preset file is removed from disk. Chats that used it fall back to the default.',
+                        }).then((yes) => {
+                          if (!yes) return
+                          deletePreset(preset.id); setSelectedId(presets.find((p) => p.id !== preset.id)?.id ?? ''); setDetailOpen(false)
+                        })}
+                      >
+                        <Trash className="size-4" aria-hidden="true" />Delete
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </header>
 
@@ -279,14 +307,18 @@ export function PresetsView() {
                 <TabsTrigger value="variables" className="flex-none px-2.5 text-xs">Variables</TabsTrigger>
               </TabsList>
             </div>
-            <div className={cn('p-4', preset.readOnly && 'pointer-events-none opacity-60')}>
+            {preset.id === activeId && presetScripts.length > 0 && <div className="mx-4 mt-3 flex items-center gap-3 rounded-md border border-border px-3 py-2">
+              <span className="min-w-0 flex-1 text-xs text-muted-foreground">Regex: {presetScripts.filter((r) => r.enabled).length}/{presetScripts.length} enabled</span>
+              <Button variant="ghost" size="sm" onClick={() => { const script = presetScripts[0]; if (script) useApp.getState().focusRegex(script.id) }}>Manage regex</Button>
+            </div>}
+            <div className={cn('preset-editor-content p-4', preset.readOnly && 'pointer-events-none opacity-60')}>
                 {preset.readOnly && (
                   <p className="mb-3 rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
                     Stock preset, everything below is read-only. Use “Create editable copy” above to make changes.
                   </p>
                 )}
                 <TabsContent value="prompts">
-                  <SectionEditor preset={preset} onSelect={select} />
+                  <SectionEditor preset={preset} />
                 </TabsContent>
                 <TabsContent value="samplers">
                   <SamplersPanel preset={preset} />
@@ -356,6 +388,7 @@ export function PresetsView() {
             userText={composerDraft ?? undefined}
             title={`Prompt peek: ${preset.name}`}
           />
+          <RegexImportChoice open={!!pendingImport} count={pendingImport?.count ?? 0} preset busy={importBusy} onCancel={() => setPendingImport(null)} onChoose={(enabled) => { if (pendingImport) void finishImport(pendingImport.json, pendingImport.name, enabled) }} />
           {confirmDialog}
           <PresetDiffDialog open={diffOpen} onOpenChange={setDiffOpen} preset={preset} />
         </div>
@@ -368,25 +401,61 @@ export function PresetsView() {
 }
 
 
-/** Macros offered as one-tap hints under the prompt editors. */
+/** Macros offered from the prompt editors' macro button. */
 const MACRO_HINTS = [
   '{{char}}', '{{user}}', '{{persona}}', '{{scenario}}', '{{time}}', '{{date}}',
   '{{random:a,b}}', '{{pick:a,b}}', '{{roll:d20}}', '{{lastMessage}}', '{{getvar::name}}', '{{setvar::name::value}}',
+  '{{if .name}}', '{{else}}', '{{/if}}', '{{.name == value}}', '{{// note}}',
 ]
-function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: string) => void }) {
+/** The macro list, tucked behind one button. A pick lands at the cursor. */
+function MacroMenu({ onPick, disabled }: { onPick: (macro: string) => void; disabled?: boolean }) {
+  return (
+    <Popover>
+      <PopoverTrigger render={
+        <Button variant="ghost" size="sm" className="h-7 shrink-0 px-1.5 font-mono text-[11px] text-muted-foreground" disabled={disabled} aria-label="Insert a macro" title="Insert a macro">
+          {'{{ }}'}
+        </Button>
+      } />
+      <PopoverContent align="end" className="w-64 p-2">
+        <p className="px-0.5 pb-1.5 text-[11px] text-muted-foreground">Inserts at the cursor.</p>
+        <div className="flex flex-wrap gap-1">
+          {MACRO_HINTS.map((m) => (
+            <button key={m} type="button" onClick={() => onPick(m)} className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] hover:bg-accent">
+              {m}
+            </button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function SectionEditor({ preset }: { preset: Preset }) {
   const updatePreset = useApp((s) => s.updatePreset)
-  const duplicatePreset = useApp((s) => s.duplicatePreset)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = useViewMemory<string | null>(`preset.${preset.id}.prompt`, null)
+  // one switch for every prompt: whoever works with the options keeps them open
+  const [optionsOpen, setOptionsOpen] = useViewMemory('presets.promptOptions', false)
   const [maximizedId, setMaximizedId] = useState<string | null>(null)
   const [addOpen, setAddOpen] = useState(false)
+  const areaRef = useRef<HTMLTextAreaElement>(null)
+  const maxAreaRef = useRef<HTMLTextAreaElement>(null)
   const ro = preset.readOnly
   const library = preset.library ?? []
+  const groups = preset.groups ?? []
   // whole-row drag (press+move), plain click opens, live reorder preview —
   // exactly one commit on release
   const { containerRef, dragId, ordered, rowProps } = useDragList(preset.sections, (next) =>
     updatePreset(preset.id, { sections: next.map((s, i) => ({ ...s, order: i })) }))
   const upSection = (id: string, patch: Partial<PromptSection>) =>
     updatePreset(preset.id, { sections: preset.sections.map((s) => s.id === id ? { ...s, ...patch } : s) })
+  /** Put a macro where the cursor is (the end, for a box never clicked into). */
+  const insertMacro = (sec: PromptSection, macro: string, el: HTMLTextAreaElement | null) => {
+    const start = el ? el.selectionStart : sec.content.length
+    const end = el ? el.selectionEnd : start
+    upSection(sec.id, { content: sec.content.slice(0, start) + macro + sec.content.slice(end) })
+    const caret = start + macro.length
+    requestAnimationFrame(() => el?.setSelectionRange(caret, caret))
+  }
   /** Remove from the active order → the library (re-addable, never lost). */
   const removeToLibrary = (id: string) => {
     const sec = preset.sections.find((s) => s.id === id)
@@ -418,29 +487,67 @@ function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: s
   }
   const deleteFromLibrary = (id: string) =>
     updatePreset(preset.id, { library: library.filter((l) => l.id !== id) })
-  // Known marker identifiers that aren't currently placed (in order or library)
   const maximized = preset.sections.find((s) => s.id === maximizedId) ?? null
 
-  const addGroup = () => {
+  /** A new group, started from the prompt that wants one. */
+  const addGroupFor = (sectionId: string) => {
     const g: SectionGroup = { id: uid('grp'), name: 'New group', wrapFormat: 'xml' }
-    updatePreset(preset.id, { groups: [...(preset.groups ?? []), g] })
+    updatePreset(preset.id, {
+      groups: [...groups, g],
+      sections: preset.sections.map((s) => s.id === sectionId ? { ...s, groupId: g.id } : s),
+    })
   }
   const upGroup = (id: ID, patch: Partial<SectionGroup>) =>
-    updatePreset(preset.id, { groups: (preset.groups ?? []).map((g) => g.id === id ? { ...g, ...patch } : g) })
+    updatePreset(preset.id, { groups: groups.map((g) => g.id === id ? { ...g, ...patch } : g) })
   const delGroup = (id: ID) => updatePreset(preset.id, {
-    groups: (preset.groups ?? []).filter((g) => g.id !== id),
+    groups: groups.filter((g) => g.id !== id),
     sections: preset.sections.map((sec) => sec.groupId === id ? { ...sec, groupId: null } : sec),
   })
-  const groupName = (id: ID | null) => (preset.groups ?? []).find((g) => g.id === id)?.name ?? null
+  const groupName = (id: ID | null) => groups.find((g) => g.id === id)?.name ?? null
+
+  /** What the options hold that is not the default, for the closed line. */
+  const optionSummary = (s: PromptSection): string => {
+    const parts: string[] = []
+    if (s.position === 'in-chat') parts.push(`in chat @${s.depth}`)
+    const group = groupName(s.groupId)
+    if (group) parts.push(group)
+    if (s.condition?.trim()) parts.push(`if ${s.condition.trim()}`)
+    if (s.injectionTriggers.length > 0 && s.injectionTriggers.length < triggerOptions.length) parts.push(s.injectionTriggers.join(', '))
+    if (s.forbidOverrides) parts.push('no overrides')
+    return parts.join(' · ')
+  }
+
+  const removeButton = (s: PromptSection) => (
+    <Button
+      variant="ghost" size="sm" className="ml-auto h-6 shrink-0 text-[11px] text-muted-foreground hover:text-foreground"
+      disabled={ro}
+      title="Takes it out of the order. It stays under Add prompt."
+      onClick={() => removeToLibrary(s.id)}
+    >
+      <LibraryIcon className="size-3" aria-hidden="true" />
+      Remove
+    </Button>
+  )
+  const roleSelect = (s: PromptSection) => (
+    <Select value={s.role} onValueChange={(v) => v && upSection(s.id, { role: v as never })}>
+      <SelectTrigger className="h-7 w-24 shrink-0 text-[11px]" aria-label="Role" disabled={ro}><SelectValue /></SelectTrigger>
+      <SelectContent>
+        <SelectItem value="system">system</SelectItem>
+        <SelectItem value="user">user</SelectItem>
+        <SelectItem value="assistant">assistant</SelectItem>
+      </SelectContent>
+    </Select>
+  )
 
   return (
     <div ref={containerRef} className="mx-auto flex max-w-3xl flex-col gap-1.5">
       {/* Groups: consecutive same-group sections merge into one wrapped block
-          (xml tags or a markdown heading) at assembly */}
-      {!ro && (preset.groups ?? []).length > 0 && (
+          (xml tags or a markdown heading) at assembly. A group starts from a
+          prompt's options, so this block only shows once one exists. */}
+      {!ro && groups.length > 0 && (
         <div className="flex flex-col gap-1.5 rounded-md border border-border px-2.5 py-2">
-          <p className="text-[11px] text-muted-foreground">Groups — neighboring sections in the same group render as one wrapped block.</p>
-          {(preset.groups ?? []).map((g) => (
+          <p className="text-[11px] text-muted-foreground">Groups: neighboring prompts in the same group are sent as one wrapped block.</p>
+          {groups.map((g) => (
             <div key={g.id} className="flex flex-wrap items-center gap-1.5">
               <Input
                 value={g.name}
@@ -449,7 +556,7 @@ function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: s
                 aria-label={`Group ${g.name} name`}
               />
               <Select value={g.wrapFormat} onValueChange={(v) => v && upGroup(g.id, { wrapFormat: v as never })}>
-                <SelectTrigger className="h-7 w-28 text-[11px]" aria-label={`Wrap format for ${g.name}`}><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-7 w-36 text-[11px]" aria-label={`Wrap format for ${g.name}`}><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="xml">xml tags</SelectItem>
                   <SelectItem value="markdown">markdown heading</SelectItem>
@@ -463,25 +570,9 @@ function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: s
           ))}
         </div>
       )}
-      {!ro && (
-        <Button variant="ghost" size="sm" className="h-7 self-start text-[11px] text-muted-foreground" onClick={addGroup}>
-          <Plus className="size-3.5" aria-hidden="true" /> Add group
-        </Button>
-      )}
-      {ro && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs">
-          <span className="text-foreground">Stock preset, duplicate to edit.</span>
-          <Button variant="outline" size="sm" className="ml-auto h-7 text-xs" onClick={() => {
-            const id = duplicatePreset(preset.id)
-            onSelect?.(id)
-            toast.success('Duplicated, the copy is editable')
-          }}>
-            <Copy className="size-3.5" aria-hidden="true" />Duplicate
-          </Button>
-        </div>
-      )}
       {ordered.map((s) => {
         const expanded = expandedId === s.id
+        const summary = expanded ? optionSummary(s) : ''
         return (
           <div
             key={s.id}
@@ -503,8 +594,8 @@ function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: s
               <span className="flex min-w-0 flex-1 items-center gap-2" aria-expanded={expanded}>
                 <span className="truncate text-sm font-medium">{s.name}</span>
                 {s.marker && <Badge variant="outline" className="shrink-0 text-[10px]">{s.marker}</Badge>}
-                {s.content && <Badge variant="secondary" className="shrink-0 text-[10px]">{formatTokens(estimateTokens(s.content))} tok</Badge>}
               </span>
+              {s.content && <span className="shrink-0 text-[11px] text-muted-foreground">{formatTokens(estimateTokens(s.content))} tok</span>}
               {/* explicit open control — the whole-row tap can be claimed by
                   the drag gesture (touch hold, or browsers that don't
                   synthesize a click after our scroll blocker), so opening
@@ -536,143 +627,138 @@ function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: s
                 there is nothing to override. */}
             {expanded && s.marker && s.marker !== 'main' ? (
               <div className="flex flex-col gap-2 border-t border-border px-2.5 py-2.5">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {s.marker === 'chatHistory' ? (
-                    <span className="text-[11px] text-muted-foreground">
-                      Role is fixed, chat turns are naturally user/assistant.
-                    </span>
-                  ) : (
-                    <>
-                      <span className="text-[11px] text-muted-foreground">Send as</span>
-                      <Select value={s.role} onValueChange={(v) => v && upSection(s.id, { role: v as never })}>
-                        <SelectTrigger className="h-7 w-24 text-[11px]" aria-label="Role" disabled={ro}><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="system">system</SelectItem>
-                          <SelectItem value="user">user</SelectItem>
-                          <SelectItem value="assistant">assistant</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <span className="text-[11px] text-muted-foreground">
-                        {s.marker === 'nsfw' ? 'Empty sends nothing. Type the prompt you want sent.' : 'Empty uses the engine-built text. Type your own to override.'}
-                      </span>
-                    </>
-                  )}
-                  <Button
-                    variant="ghost" size="sm" className="ml-auto h-6 text-[11px] text-muted-foreground hover:text-foreground"
-                    disabled={ro}
-                    onClick={() => removeToLibrary(s.id)}
-                  >
-                    <LibraryIcon className="size-3" aria-hidden="true" />
-                    Remove
-                  </Button>
-                </div>
                 {s.marker !== 'chatHistory' && (
                   <Textarea
                     value={s.content}
                     disabled={ro}
                     onChange={(e) => upSection(s.id, { content: e.target.value })}
                     aria-label={`${s.name} content`}
+                    placeholder={s.marker === 'nsfw' ? 'Empty sends nothing. Type the prompt you want sent.' : 'Empty uses the built-in text. Type your own to replace it.'}
                     className="max-h-96 min-h-20 font-mono text-xs"
-                    style={{ fieldSizing: 'content' } as React.CSSProperties}
                   />
                 )}
+                <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  {s.marker === 'chatHistory' ? (
+                    <span>Chat turns go out as user and assistant, in this place.</span>
+                  ) : (
+                    <>
+                      <span>Send as</span>
+                      {roleSelect(s)}
+                    </>
+                  )}
+                  {removeButton(s)}
+                </div>
               </div>
             ) : expanded && (
-              <div className="flex flex-col gap-2.5 border-t border-border px-2.5 py-2.5">
-                <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex flex-col gap-2 border-t border-border px-2.5 py-2.5">
+                <div className="flex items-center gap-1.5">
                   <Input
                     value={s.name}
                     disabled={ro}
                     onChange={(e) => upSection(s.id, { name: e.target.value })}
-                    className="h-7 w-44 text-xs"
-                    aria-label="Section name"
+                    className="h-7 min-w-0 flex-1 text-xs"
+                    aria-label="Prompt name"
                   />
-                  <Select value={s.role} onValueChange={(v) => v && upSection(s.id, { role: v as never })}>
-                    <SelectTrigger className="h-7 w-24 text-[11px]" aria-label="Role" disabled={ro}><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="system">system</SelectItem>
-                      <SelectItem value="user">user</SelectItem>
-                      <SelectItem value="assistant">assistant</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Select value={s.position} onValueChange={(v) => v && upSection(s.id, { position: v as never })}>
-                    <SelectTrigger className="h-7 w-28 text-[11px]" aria-label="Position" disabled={ro}><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="relative">relative</SelectItem>
-                      <SelectItem value="in-chat">in-chat @depth</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {s.position === 'in-chat' && (
-                    <Input type="number" value={s.depth} disabled={ro} onChange={(e) => upSection(s.id, { depth: Number(e.target.value) })} className="h-7 w-14 text-[11px]" aria-label="Depth" />
-                  )}
-                  <Select value={s.groupId ?? 'none'} onValueChange={(v) => upSection(s.id, { groupId: v === 'none' ? null : v })}>
-                    <SelectTrigger className="h-7 w-28 text-[11px]" aria-label={`Group for ${s.name}`} disabled={ro || !(preset.groups ?? []).length}>
-                      <SelectValue>{(v) => v === 'none' ? 'no group' : (groupName(v as ID) ?? 'no group')}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">no group</SelectItem>
-                      {(preset.groups ?? []).map((g) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <Input
-                    value={s.condition ?? ''}
-                    disabled={ro}
-                    onChange={(e) => upSection(s.id, { condition: e.target.value })}
-                    className="h-7 w-40 font-mono text-[11px]"
-                    placeholder="if: var==value"
-                    aria-label={`Condition for ${s.name}`}
-                  />
-                  <Button variant="ghost" size="icon-sm" className="ml-auto" onClick={() => setMaximizedId(s.id)} aria-label="Maximize editor">
+                  {roleSelect(s)}
+                  <MacroMenu disabled={ro} onPick={(m) => insertMacro(s, m, areaRef.current)} />
+                  <Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" onClick={() => setMaximizedId(s.id)} aria-label="Maximize editor" title="Maximize editor">
                     <ArrowsOut aria-hidden="true" />
                   </Button>
                 </div>
 
                 <Textarea
+                  ref={areaRef}
                   value={s.content}
                   disabled={ro}
                   onChange={(e) => upSection(s.id, { content: e.target.value })}
                   aria-label={`${s.name} content`}
                   placeholder={s.marker === 'main' ? 'Empty = the character card’s system prompt (nothing if the card has none). Type to set your own.' : 'Prompt content…'}
                   className="max-h-96 min-h-28 font-mono text-xs"
-                  style={{ fieldSizing: 'content' } as React.CSSProperties}
                 />
 
-                <div className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
-                  <span className="mr-1">Macros:</span>
-                  {MACRO_HINTS.map((m) => (
-                    <code key={m} className="rounded bg-muted px-1 py-0.5">{m}</code>
-                  ))}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                  <span>Triggers:</span>
-                  {triggerOptions.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      disabled={ro}
-                      onClick={() => upSection(s.id, { injectionTriggers: s.injectionTriggers.includes(t) ? s.injectionTriggers.filter((x) => x !== t) : [...s.injectionTriggers, t] })}
-                      className={cn('rounded-full border px-1.5 py-0.5', s.injectionTriggers.includes(t) ? 'border-primary bg-primary/15 text-primary' : 'border-border')}
-                    >
-                      {t}
-                    </button>
-                  ))}
-                  <label className="ml-auto flex items-center gap-1">
-                    <Switch checked={s.forbidOverrides} disabled={ro} onCheckedChange={(v) => upSection(s.id, { forbidOverrides: v })} aria-label="Forbid overrides" />
-                    forbid overrides
-                  </label>
-                </div>
-
-                <div>
-                  <Button
-                    variant="ghost" size="sm" className="h-6 text-[11px] text-muted-foreground hover:text-foreground"
-                    disabled={ro}
-                    onClick={() => removeToLibrary(s.id)}
+                {/* everything past name, role and text is one fold: closed, it
+                    still names whatever is set away from the default */}
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <button
+                    type="button"
+                    onClick={() => setOptionsOpen(!optionsOpen)}
+                    aria-expanded={optionsOpen}
+                    className="flex min-w-0 items-center gap-1 rounded py-0.5 hover:text-foreground"
                   >
-                    <LibraryIcon className="size-3" aria-hidden="true" />
-                    Remove
-                  </Button>
+                    <CaretDown className={cn('size-3 shrink-0 transition-transform', !optionsOpen && '-rotate-90')} aria-hidden="true" />
+                    <span className="shrink-0">Options</span>
+                    {!optionsOpen && summary && <span className="min-w-0 truncate text-foreground/80">{summary}</span>}
+                  </button>
+                  {removeButton(s)}
                 </div>
+
+                {optionsOpen && (
+                  <div className="flex flex-col gap-2.5 rounded-md bg-muted/30 px-2.5 py-2.5 text-[11px] text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                      <div className="flex items-center gap-1.5">
+                        <span>Position</span>
+                        <Select value={s.position} onValueChange={(v) => v && upSection(s.id, { position: v as never })}>
+                          <SelectTrigger className="h-7 w-28 text-[11px]" aria-label="Position" disabled={ro}>
+                            <SelectValue>{(v) => v === 'in-chat' ? 'in chat' : 'in order'}</SelectValue>
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="relative">in order</SelectItem>
+                            <SelectItem value="in-chat">in chat, at depth</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {s.position === 'in-chat' && (
+                          <Input type="number" min={0} value={s.depth} disabled={ro} onChange={(e) => upSection(s.id, { depth: Number(e.target.value) })} className="h-7 w-14 text-[11px]" aria-label="Depth" title="Messages from the end of the chat" />
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span>Group</span>
+                        <Select
+                          value={s.groupId ?? 'none'}
+                          onValueChange={(v) => v === '__new' ? addGroupFor(s.id) : upSection(s.id, { groupId: v === 'none' ? null : v })}
+                        >
+                          <SelectTrigger className="h-7 w-32 text-[11px]" aria-label={`Group for ${s.name}`} disabled={ro}>
+                            <SelectValue>{(v) => v === 'none' ? 'none' : (groupName(v as ID) ?? 'none')}</SelectValue>
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">none</SelectItem>
+                            {groups.map((g) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
+                            <SelectItem value="__new">New group…</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="flex min-w-0 flex-1 basis-44 items-center gap-1.5">
+                        <span className="shrink-0">Only if</span>
+                        <Input
+                          value={s.condition ?? ''}
+                          disabled={ro}
+                          onChange={(e) => upSection(s.id, { condition: e.target.value })}
+                          className="h-7 min-w-0 flex-1 font-mono text-[11px]"
+                          placeholder="var==value (blank = always)"
+                          aria-label={`Condition for ${s.name}`}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="mr-0.5">Sent on</span>
+                      {triggerOptions.map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          disabled={ro}
+                          aria-pressed={s.injectionTriggers.includes(t)}
+                          onClick={() => upSection(s.id, { injectionTriggers: s.injectionTriggers.includes(t) ? s.injectionTriggers.filter((x) => x !== t) : [...s.injectionTriggers, t] })}
+                          className={cn('rounded-full border px-1.5 py-0.5', s.injectionTriggers.includes(t) ? 'border-primary/60 bg-primary/10 text-foreground' : 'border-border')}
+                        >
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="flex w-fit items-center gap-1.5" title="A character card's own prompt cannot replace this one">
+                      <Switch checked={s.forbidOverrides} disabled={ro} onCheckedChange={(v) => upSection(s.id, { forbidOverrides: v })} aria-label="Forbid overrides" />
+                      Forbid overrides
+                    </label>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -731,16 +817,15 @@ function SectionEditor({ preset, onSelect }: { preset: Preset; onSelect?: (id: s
           {maximized && (
             <>
               <Textarea
+                ref={maxAreaRef}
                 value={maximized.content}
                 disabled={ro}
                 onChange={(e) => upSection(maximized.id, { content: e.target.value })}
                 aria-label={`${maximized.name} content maximized`}
-                className="min-h-0 flex-1 resize-none font-mono text-sm"
+                className="min-h-0 flex-1 resize-none font-mono text-sm [field-sizing:fixed]"
               />
-              <div className="flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
-                {MACRO_HINTS.map((m) => (
-                  <code key={m} className="rounded bg-muted px-1 py-0.5">{m}</code>
-                ))}
+              <div className="flex items-center gap-1">
+                <MacroMenu disabled={ro} onPick={(m) => insertMacro(maximized, m, maxAreaRef.current)} />
                 <Button variant="outline" size="sm" className="ml-auto text-xs" onClick={() => setMaximizedId(null)}>
                   <X className="size-3.5" aria-hidden="true" />Close
                 </Button>

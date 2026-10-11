@@ -1,3 +1,4 @@
+import { useViewScroll } from '@/lib/view-memory'
 
 import type { ReactNode } from 'react'
 import { CaretLeft } from '@phosphor-icons/react'
@@ -21,7 +22,9 @@ export function MasterDetail({
   detailOpen,
   onBack,
   detailTitle,
+  memoryKey,
   masterWidth = 'w-64',
+  pageScroll = false,
   master,
   detail,
 }: {
@@ -30,23 +33,26 @@ export function MasterDetail({
   onBack: () => void
   /** Shown in the mobile back header. */
   detailTitle?: string
+  memoryKey?: string
   /** Tailwind width class for the master pane on desktop. */
   masterWidth?: string
+  pageScroll?: boolean
   master: ReactNode
   detail: ReactNode
 }) {
   const isMobile = useIsMobile()
   useBackClose(detailOpen, onBack)
+  const scrollRef = useViewScroll(`${memoryKey}.mobile`, !!memoryKey && isMobile && detailOpen, true)
 
   if (isMobile) {
     if (!detailOpen) {
-      return <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">{master}</div>
+      return <div className={cn('flex min-h-0 min-w-0 flex-col', !pageScroll && 'h-full overflow-hidden')}>{master}</div>
     }
     return (
       // inner ScrollArea viewports get overscroll-auto: with their default
       // overscroll-contain, a wheel over the (auto-height, non-scrolling)
       // viewport never chains up to this page scroller and the page won't move
-      <div className="h-full min-h-0 min-w-0 overflow-y-auto overscroll-contain [-webkit-overflow-scrolling:touch] [&_[data-slot=scroll-area-viewport]]:overscroll-auto">
+      <div ref={scrollRef} className={cn('min-h-0 min-w-0', !pageScroll && 'h-full overflow-y-auto overscroll-contain [-webkit-overflow-scrolling:touch] [&_[data-slot=scroll-area-viewport]]:overscroll-auto')}>
         <div className="flex min-h-full flex-col">
           <div className="flex shrink-0 items-center gap-1 border-b border-border px-2 py-2">
             <button
@@ -73,7 +79,7 @@ export function MasterDetail({
     // a tall pane grows past the viewport, its inner ScrollArea inherits that
     // grown height, and the overflow becomes unreachable instead of scrolling
     // (the Lorebooks / Presets / Regex "can't scroll down" bug).
-    <div className="flex h-full min-h-0 overflow-hidden">
+    <div className={cn('flex min-h-0', !pageScroll && 'h-full overflow-hidden')}>
       <div className={cn('flex min-h-0 shrink-0 flex-col border-r border-border', masterWidth)}>{master}</div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{detail}</div>
     </div>

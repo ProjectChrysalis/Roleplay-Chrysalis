@@ -227,6 +227,18 @@ describe("presetExport", () => {
 });
 
 describe("regexImport", () => {
+  it("preserves empty flags across an import/export round trip", () => {
+    for (const findRegex of ["/a/", "a"]) {
+      const r = regexImport({ findRegex })!;
+      expect(r.flags).toBe("");
+      expect(regexExport({ ...r, id: "r", order: 0 }).findRegex).toBe("/a/");
+    }
+  });
+  it("tolerates malformed optional placement and trim fields", () => {
+    const r = regexImport({ findRegex: "/a/g", placement: "bad", trimStrings: [null, 3, "x"] })!;
+    expect(r.placements.aiOutput).toBe(true);
+    expect(r.trimStrings).toEqual(["x"]);
+  });
   it("parses /pattern/flags into find + flags", () => {
     const r = regexImport({ scriptName: "Scrub", findRegex: "/\\*/g", replaceString: "", placement: [2] })!;
     expect(r.find).toBe("\\*");
@@ -278,5 +290,16 @@ describe("regexImport", () => {
 
   it("rejects scripts without a findRegex", () => {
     expect(regexImport({ scriptName: "X" })).toBeNull();
+  });
+});
+
+describe('regex folders', () => {
+  it('preserves a folder and disabled state through portable export', () => {
+    const script = regexImport({ scriptName: 'Trim', folder: '  Formatting  ', findRegex: '/test/gi', replaceString: '', disabled: true })!;
+    expect(script.folder).toBe('Formatting');
+    expect(script.enabled).toBe(false);
+    const exported = regexExport({ ...script, id: 'trim', order: 0 });
+    expect(exported.folder).toBe('Formatting');
+    expect(regexImport(exported)).toEqual(script);
   });
 });

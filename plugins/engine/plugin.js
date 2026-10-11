@@ -35,7 +35,7 @@ const slug = (s) =>
   String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "item";
 const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// ---------- macros (subset evaluated server-side) ----------
+// ---------- macros (evaluated server-side) ----------
 function strHash(s) {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
@@ -69,82 +69,415 @@ function humanIdle(ms) {
 /**
  * Macro expansion. `mc` carries everything the macros can touch:
  *   userName/charName/personaText/chatId — identity
- *   card: {description, personality, scenario} — card-field macros
+ *   card: {description, personality, scenario, mesExamples, systemPrompt,
+ *     postHistory, creatorNotes, version} — card-field macros
  *   vars — chat-local variable map ({{setvar}} writes INTO this object;
  *     callers that saveChat afterwards persist the mutations)
+ *   globals — variables every chat shares (same contract; see globalVars)
+ *   group/groupNotMuted — member name lists; model; lastMessageId; genType;
+ *     maxContext/maxResponse — the preset's token limits
  *   lastMessage/lastUserMessage/lastCharMessage/idleText — chat context
  *   summary — the running chat summary
  *   words — summarize-prompt budget ({{words}}/{{limit}})
+ *
+ * Text is evaluated once, in document order: a variable set early is visible
+ * to everything after it, and only the taken branch of a conditional runs.
+ * A macro nobody defines stays as written (its arguments still expand), so a
+ * later pass or another tool can pick it up.
+ *
+ * Syntax: {{name}}, {{name::a::b}}, {{name a}} and {{name:a}} (one argument);
+ * {{if cond}}…{{else}}…{{/if}} with ! to negate; {{setvar::x}}…{{/setvar}} and
+ * other block forms; variable shorthand {{.x}} (chat) / {{$x}} (shared) with
+ * = += -= ++ -- == != > >= < <= || ?? ||= ??=; a leading # keeps a block's
+ * whitespace (so {{#if}} works), otherwise blocks are trimmed and dedented.
  */
+const MACRO_OPS = ["++", "--", "??=", "??", "||=", "||", "-=", "==", "!=", ">=", ">", "<=", "<", "+=", "="];
+const MACRO_VAR = "[a-zA-Z](?:[\\w-]*\\w)?";
+const MACRO_BAD = { kind: "bad", closing: false, keep: false, name: "", args: [] };
+const macroFalsy = (v) => { const s = String(v == null ? "" : v).trim().toLowerCase(); return s === "" || s === "off" || s === "false" || s === "0"; };
+
+/** Split text into literal runs (strings) and {{…}} macros. Braces are
+ *  matched, so a macro can carry macros in its arguments; an opener that
+ *  never closes is ordinary text. */
+function macroItems(text) {
+  const items = [];
+  const n = text.length;
+  let i = 0, last = 0;
+  while (i < n) {
+    let at = text.indexOf("{{", i);
+    if (at < 0) break;
+    while (text.charCodeAt(at + 2) === 123) at++; // "{{{x}}": the first brace is literal
+    let depth = 0, k = at, end = -1;
+    while (k < n - 1) {
+      const c = text.charCodeAt(k);
+      if (c === 123 && text.charCodeAt(k + 1) === 123) { depth++; k += 2; }
+      else if (c === 125 && text.charCodeAt(k + 1) === 125) { depth--; k += 2; if (depth === 0) { end = k; break; } }
+      else k++;
+    }
+    if (end < 0) { i = at + 2; continue; }
+    if (at > last) items.push(text.slice(last, at));
+    items.push({ raw: text.slice(at, end), inner: text.slice(at + 2, end - 2), head: MACRO_BAD, pair: -1 });
+    last = i = end;
+  }
+  if (last < n) items.push(text.slice(last));
+  return items;
+}
+/** Split on "::" outside nested macros. */
+function macroSplit(s) {
+  const out = [];
+  let depth = 0, from = 0;
+  for (let k = 0; k < s.length - 1; k++) {
+    const c = s.charCodeAt(k), d = s.charCodeAt(k + 1);
+    if (c === 123 && d === 123) { depth++; k++; }
+    else if (c === 125 && d === 125) { if (depth > 0) depth--; k++; }
+    else if (c === 58 && d === 58 && depth === 0) { out.push(s.slice(from, k)); from = k + 2; k++; }
+  }
+  out.push(s.slice(from));
+  return out;
+}
+/** What a macro's inside says: flags, then a comment, a variable expression
+ *  or a name with arguments. Anything else is "bad" and stays as written. */
+function macroHead(inner) {
+  let s = inner.replace(/^\s+/, "");
+  let closing = false, keep = false;
+  // {{//}} … {{///}} is a comment block; a lone {{// note}} is a comment line
+  if (s.trim() === "///") return { kind: "comment", closing: true, keep, name: "//", args: [], tail: "" };
+  for (;;) {
+    if (s.startsWith("//")) return { kind: "comment", closing, keep, name: "//", args: [], tail: s.slice(2) };
+    const c = s[0];
+    if (c === "/") closing = true;
+    else if (c === "#") keep = true;
+    else if (c !== "!" && c !== "?" && c !== "~" && c !== ">") break;
+    s = s.slice(1).replace(/^\s+/, "");
+  }
+  if (s[0] === "." || s[0] === "$") {
+    const m = new RegExp("^" + MACRO_VAR).exec(s.slice(1));
+    if (!m) return MACRO_BAD;
+    let rest = s.slice(1 + m[0].length).replace(/^\s+/, "");
+    let op = "";
+    if (rest) {
+      op = MACRO_OPS.find((o) => rest.startsWith(o)) || "";
+      if (!op) return MACRO_BAD;
+      rest = rest.slice(op.length);
+    }
+    return { kind: "var", closing, keep, name: m[0], args: [], global: s[0] === "$", op, value: rest.trim() };
+  }
+  const m = /^[a-zA-Z][\w-]*/.exec(s);
+  if (!m) return MACRO_BAD;
+  let rest = s.slice(m[0].length);
+  if (rest && !/^[\s:|]/.test(rest)) return MACRO_BAD;
+  rest = rest.replace(/^\s+/, "");
+  let args;
+  if (rest.startsWith("::")) {
+    rest = rest.slice(2);
+    args = macroSplit(rest).map((x) => x.trim());
+  } else {
+    if (rest[0] === ":") rest = rest.slice(1);
+    args = rest.trim() ? [rest.trim()] : [];
+  }
+  return { kind: "macro", closing, keep, name: m[0].toLowerCase(), args, tail: rest };
+}
+// block forms: the macro takes the text up to its {{/name}} as one more
+// argument when it was written with exactly this many
+const MACRO_BLOCK = new Map([["if", 1], ["setvar", 1], ["addvar", 1], ["setglobalvar", 1], ["addglobalvar", 1], ["trim", 0]]);
+/** Parse text and pair each block opener with its closer. A closer also ends
+ *  any block left open inside it; an opener without a closer is not a block. */
+function macroDoc(text) {
+  const items = macroItems(text);
+  const open = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (typeof it === "string") continue;
+    const h = (it.head = macroHead(it.inner));
+    if (h.kind !== "macro" && h.kind !== "comment") continue;
+    if (h.closing) {
+      for (let s = open.length - 1; s >= 0; s--) {
+        if (items[open[s]].head.name !== h.name) continue;
+        items[open[s]].pair = i;
+        open.length = s;
+        break;
+      }
+    } else if (h.kind === "comment" ? !h.tail.trim() : MACRO_BLOCK.get(h.name) === h.args.length) {
+      open.push(i);
+    }
+  }
+  return items;
+}
+/** Trim a block and drop the indentation its first line carries, so a block
+ *  can sit on its own indented lines without leaking that layout. */
+function macroDedent(s) {
+  if (!s) return "";
+  const lines = s.split("\n");
+  const first = lines.find((l) => l.trim() !== "");
+  const base = first ? /^[ \t]*/.exec(first)[0].length : 0;
+  if (!base) return s.trim();
+  return lines.map((l) => (/^[ \t]*/.exec(l)[0].length >= base ? l.slice(base) : l.replace(/^\s+/, ""))).join("\n").trim();
+}
+
+const macroStore = (mc, global) => (global ? mc.globals || (mc.globals = {}) : mc.vars || (mc.vars = {}));
+const macroHas = (o, k) => Object.prototype.hasOwnProperty.call(o, k) && o[k] != null;
+const macroGet = (mc, global, k) => { const o = macroStore(mc, global); return macroHas(o, k) ? String(o[k]) : ""; };
+/** Add to a variable: numbers sum, a JSON list gains an item, anything else
+ *  appends as text. Returns the new value. */
+function macroAdd(mc, global, k, v) {
+  const o = macroStore(mc, global);
+  const cur = macroHas(o, k) ? String(o[k]) : "";
+  if (cur[0] === "[") {
+    try {
+      const arr = JSON.parse(cur);
+      if (Array.isArray(arr)) { arr.push(v); return (o[k] = JSON.stringify(arr)); }
+    } catch { /* not a list */ }
+  }
+  const inc = Number(v), base = Number(cur || 0);
+  return (o[k] = Number.isNaN(inc) || Number.isNaN(base) ? cur + v : String(base + inc));
+}
+/** {{.name}} / {{$name}} with an optional operator. The right-hand side only
+ *  expands when the operator needs it. */
+function macroVar(h, mc, sub) {
+  const o = macroStore(mc, h.global), k = h.name;
+  const cur = () => (macroHas(o, k) ? String(o[k]) : "");
+  let cached = null;
+  const val = () => (cached == null ? (cached = sub(h.value).trim()) : cached);
+  const cmp = (f) => { const x = Number(cur()), y = Number(val()); return !Number.isNaN(x) && !Number.isNaN(y) && f(x, y) ? "true" : "false"; };
+  switch (h.op) {
+    case "": return cur();
+    case "=": o[k] = val(); return "";
+    case "++": return macroAdd(mc, h.global, k, "1");
+    case "--": return macroAdd(mc, h.global, k, "-1");
+    case "+=": macroAdd(mc, h.global, k, val()); return "";
+    case "-=": { const y = Number(val()); if (!Number.isNaN(y)) macroAdd(mc, h.global, k, String(-y)); return ""; }
+    case "||": return macroFalsy(cur()) ? val() : cur();
+    case "??": return macroHas(o, k) ? cur() : val();
+    case "||=": if (macroFalsy(cur())) o[k] = val(); return cur();
+    case "??=": if (!macroHas(o, k)) o[k] = val(); return cur();
+    case "==": return cur() === val() ? "true" : "false";
+    case "!=": return cur() !== val() ? "true" : "false";
+    case ">": return cmp((x, y) => x > y);
+    case ">=": return cmp((x, y) => x >= y);
+    case "<": return cmp((x, y) => x < y);
+    case "<=": return cmp((x, y) => x <= y);
+  }
+  return "";
+}
+
+const MACRO_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MACRO_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const p2 = (n) => String(n).padStart(2, "0");
+/** Format a date from pattern letters (YYYY MM DD HH mm ss, month and day
+ *  names, 12-hour clock, offset); [bracketed] text is literal. */
+function macroDateFormat(d, fmt) {
+  const h12 = d.getHours() % 12 || 12, off = -d.getTimezoneOffset();
+  const zone = (sep) => (off < 0 ? "-" : "+") + p2(Math.floor(Math.abs(off) / 60)) + sep + p2(Math.abs(off) % 60);
+  const nth = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
+  const t = {
+    YYYY: d.getFullYear(), YY: p2(d.getFullYear() % 100),
+    MMMM: MACRO_MONTHS[d.getMonth()], MMM: MACRO_MONTHS[d.getMonth()].slice(0, 3), MM: p2(d.getMonth() + 1), M: d.getMonth() + 1,
+    Do: nth(d.getDate()), DD: p2(d.getDate()), D: d.getDate(),
+    dddd: MACRO_DAYS[d.getDay()], ddd: MACRO_DAYS[d.getDay()].slice(0, 3), dd: MACRO_DAYS[d.getDay()].slice(0, 2),
+    HH: p2(d.getHours()), H: d.getHours(), hh: p2(h12), h: h12,
+    mm: p2(d.getMinutes()), m: d.getMinutes(), ss: p2(d.getSeconds()), s: d.getSeconds(),
+    A: d.getHours() < 12 ? "AM" : "PM", a: d.getHours() < 12 ? "am" : "pm",
+    ZZ: zone(""), Z: zone(":"), X: Math.floor(d.getTime() / 1000), x: d.getTime(),
+  };
+  return fmt.replace(/\[([^\]]*)\]|YYYY|YY|MMMM|MMM|MM|M|Do|DD|D|dddd|ddd|dd|HH|H|hh|h|mm|m|ss|s|A|a|ZZ|Z|X|x/g, (tok, lit) => (lit != null ? lit : String(t[tok])));
+}
+const macroList = (a) => (a.length !== 1 ? a
+  : a[0].indexOf("::") >= 0 ? a[0].split("::").map((x) => x.trim())
+  : a[0].replace(/\\,/g, "\u0001").split(",").map((x) => x.replace(/\u0001/g, ",").trim()));
+const macroCount = (a) => { const n = Math.floor(Number(a[0])); return a.length && n >= 0 && n <= 1000 ? n : 1; };
+
+// name → (args, mc, head) => text. Returning undefined leaves the macro as written.
+const MACROS = Object.assign(Object.create(null), {
+  if: () => "", // evaluated by macroIf: its branches must not expand up front
+  else: () => "",
+  noop: () => "",
+  banned: () => "",
+  // without a block, {{trim}} eats the newlines around itself once everything else is expanded
+  trim: (a) => (a.length ? a[0] : "{{trim}}"),
+  newline: (a) => "\n".repeat(macroCount(a)),
+  space: (a) => " ".repeat(macroCount(a)),
+  reverse: (a) => Array.from(a.join("::")).reverse().join(""),
+  // random re-rolls on every resolution; pick is stable per chat+content
+  random: (a) => { const o = macroList(a); return o.length ? o[Math.floor(Math.random() * o.length)] : ""; },
+  pick: (a, mc, h) => { const o = macroList(a); return o.length ? o[strHash((mc.chatId || "") + "|" + h.tail) % o.length] : ""; },
+  roll: (a) => String(rollDice(a[0] || "")),
+  time: (a) => {
+    const m = /^UTC([+-]\d+)$/i.exec(a[0] || "");
+    if (!m) return new Date().toLocaleTimeString();
+    const d = new Date(Date.now() + Number(m[1]) * 3600000);
+    return (d.getUTCHours() % 12 || 12) + ":" + p2(d.getUTCMinutes()) + (d.getUTCHours() < 12 ? " AM" : " PM");
+  },
+  isotime: () => macroDateFormat(new Date(), "HH:mm"),
+  date: () => new Date().toLocaleDateString(),
+  isodate: () => macroDateFormat(new Date(), "YYYY-MM-DD"),
+  weekday: () => MACRO_DAYS[new Date().getDay()],
+  datetimeformat: (a) => macroDateFormat(new Date(), a.join("::") || "YYYY-MM-DD HH:mm:ss"),
+  idle_duration: (a, mc) => mc.idleText || "just now",
+  persona: (a, mc) => mc.personaText || "",
+  user: (a, mc) => mc.userName || "User",
+  char: (a, mc) => mc.charName || "",
+  // in a one-on-one chat the "group" is just the character
+  group: (a, mc) => (mc.group != null ? mc.group : mc.charName || ""),
+  groupnotmuted: (a, mc) => (mc.groupNotMuted != null ? mc.groupNotMuted : mc.group != null ? mc.group : mc.charName || ""),
+  description: (a, mc) => (mc.card && mc.card.description) || "",
+  personality: (a, mc) => (mc.card && mc.card.personality) || "",
+  scenario: (a, mc) => (mc.card && mc.card.scenario) || "",
+  mesexamplesraw: (a, mc) => (mc.card && mc.card.mesExamples) || "",
+  charprompt: (a, mc) => (mc.card && mc.card.systemPrompt) || "",
+  charinstruction: (a, mc) => (mc.card && mc.card.postHistory) || "",
+  creatornotes: (a, mc) => (mc.card && mc.card.creatorNotes) || "",
+  charversion: (a, mc) => (mc.card && mc.card.version) || "",
+  model: (a, mc) => mc.model || "",
+  input: (a, mc) => mc.input || "",
+  lastgenerationtype: (a, mc) => mc.genType || "",
+  lastmessage: (a, mc) => mc.lastMessage || "",
+  lastusermessage: (a, mc) => mc.lastUserMessage || "",
+  lastcharmessage: (a, mc) => mc.lastCharMessage || "",
+  lastmessageid: (a, mc) => (mc.lastMessageId != null ? String(mc.lastMessageId) : ""),
+  summary: (a, mc) => mc.summary || "",
+  words: (a, mc) => (mc.words != null ? String(mc.words) : undefined),
+  maxprompt: (a, mc) => (mc.maxContext != null ? String(mc.maxContext) : undefined),
+  maxresponse: (a, mc) => (mc.maxResponse != null ? String(mc.maxResponse) : undefined),
+});
+for (const [alias, name] of [
+  ["idleduration", "idle_duration"], ["charifnotgroup", "group"], ["limit", "words"],
+  ["maxprompttokens", "maxprompt"], ["maxcontext", "maxprompt"], ["maxcontexttokens", "maxprompt"], ["maxresponsetokens", "maxresponse"],
+  ["chardescription", "description"], ["charpersonality", "personality"], ["charscenario", "scenario"],
+  ["mesexamples", "mesexamplesraw"], ["charcreatornotes", "creatornotes"], ["version", "charversion"], ["char_version", "charversion"],
+]) MACROS[alias] = MACROS[name];
+// the variable macros come in a chat-local and a shared flavour
+for (const [v, global] of [["var", false], ["globalvar", true]]) {
+  // a call missing its name (or its value, for set/add) is a typo: left as written
+  const named = (need, fn) => (a, mc) => (a.length >= need && a[0] ? fn(a, mc) : undefined);
+  MACROS["set" + v] = named(2, (a, mc) => { macroStore(mc, global)[a[0]] = a.slice(1).join("::"); return ""; });
+  MACROS["add" + v] = named(2, (a, mc) => { macroAdd(mc, global, a[0], a.slice(1).join("::")); return ""; });
+  MACROS["inc" + v] = named(1, (a, mc) => macroAdd(mc, global, a[0], "1"));
+  MACROS["dec" + v] = named(1, (a, mc) => macroAdd(mc, global, a[0], "-1"));
+  MACROS["get" + v] = named(1, (a, mc) => macroGet(mc, global, a[0]));
+  MACROS["has" + v] = MACROS[v + "exists"] = named(1, (a, mc) => String(macroHas(macroStore(mc, global), a[0])));
+  // null, not a removed key: the write has to survive the merge that commits a turn
+  MACROS["delete" + v] = MACROS["flush" + v] = named(1, (a, mc) => { macroStore(mc, global)[a[0]] = null; return ""; });
+}
+// a bare name is only a condition's subject when the macro needs no argument
+const MACRO_NEEDS_ARG = /^(if|else|trim|noop|banned|reverse|random|pick|roll|datetimeformat|newline|space|(set|add|inc|dec|get|has|delete|flush)(global)?var|(global)?varexists)$/;
+
+/** Is this condition true? Empty, "0", "false" and "off" are not. The subject
+ *  may be text (macros expand first), a variable ({{if .x}}, also with a
+ *  comparison: {{if .x == a}}), or the bare name of a macro ({{if scenario}}). */
+function macroCond(raw, mc, depth) {
+  let c = String(raw), not = false;
+  const neg = /^\s*!\s*/.exec(c);
+  if (neg) { not = true; c = c.slice(neg[0].length); }
+  c = macroRun(c, mc, depth + 1).trim();
+  if (c[0] === "." || c[0] === "$") {
+    const h = macroHead(c);
+    if (h.kind === "var") c = macroVar(h, mc, (t) => macroRun(t, mc, depth + 1));
+  } else if (/^[a-zA-Z][\w-]*$/.test(c) && MACROS[c.toLowerCase()] && !MACRO_NEEDS_ARG.test(c.toLowerCase())) {
+    c = macroRun("{{" + c + "}}", mc, depth + 1);
+  }
+  return macroFalsy(c) === not;
+}
+function macroIf(items, i, mc, depth) {
+  const it = items[i], h = it.head;
+  let body = items, a = i + 1, b = it.pair;
+  if (b < 0) {
+    // one-line form: {{if::cond::text}}. An opener with no closer stays as written.
+    if (h.args.length < 2) return it.raw;
+    body = macroDoc(h.args.slice(1).join("::"));
+    a = 0;
+    b = body.length;
+  }
+  // the first {{else}} outside any nested block splits the branches
+  let split = -1;
+  for (let k = a; k < b; k++) {
+    const x = body[k];
+    if (typeof x === "string") continue;
+    if (x.pair > k) { k = x.pair; continue; }
+    if (x.head.kind === "macro" && x.head.name === "else" && !x.head.closing) { split = k; break; }
+  }
+  const yes = macroCond(h.args[0] || "", mc, depth);
+  const out = yes ? macroRange(body, a, split < 0 ? b : split, mc, depth + 1)
+    : split < 0 ? "" : macroRange(body, split + 1, b, mc, depth + 1);
+  return h.keep ? out : macroDedent(out);
+}
+function macroEval(items, i, mc, depth) {
+  const it = items[i], h = it.head;
+  if (h.closing) return it.raw; // a closer nothing opened
+  if (h.kind === "comment") return "";
+  const sub = (t) => macroRun(t, mc, depth + 1);
+  if (h.kind === "var") return macroVar(h, mc, sub);
+  const fn = h.kind === "macro" ? MACROS[h.name] : null;
+  if (!fn) return "{{" + sub(it.inner) + "}}";
+  if (h.name === "if") return macroIf(items, i, mc, depth);
+  const args = h.args.map(sub);
+  if (it.pair > i) {
+    const body = macroRange(items, i + 1, it.pair, mc, depth + 1);
+    args.push(h.keep ? body : macroDedent(body));
+  }
+  const out = fn(args, mc, h);
+  return out === undefined ? it.raw : String(out);
+}
+function macroRange(items, a, b, mc, depth) {
+  let out = "";
+  for (let i = a; i < b; i++) {
+    const it = items[i];
+    if (typeof it === "string") { out += it; continue; }
+    out += macroEval(items, i, mc, depth);
+    if (it.pair > i) i = it.pair; // the block's body and closer are consumed
+  }
+  return out;
+}
+function macroRun(text, mc, depth) {
+  if (depth > 60 || text.indexOf("{{") < 0) return text;
+  const items = macroDoc(text);
+  return macroRange(items, 0, items.length, mc, depth);
+}
 function expandMacros(text, mc) {
   let out = String(text);
-  // macro names are case-insensitive ({{user}}, {{User}}, {{USER}} all resolve)
-  const ci = (t, name, val) => t.replace(new RegExp("\\{\\{" + name + "\\}\\}", "gi"), val == null ? "" : String(val));
-  const list = (raw) => {
-    const sep = raw.indexOf("::") >= 0 ? "::" : ",";
-    return raw.split(sep).map((x) => x.replace(/\\,/g, ",").trim()).filter(Boolean);
-  };
-  const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
-  // chat-local variables — setvar/addvar/incvar/decvar mutate mc.vars, getvar reads
-  out = out.replace(/\{\{setvar::([^:]+)::([\s\S]*?)\}\}/gi, (_, n, v) => {
-    if (mc.vars) mc.vars[n.trim()] = v;
-    return "";
-  });
-  out = out.replace(/\{\{addvar::([^:]+)::([\s\S]*?)\}\}/gi, (_, n, v) => {
-    if (mc.vars) { const k = n.trim(); mc.vars[k] = String(num(mc.vars[k]) + num(v)); return String(mc.vars[k]); }
-    return "";
-  });
-  out = out.replace(/\{\{incvar::([^}]+)\}\}/gi, (_, n) => {
-    if (mc.vars) { const k = n.trim(); mc.vars[k] = String(num(mc.vars[k]) + 1); return String(mc.vars[k]); }
-    return "";
-  });
-  out = out.replace(/\{\{decvar::([^}]+)\}\}/gi, (_, n) => {
-    if (mc.vars) { const k = n.trim(); mc.vars[k] = String(num(mc.vars[k]) - 1); return String(mc.vars[k]); }
-    return "";
-  });
-  out = out.replace(/\{\{getvar::([^}]+)\}\}/gi, (_, n) => {
-    const v = mc.vars ? mc.vars[n.trim()] : undefined;
-    return v == null ? "" : String(v);
-  });
-  // random re-rolls on every resolution; pick is stable per chat+content
-  out = out.replace(/\{\{random\s?::?([^}]+)\}\}/gi, (_, raw) => {
-    const o = list(raw);
-    return o.length ? o[Math.floor(Math.random() * o.length)] : "";
-  });
-  out = out.replace(/\{\{pick\s?::?([^}]+)\}\}/gi, (_, raw) => {
-    const o = list(raw);
-    return o.length ? o[strHash((mc.chatId || "") + "|" + raw) % o.length] : "";
-  });
-  out = out.replace(/\{\{roll[ :]+([^}\s]+)\}\}/gi, (_, raw) => rollDice(raw));
-  const now = new Date();
-  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const p2 = (n) => String(n).padStart(2, "0");
-  out = ci(out, "time", now.toLocaleTimeString());
-  out = ci(out, "isotime", p2(now.getHours()) + ":" + p2(now.getMinutes()));
-  out = ci(out, "date", now.toLocaleDateString());
-  out = ci(out, "isodate", now.getFullYear() + "-" + p2(now.getMonth() + 1) + "-" + p2(now.getDate()));
-  out = ci(out, "weekday", days[now.getDay()]);
-  out = ci(out, "persona", mc.personaText || "");
-  out = ci(out, "user", mc.userName || "User");
-  out = ci(out, "char", mc.charName || "");
-  const card = mc.card || {};
-  out = ci(out, "description", card.description || "");
-  out = ci(out, "personality", card.personality || "");
-  out = ci(out, "scenario", card.scenario || "");
-  out = ci(out, "lastMessage", mc.lastMessage || "");
-  out = ci(out, "lastUserMessage", mc.lastUserMessage || "");
-  out = ci(out, "lastCharMessage", mc.lastCharMessage || "");
-  out = ci(out, "idle_duration", mc.idleText || "just now");
-  out = ci(out, "summary", mc.summary || "");
-  if (mc.words != null) {
-    out = ci(out, "words", String(mc.words));
-    out = ci(out, "limit", String(mc.words));
+  // older spellings: bare angle markers, and the time offset joined by "_"
+  if (out.indexOf("<") >= 0) {
+    out = out.replace(/<USER>/gi, "{{user}}").replace(/<(?:BOT|CHAR)>/gi, "{{char}}")
+      .replace(/<GROUP>/gi, "{{group}}").replace(/<CHARIFNOTGROUP>/gi, "{{charIfNotGroup}}");
   }
-  // {{trim}} eats its surrounding newlines; {{//…}} is a comment; {{newline}} is literal
+  if (out.indexOf("{{") < 0) return out;
+  out = out.replace(/\{\{time_(UTC[+-]\d+)\}\}/gi, "{{time::$1}}");
+  out = macroRun(out, mc || {}, 0);
   out = out.replace(/(?:\r?\n)*\{\{trim\}\}(?:\r?\n)*/gi, "");
-  out = out.replace(/\{\{\/\/[^}]*\}\}/gi, "");
-  out = ci(out, "newline", "\n");
-  return out;
+  // \{\{ and \}\} are how a prompt writes literal double braces
+  return out.replace(/\\\{\\\{/g, "{{").replace(/\\\}\\\}/g, "}}");
+}
+/** The card fields macros can read. */
+function macroCard(card) {
+  const f = (v) => (v ? String(v) : "");
+  return card ? {
+    description: f(card.description), personality: f(card.personality), scenario: f(card.scenario),
+    mesExamples: f(card.mes_example), systemPrompt: f(card.system_prompt), postHistory: f(card.post_history_instructions),
+    creatorNotes: f(card.creator_notes), version: f(card.character_version),
+  } : {};
+}
+// ---------- variables every chat shares ----------
+// One file, loaded once per route call.
+// Writes made while a prompt is assembled ride the stash with the chat's own
+// variables and land on disk when the turn commits (saveChat).
+let sharedVars = null;
+let sharedVarsSaved = "";
+function globalVars(fsx) {
+  if (!sharedVars) {
+    sharedVars = {};
+    try {
+      const j = JSON.parse(fsx.read("variables.json"));
+      if (j && typeof j === "object" && !Array.isArray(j)) sharedVars = j;
+    } catch { /* none yet */ }
+    sharedVarsSaved = JSON.stringify(sharedVars);
+  }
+  return sharedVars;
+}
+const globalVarsChanged = () => !!sharedVars && JSON.stringify(sharedVars) !== sharedVarsSaved;
+function saveGlobalVars(fsx) {
+  if (!globalVarsChanged()) return;
+  for (const k of Object.keys(sharedVars)) if (sharedVars[k] == null) delete sharedVars[k];
+  sharedVarsSaved = JSON.stringify(sharedVars);
+  fsx.write("variables.json", JSON.stringify(sharedVars, null, 2) + "\n");
 }
 /** Shared macro context for a chat's visible transcript (last-message
  *  macros, idle span) — used by assemble() and the swipe/greeting paths. */
@@ -154,6 +487,7 @@ function transcriptMacros(msgs, base) {
   const lastChar = [...vis].reverse().find((m) => m.role === "char");
   return {
     ...base,
+    lastMessageId: msgs.length ? msgs.length - 1 : "",
     lastMessage: vis.length ? String(vis[vis.length - 1].text || "") : "",
     lastUserMessage: lastUser ? String(lastUser.text || "") : "",
     lastCharMessage: lastChar ? String(lastChar.text || "") : "",
@@ -174,9 +508,10 @@ function macroEscapedContext(mc) {
   if (!mc || typeof mc !== "object") return mc;
   const esc = (v) => (typeof v === "string" ? escapeRegexLiteral(v) : v);
   const out = { ...mc };
-  for (const k of ["userName", "charName", "personaText", "chatId", "lastMessage", "lastUserMessage", "lastCharMessage", "idleText", "summary"]) out[k] = esc(out[k]);
+  for (const k of ["userName", "charName", "personaText", "chatId", "lastMessage", "lastUserMessage", "lastCharMessage", "idleText", "summary", "group", "groupNotMuted", "model", "input"]) out[k] = esc(out[k]);
   if (out.card && typeof out.card === "object") {
-    out.card = { ...out.card, description: esc(out.card.description), personality: esc(out.card.personality), scenario: esc(out.card.scenario) };
+    out.card = { ...out.card };
+    for (const k of Object.keys(out.card)) out.card[k] = esc(out.card[k]);
   }
   return out;
 }
@@ -214,7 +549,7 @@ function applyRegexScript(s, input, mc) {
   if (s.macroMode === "raw") find = expandMacros(find, mc);
   else if (s.macroMode === "escaped") find = expandMacros(find, macroEscapedContext(mc));
   let re;
-  try { re = new RegExp(find, s.flags || "g"); } catch { return String(input); }
+  try { re = new RegExp(find, s.flags ?? "g"); } catch { return String(input); }
   const trims = (Array.isArray(s.trimStrings) ? s.trimStrings : [])
     .map((t) => expandMacros(String(t), mc)).filter(Boolean);
   const trim = (v) => { let out = v; for (const t of trims) out = out.split(t).join(""); return out; };
@@ -297,12 +632,9 @@ function saveMacros(fsx, meta, msgs, speaker) {
     userName: chatUserName(fsx, meta),
     charName: speaker ? speaker.name : "",
     chatId: meta.id,
-    card: card ? {
-      description: card.description ? String(card.description) : "",
-      personality: card.personality ? String(card.personality) : "",
-      scenario: card.scenario ? String(card.scenario) : "",
-    } : {},
+    card: macroCard(card),
     vars: meta.chatVars || {},
+    globals: globalVars(fsx),
     summary: String(meta.summary || ""),
   });
 }
@@ -438,9 +770,9 @@ function saveWiVectors(fsx, map) {
 }
 function wiVectorKey(book, entry, i) { return (book.id || book.name) + "#" + (entry.uid ?? i); }
 
-/** Semantic prep shared by send/peek: the scan-window embedding text plus
- *  the bound books' vectorized entries that lack a cached vector. Returns
- *  null when neither semantic memories nor vectorized entries need work. */
+/** Semantic prep shared by send/peek: the bound books' vectorized entries
+ *  that lack a cached vector. Returns null when there are none, and no
+ *  embedding pass is paid for. */
 function semanticEmbedWork(fsx, meta, extraBookIds) {
   const vecMap = loadWiVectors(fsx);
   const needed = [];
@@ -465,9 +797,8 @@ function semanticEmbedWork(fsx, meta, extraBookIds) {
       if (text.trim()) needed.push({ key, hash, text });
     });
   }
-  const memVec = loadMemories(fsx, meta.id).some((e) => Array.isArray(e.vector));
-  if (!needed.length && !memVec) return null;
-  return { needed, memVec };
+  if (!needed.length) return null;
+  return { needed };
 }
 /** Store freshly embedded entry vectors into the sidecar cache. */
 function cacheWiVectorBatch(fsx, entries, vectors) {
@@ -488,10 +819,12 @@ function loadMemories(fsx, chatId) {
 function saveMemories(fsx, chatId, list) {
   fsx.write("chats/" + chatId + ".memories.json", JSON.stringify(list, null, 2) + "\n");
 }
-/** Which memories ride the prompt: pinned entries always, the rest by term
- *  density against the recent window (the same retrieval family as the data
- *  bank) with importance breaking ties, inside a character budget. */
-function recallMemories(list, scanText, budgetChars, maxEntries, scanVec) {
+/** Which memories ride the prompt: pinned entries always, the rest by the
+ *  words they share with the recent window (the same retrieval family as
+ *  the data bank) with importance breaking ties, inside a character budget.
+ *  Words only, on purpose: facts are short and few, and matching them by
+ *  meaning cost an embedding call on every send. */
+function recallMemories(list, scanText, budgetChars, maxEntries) {
   const low = String(scanText || "").toLowerCase();
   const picked = list.filter((e) => e.pinned === true);
   let used = picked.reduce((a, e) => a + e.text.length, 0);
@@ -499,21 +832,10 @@ function recallMemories(list, scanText, budgetChars, maxEntries, scanVec) {
   for (const e of list) {
     if (e.pinned === true) continue;
     const imp = typeof e.importance === "number" ? e.importance : 3;
-    // hybrid: lexical term density and (when vectors exist on both sides)
-    // cosine similarity — either can qualify a memory, the best score wins
-    let score = null;
     const words = String(e.text).toLowerCase().match(/[a-z0-9']{4,}/g) || [];
     const keys = [...new Set(words.filter((w) => !DB_STOPWORDS.has(w)))];
     const hits = keys.length ? keys.filter((w) => low.includes(w)).length : 0;
-    if (hits > 0) score = hits * 10 + imp;
-    if (scanVec && Array.isArray(e.vector)) {
-      const c = cosine(e.vector, scanVec);
-      if (c != null) {
-        const sem = c * 12 + imp; // a strong semantic match (~0.8) outranks one keyword hit
-        if (c >= 0.3) score = score == null ? sem : Math.max(score, sem);
-      }
-    }
-    if (score != null) scored.push({ e, score });
+    if (hits > 0) scored.push({ e, score: hits * 10 + imp });
   }
   scored.sort((a, b) => b.score - a.score);
   for (const { e } of scored) {
@@ -945,6 +1267,7 @@ function saveChat(fsx, id, meta, msgs) {
   meta.updatedAt = Date.now();
   fsx.write("chats/" + id + ".jsonl", msgs.map((m) => JSON.stringify(m)).join("\n") + (msgs.length ? "\n" : ""));
   fsx.write("chats/" + id + ".meta.json", JSON.stringify(meta, null, 2) + "\n");
+  saveGlobalVars(fsx);
 }
 
 // ---------- prompt assembly ----------
@@ -1123,12 +1446,15 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
     charName,
     personaText: persona ? String(persona.description || "") : "",
     chatId: meta.id,
-    card: {
-      description: speakerCard && speakerCard.description ? String(speakerCard.description) : "",
-      personality: speakerCard && speakerCard.personality ? String(speakerCard.personality) : "",
-      scenario: speakerCard && speakerCard.scenario ? String(speakerCard.scenario) : "",
-    },
+    card: macroCard(speakerCard),
     vars: meta.chatVars || (meta.chatVars = {}),
+    // a peek must not change what the next real turn reads
+    globals: opts && opts.dryRun ? { ...globalVars(fsx) } : globalVars(fsx),
+    model: String((opts && opts.model) || meta.model || (() => { try { return JSON.parse(fsx.read("settings.json")).model; } catch { return ""; } })() || ""),
+    genType: genTypes[0],
+    maxContext: preset && preset.openai_max_context != null ? preset.openai_max_context : null,
+    maxResponse: preset && preset.openai_max_tokens != null ? preset.openai_max_tokens : null,
+    input: pendingUserText ? String(pendingUserText) : "",
     summary: String(meta.summary || ""),
   });
 
@@ -1139,6 +1465,11 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   // not just the speaker's — muted members stay out unless they're speaking.
   let groupCfg = null;
   if (meta.groupId) { try { groupCfg = JSON.parse(fsx.read("groups/" + meta.groupId + ".json")); } catch {} }
+  if (isGroup) {
+    const mutedIds = (groupCfg && groupCfg.mutedIds) || [];
+    mc.group = members.map((m) => m.name).join(", ");
+    mc.groupNotMuted = members.filter((m) => !mutedIds.includes(m.id)).map((m) => m.name).join(", ");
+  }
   const rosterMembers = isGroup && groupCfg && groupCfg.generationMode === "append"
     ? members.filter((m) => !((groupCfg.mutedIds || []).includes(m.id)) || (speaker && m.id === speaker.id))
     : [];
@@ -1280,7 +1611,7 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   // cutoffs and summaries
   const memCfg = (() => { try { return (JSON.parse(fsx.read("settings.json")).ui || {}).memory || {}; } catch { return {}; } })();
   if (memCfg.enabled !== false) {
-    const mems = recallMemories(loadMemories(fsx, meta.id), dbScan, 1500, 8, opts && opts.scanVec ? opts.scanVec : null);
+    const mems = recallMemories(loadMemories(fsx, meta.id), dbScan, 1500, 8);
     if (mems.length) {
       extras.push({ role: "system", content: "[Long-term memories — durable facts from this chat]\n" + mems.map((e) => "- " + e.text).join("\n") });
     }
@@ -1792,10 +2123,11 @@ function buildZip(files) {
 // the runtime's `stash` (pass A returns it, pass B receives it on ctx).
 const pendingOut = (meta, extra) => ({
   __llmPending: true,
-  ...((meta.chatVars && Object.keys(meta.chatVars).length) || (meta.wiTimed && Object.keys(meta.wiTimed).length) || extra
+  ...((meta.chatVars && Object.keys(meta.chatVars).length) || (meta.wiTimed && Object.keys(meta.wiTimed).length) || globalVarsChanged() || extra
     ? {
         stash: {
           ...(meta.chatVars && Object.keys(meta.chatVars).length ? { vars: meta.chatVars } : {}),
+          ...(globalVarsChanged() ? { globals: sharedVars } : {}),
           ...(meta.wiTimed && Object.keys(meta.wiTimed).length ? { wiTimed: meta.wiTimed } : {}),
           ...(extra && typeof extra === "object" ? extra : {}),
         },
@@ -1804,9 +2136,16 @@ const pendingOut = (meta, extra) => ({
 });
 function applyStashVars(req, meta) {
   const v = req && req.stash && req.stash.vars;
-  if (v && typeof v === "object" && Object.keys(v).length) meta.chatVars = { ...meta.chatVars, ...v };
+  if (v && typeof v === "object" && Object.keys(v).length) {
+    meta.chatVars = { ...meta.chatVars, ...v };
+    // a deleted variable travels as null so the merge can drop it
+    for (const k of Object.keys(meta.chatVars)) if (meta.chatVars[k] == null) delete meta.chatVars[k];
+  }
   const t = req && req.stash && req.stash.wiTimed;
   if (t && typeof t === "object") meta.wiTimed = t;
+  // shared variables written in pass A: adopt them so the save that follows writes them
+  const g = req && req.stash && req.stash.globals;
+  if (g && typeof g === "object" && !Array.isArray(g)) { sharedVars = g; sharedVarsSaved = ""; }
 }
 // The kernel synthesizes {model:"error", error} when the provider call throws
 // (content filter, bad key, transport failure) — surface that cause instead of
@@ -1816,9 +2155,60 @@ function llmFailReason(reply) {
   return cause || "Model failed. Check the connection in Settings.";
 }
 
-// ---------- summarization default ----------
+// ---------- summaries (the story above the cutoff, in parts) ----------
 // Used when settings.json carries no summary prompt of its own.
-const DEFAULT_SUMMARY_PROMPT = "You keep the running summary of a roleplay between {{user}} and {{char}}. Rewrite it so it covers everything so far: the summary you are given plus the new messages. Keep names, relationships, promises, places, possessions, injuries, and unresolved threads; drop small talk and repetition. Past tense, third person, plain prose, at most {{words}} words. Reply with only the summary.";
+const DEFAULT_SUMMARY_PROMPT = "You keep notes on a roleplay between {{user}} and {{char}}. Summarize only the messages you are given. Earlier summaries are context: do not repeat what they already say. Keep names, relationships, promises, places, possessions, injuries, and unresolved threads; drop small talk and repetition. Past tense, third person, plain prose, at most {{words}} words. Reply with only the summary.";
+// How the default began when one summary was rewritten on every compaction.
+// A settings file still carrying it gets the current default instead: that
+// wording asks for the whole story again, which is what parts avoid.
+const RETIRED_SUMMARY_PROMPT = "You keep the running summary of a roleplay between {{user}} and {{char}}. Rewrite it so it covers everything so far";
+const MERGE_SUMMARY_PROMPT = "These are consecutive summaries of one roleplay, oldest first. Combine them into a single summary. Keep names, relationships, promises, places, possessions, injuries, and unresolved threads, and keep events in order; add nothing new. Past tense, third person, plain prose, at most {{words}} words. Reply with only the summary.";
+const countWords = (t) => (String(t || "").trim().match(/\S+/g) || []).length;
+/** A chat's summaries, oldest first. Each covers its own stretch of messages
+ *  (`from` up to, not including, `to`) and is written once: a later
+ *  compaction adds a part, it never rewrites one. meta.summary is always
+ *  their text joined, which is what the prompt and {{summary}} read. A
+ *  summary written straight into meta.summary (an older chat, or an edit on
+ *  disk) counts as one part. */
+function summaryParts(meta) {
+  const parts = (Array.isArray(meta.summaryParts) ? meta.summaryParts : [])
+    .filter((p) => p && typeof p.text === "string" && p.text.trim());
+  const flat = String(meta.summary || "").trim();
+  if (flat === parts.map((p) => p.text.trim()).join("\n\n")) return parts;
+  return flat ? [{ id: "s0", text: flat }] : [];
+}
+function setSummaryParts(meta, parts) {
+  const clean = parts.filter((p) => p && typeof p.text === "string" && p.text.trim());
+  if (clean.length) meta.summaryParts = clean; else delete meta.summaryParts;
+  meta.summary = clean.map((p) => p.text.trim()).join("\n\n");
+}
+
+// ---------- a scene kept as a lorebook entry ----------
+const SCENE_ENTRY_PROMPT = [
+  "You turn one scene of a roleplay into a lorebook entry, so it comes back later when the story touches on it again.",
+  "Write what happened and what changed: who was there, where, what was decided or promised, injuries, objects that changed hands, how the people involved now stand with each other. Past tense, third person, plain prose, at most 150 words. Use names.",
+  "Also give 3 to 6 keys: names, places, objects or distinctive words that would come up when this scene matters again. {{user}} or {{char}} alone is not a key, since it would match every message.",
+  'Reply with ONLY a JSON object: {"title": "a short title", "keys": ["key one", "key two"], "content": "the entry"}',
+].join("\n");
+/** The draft a scene request came back with, or null. A reply that is not
+ *  JSON is still an entry: its text becomes the content. */
+function parseSceneReply(text) {
+  const s = String(text || "").trim();
+  if (!s) return null;
+  const a = s.indexOf("{"), z = s.lastIndexOf("}");
+  if (a >= 0 && z > a) {
+    try {
+      const o = JSON.parse(s.slice(a, z + 1));
+      const content = String((o && o.content) || "").trim();
+      if (content) {
+        const keys = (Array.isArray(o.keys) ? o.keys : String(o.keys || "").split(","))
+          .map((k) => String(k).trim()).filter(Boolean);
+        return { title: String(o.title || "").trim().slice(0, 120), keys: [...new Set(keys)].slice(0, 8), content: content.slice(0, 4000) };
+      }
+    } catch {}
+  }
+  return { title: "", keys: [], content: s.slice(0, 4000) };
+}
 
 // ---------- route handler ----------
 // A sprite the caller did not send back keeps the image already on disk. The
@@ -2097,8 +2487,81 @@ function editReplayThinking(replay, text, thinkingIndex) {
   return { ...replay, messages };
 }
 
+function chatSearchTerms(query) {
+  return Array.from(new Set((String(query).toLowerCase().match(/"[^"]+"|[^\s"]+/g) || [])
+    .map((term) => term.replace(/^"|"$/g, "").trim()).filter(Boolean)));
+}
+
+function searchChatLibrary(fsx, options) {
+  const terms = chatSearchTerms(options.query);
+  const mode = options.mode || "all";
+  const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+  const limit = Math.max(1, Math.min(50, Math.floor(Number(options.limit) || 30)));
+  const errors = [];
+  const metas = fsx.list("chats").filter((f) => f.endsWith(".meta.json")).map((file) => {
+    try { return JSON.parse(fsx.read("chats/" + file)); }
+    catch { errors.push({ chatId: file.replace(/\.meta\.json$/, ""), error: "Unreadable chat details" }); return null; }
+  }).filter((meta) => meta && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(meta.id)
+    && (!options.folderId || meta.folderId === options.folderId)
+    && (!options.characterId || (meta.groupId || meta.characterId) === options.characterId))
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+  const names = new Map();
+  const results = [];
+  let total = 0;
+  for (const meta of metas) {
+    const ownerId = meta.groupId || meta.characterId;
+    if (!names.has(ownerId)) {
+      let name = "";
+      try { name = JSON.parse(fsx.read("characters/" + meta.characterId + "/card.json")).name || ""; } catch {}
+      if (!name && meta.groupId) { try { name = JSON.parse(fsx.read("groups/" + meta.groupId + ".json")).name || ""; } catch {} }
+      names.set(ownerId, name);
+    }
+    const fields = mode === "messages" ? [] : [meta.title, names.get(ownerId)];
+    const found = new Set();
+    for (const term of terms) if (fields.some((field) => String(field || "").toLowerCase().includes(term))) found.add(term);
+    let matchCount = 0;
+    let messageCount = 0;
+    let preview = "";
+    const snippets = [];
+    let unreadable = false;
+    if (mode !== "titles" || terms.every((term) => found.has(term))) {
+      let transcript;
+      try { transcript = fsx.read("chats/" + meta.id + ".jsonl"); }
+      catch { errors.push({ chatId: meta.id, error: "Transcript unavailable" }); continue; }
+      for (const line of transcript.split("\n")) {
+        if (!line.trim()) continue;
+        let message;
+        try { message = JSON.parse(line); } catch { if (!unreadable) errors.push({ chatId: meta.id, error: "Unreadable message" }); unreadable = true; continue; }
+        messageCount++;
+        const active = Array.isArray(message.swipes) ? message.swipes[message.swipe ?? 0] : undefined;
+        const text = typeof active === "string" ? active : typeof active?.text === "string" ? active.text : typeof active?.content === "string" ? active.content : String(message.text || "");
+        preview = text.slice(0, 160);
+        if (mode === "titles" || message.picture === true) continue;
+        const lower = text.toLowerCase();
+        const hits = terms.filter((term) => lower.includes(term));
+        if (!hits.length) continue;
+        hits.forEach((term) => found.add(term));
+        matchCount++;
+        const at = Math.min(...hits.map((term) => lower.indexOf(term)));
+        const start = Math.max(0, at - 70);
+        const snippet = (start ? "…" : "") + text.slice(start, start + 240) + (text.length > start + 240 ? "…" : "");
+        snippets.push({ messageId: message.id || null, text: snippet, role: message.role || "char" });
+        if (snippets.length > 3) snippets.shift();
+      }
+    }
+    if (!terms.every((term) => found.has(term))) continue;
+    total++;
+    if (total > offset && results.length < limit) results.push({ meta: { ...meta, messageCount, preview }, matchCount, snippets });
+  }
+  return { total, offset, limit, results, errors };
+}
+
 export function handleRoute(req, host) {
   const fsx = host.fs;
+  // a host that keeps the module loaded between calls must not hand one
+  // call's shared variables to the next
+  sharedVars = null;
+  sharedVarsSaved = "";
   const seg = req.path.split("?")[0].split("/").filter(Boolean);
   const head = seg[0];
   const id = seg[1];
@@ -2406,7 +2869,12 @@ export function handleRoute(req, host) {
         const card = readJson("characters/" + cid + "/card.json", null);
         if (!card) continue;
         const file = uname(slug(card.name || cid), ".json");
-        files.push({ name: "characters/" + file, text: JSON.stringify(portableMedia(card, fsx), null, 2) });
+        const backupCard = portableMedia(card, fsx);
+        if (backupCard.extensions?.regex_scripts) {
+          backupCard.extensions = { ...backupCard.extensions };
+          delete backupCard.extensions.regex_scripts;
+        }
+        files.push({ name: "characters/" + file, text: JSON.stringify(backupCard, null, 2) });
         chars.push({ id: cid, slug: file.replace(/\.json$/, ""), name: card.name });
       }
     } catch {}
@@ -2429,7 +2897,11 @@ export function handleRoute(req, host) {
     try {
       for (const f of fsx.list("presets").filter((x) => x.endsWith(".json"))) {
         const preset = readJson("presets/" + f, null);
-        if (preset) presets[preset.name || f.replace(/\.json$/, "")] = preset;
+        if (preset) {
+          const copy = { ...preset, extensions: { ...preset.extensions } };
+          delete copy.extensions.regex_scripts;
+          presets[preset.name || f.replace(/\.json$/, "")] = copy;
+        }
       }
     } catch {}
     if (Object.keys(presets).length) files.push({ name: "User Settings/openai_settings.json", text: JSON.stringify(presets, null, 2) });
@@ -2439,12 +2911,16 @@ export function handleRoute(req, host) {
         if (!s) continue;
         const ax = regexAxes(s);
         const NUM = { user_input: 1, ai_output: 2, slash: 3, wi: 5, reasoning: 6 };
-        const rid2 = slug(s.scriptName || f);
+        const rid2 = unameIn("User Settings/regex", slug(s.scriptName || f), ".json").replace(/\.json$/, "");
+        const scope = s.scope || "global";
+        const target = scope === "character" ? readJson("characters/" + s.scopeTargetId + "/card.json", null)
+          : scope === "preset" ? readJson("presets/" + s.scopeTargetId + ".json", null) : null;
         files.push({
           name: "User Settings/regex/" + rid2 + ".json",
           text: JSON.stringify({
             id: rid2, scriptName: s.scriptName || rid2,
-            findRegex: "/" + String(s.findRegex || "").replace(/(?<!\\)\//g, "\\/") + "/" + (s.flags || "g"),
+            _studioScope: { scope, targetName: target?.name || null, chatId: scope === "chat" ? s.scopeTargetId : null, order: s.order ?? 0 },
+            findRegex: "/" + String(s.findRegex || "").replace(/(?<!\\)\//g, "\\/") + "/" + (s.flags ?? "g"),
             replaceString: s.replaceString || "",
             trimStrings: Array.isArray(s.trimStrings) ? s.trimStrings : [],
             placement: ax.where.map((p) => NUM[p]).filter(Boolean),
@@ -2633,6 +3109,9 @@ export function handleRoute(req, host) {
       }, null, 2),
     });
     files.push({ name: "library.json", text: JSON.stringify(readJson("library.json", {}), null, 2) });
+    // shared variables are state a preset can depend on; an empty set is not worth a file
+    const shared = readJson("variables.json", {});
+    if (shared && typeof shared === "object" && Object.keys(shared).length) files.push({ name: "variables.json", text: JSON.stringify(shared, null, 2) });
     return ok({ filename: "studio-backup-" + new Date().toISOString().slice(0, 10) + ".zip", base64: buildZip(files.map((file) => { if (!/\.json$/.test(file.name)) return file; try { return { ...file, text: JSON.stringify(portableMedia(JSON.parse(file.text), fsx)) }; } catch { return file; } })) });
   }
 
@@ -2766,6 +3245,14 @@ export function handleRoute(req, host) {
 
     // ---------- chats ----------
   if (head === "chats") {
+    if (req.method === "POST" && id === "search") {
+      const b = body();
+      if (typeof b.query !== "string" || !b.query.trim()) return err(400, "Search text required");
+      if (b.query.length > 200) return err(400, "Search text is too long");
+      if (!chatSearchTerms(b.query).length) return err(400, "Search text required");
+      if (b.mode && !["all", "messages", "titles"].includes(b.mode)) return err(400, "Invalid search mode");
+      try { return ok(searchChatLibrary(fsx, b)); } catch { return err(500, "Could not search chats"); }
+    }
     if (req.method === "GET" && !id) {
       let metas = [];
       try {
@@ -2957,10 +3444,22 @@ const toolX = (r) => ({
       const keys = ["title", "presetId", "personaId", "model", "authorNote", "lorebookIds", "chatLorebookIds", "userName", "characterId", "groupId",
         "authorNoteObject", "folderId", "chatTags", "backgroundId", "temporary", "summary",
         "memoryCutoffMessageId", "parentChatId", "parentMessageId"];
-      if (keys.every((k) => !(k in b) || same(b[k], meta[k]))) return ok(meta);
+      // summaries edited in place: [{ id, text }] in order. A part keeps the
+      // stretch it covers; one left out or emptied is gone.
+      const partsIn = Array.isArray(b.summaryParts) ? b.summaryParts : null;
+      if (!partsIn && keys.every((k) => !(k in b) || same(b[k], meta[k]))) return ok(meta);
       const prevPersonaId = meta.personaId;
+      const partsNow = partsIn ? summaryParts(meta) : null;
       for (const k of keys) {
         if (k in b) meta[k] = b[k];
+      }
+      if (partsIn) {
+        setSummaryParts(meta, partsIn.map((p) => {
+          const known = p && partsNow.find((x) => x.id === p.id);
+          return known ? { ...known, text: String(p.text || "") } : null;
+        }));
+      } else if ("summary" in b) {
+        setSummaryParts(meta, summaryParts(meta));
       }
       // switching personas only affects NEW messages ({{user}}, staged turns):
       // past user messages keep the name they were sent under — a chat can
@@ -3033,7 +3532,7 @@ const toolX = (r) => ({
         }
         if (!speaker) return err(400, "chat has no participating characters");
         const staged = userMsg ? [...chat.msgs, userMsg] : chat.msgs;
-        // semantic prep: when memory vectors or vectorized entries exist,
+        // semantic prep: when a bound book has vectorized entries,
         // embed the scan window (+ uncached entries) first — one extra pass
         if (host.llm.embed && embedCap(fsx)) {
           const scanEmbedText = (text ? text + "\n" : "") + staged.slice(-4).map((m) => m.text || "").join("\n");
@@ -3062,7 +3561,7 @@ const toolX = (r) => ({
           }
         }
         const scanVecSend = host.llm.embedResults && Array.isArray(host.llm.embedResults.scan) && host.llm.embedResults.scan[0] ? host.llm.embedResults.scan[0] : null;
-        const a = assemble(fsx, meta, staged, speaker, text, { scanVec: scanVecSend, gen: "send" });
+        const a = assemble(fsx, meta, staged, speaker, text, { scanVec: scanVecSend, gen: "send", model: modelOf() });
         host.llm.request("reply", {
           sessionId: id,
           messages: a.messages,
@@ -3213,14 +3712,14 @@ const toolX = (r) => ({
       // navigate existing swipes (greeting rotation wraps on pristine chats)
       const pristineGreeting = !meta.tainted && chat.msgs.length === 1 && msg.greeting === true;
       if (next >= 0 && next < swipes.length) {
-        const text = expandMacros(String(swipes[next]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), summary: String(meta.summary || "") }));
+        const text = expandMacros(String(swipes[next]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), globals: globalVars(fsx), summary: String(meta.summary || "") }));
         chat.msgs[idx] = { ...msg, text, swipe: next, swipes, translation: undefined, extra: restoreSwipeThinking(syncSwipeThinking(msg, false).extra, next) };
         saveChat(fsx, id, touch(meta), chat.msgs);
         return ok({ message: chat.msgs[idx], swipe: next, count: swipes.length });
       }
       if (pristineGreeting && (next < 0 || next >= swipes.length)) {
         const wrapped = ((next % swipes.length) + swipes.length) % swipes.length;
-        const text = expandMacros(String(swipes[wrapped]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), summary: String(meta.summary || "") }));
+        const text = expandMacros(String(swipes[wrapped]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), globals: globalVars(fsx), summary: String(meta.summary || "") }));
         chat.msgs[idx] = { ...msg, text, swipe: wrapped, swipes, translation: undefined };
         saveChat(fsx, id, touch(meta), chat.msgs);
         return ok({ message: chat.msgs[idx], swipe: wrapped, count: swipes.length });
@@ -3235,7 +3734,7 @@ const toolX = (r) => ({
       const speaker = members.find((m) => m.id === msg.charId) || members[0] || null;
       if (!speaker) return err(400, "speaker character missing");
       if (!reply) {
-        const a = assemble(fsx, meta, before, speaker, null, { gen: "swipe" });
+        const a = assemble(fsx, meta, before, speaker, null, { gen: "swipe", model: modelOf() });
         host.llm.request("reply", {
           sessionId: id,
           messages: a.messages,
@@ -3338,7 +3837,7 @@ const toolX = (r) => ({
       if (reply && ((guard.expectedSwipes != null && (msg.swipes || [msg.text]).length !== guard.expectedSwipes) ||
           (guard.expectedText != null && msg.text !== guard.expectedText))) return err(409, "target message changed");
       if (!reply) {
-        const a = assemble(fsx, meta, chat.msgs, speaker, null, { gen: "continue" });
+        const a = assemble(fsx, meta, chat.msgs, speaker, null, { gen: "continue", model: modelOf() });
         // continue nudge: preset utility prompt (blank = plain continue, no
         // nudge appended — no hidden default text)
         const preset = readJson("presets/" + (meta.presetId || "default") + ".json", null);
@@ -3519,46 +4018,38 @@ const toolX = (r) => ({
         });
         return pendingOut(meta);
       }
-      // pass C: the embedding of the new facts resolved (or the provider
-      // can't embed) — store with whatever vectors arrived
-      if (req.stash && req.stash.memExtract) {
-        const { list, added } = req.stash.memExtract;
-        const vecs = host.llm.embedResults ? host.llm.embedResults.mem : null;
-        if (Array.isArray(vecs)) {
-          added.forEach((e, i) => { if (vecs[i] && Array.isArray(vecs[i])) e.vector = vecs[i]; });
-          setEmbedCap(fsx, true);
-        } else {
-          setEmbedCap(fsx, false);
-        }
-        saveMemories(fsx, id, list);
-        return ok({ added, total: list.length });
-      }
       if (reply.model === "error") return err(503, llmFailReason(reply));
       const incoming = parseMemoriesReply(reply.text);
       if (!incoming.length) return err(422, "the model returned no extractable facts");
       const { list, added } = mergeMemories(loadMemories(fsx, id), incoming);
-      // embed the new facts so recall can match by meaning, not just words
-      if (added.length && host.llm.embed && embedCap(fsx)) {
-        host.llm.embed("mem", { texts: added.map((e) => e.text) });
-        return pendingOut(meta, { memExtract: { list, added } });
-      }
       saveMemories(fsx, id, list);
       return ok({ added, total: list.length });
     }
 
-    // ---------- compaction: the running summary + the cutoff ----------
+    // ---------- compaction: summaries + the cutoff ----------
     // Messages above the cutoff stay in the chat but leave the prompt; the
-    // summary stands in for them. Compacting folds the next stretch into the
-    // summary and moves the cutoff down, keeping the newest turns verbatim.
-    // Each compaction remembers the state before it, so undo restores it
-    // exactly and redo rewrites the latest summary from the same start.
+    // summaries stand in for them. Compacting writes ONE new summary for the
+    // next stretch and moves the cutoff down, keeping the newest turns
+    // verbatim. Earlier summaries are never rewritten by it, so old detail
+    // does not wear away a little with every compaction. Only when the list
+    // outgrows its word budget are the oldest ones merged into one.
+    // Each compaction remembers what it did, so undo takes it back exactly;
+    // redo rewrites the latest summary over the same messages.
     //   POST /chats/:id/compact       { keepRecent?, upTo?, redo? }
     //   POST /chats/:id/compact/undo
     if (op === "compact" && seg[3] === "undo" && !seg[4] && req.method === "POST") {
       const history = Array.isArray(meta.compactions) ? meta.compactions.slice() : [];
       const prev = history.pop();
       if (!prev) return err(400, "nothing to undo");
-      meta.summary = String(prev.summary || "");
+      if (typeof prev.add === "string") {
+        const parts = summaryParts(meta).filter((p) => p.id !== prev.add);
+        const at = prev.merged ? parts.findIndex((p) => p.id === prev.merged.id) : -1;
+        if (at >= 0 && Array.isArray(prev.merged.parts)) parts.splice(at, 1, ...prev.merged.parts);
+        setSummaryParts(meta, parts);
+      } else {
+        // recorded when one summary was rewritten each time: it comes back whole
+        setSummaryParts(meta, [{ id: "s0", text: String(prev.summary || "") }]);
+      }
       meta.memoryCutoffMessageId = prev.cutoffMessageId || null;
       meta.compactions = history;
       saveChat(fsx, id, touch(meta), chat.msgs);
@@ -3568,26 +4059,29 @@ const toolX = (r) => ({
       const b = body();
       const scfg = (readJson("settings.json", {}).ui || {}).summary || {};
       const history = Array.isArray(meta.compactions) ? meta.compactions : [];
+      const parts = summaryParts(meta);
       const indexOf = (mid) => (mid ? Math.max(0, chat.msgs.findIndex((m) => m.id === mid)) : 0);
       const turnsIn = (from, to) => chat.msgs.slice(from, to).filter((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);
       const redo = b.redo === true;
-      let fromIdx, toIdx, base;
+      let fromIdx, toIdx;
+      // what the new summary is written against: every summary before it
+      let earlier = parts;
       if (redo) {
-        const prev = history[history.length - 1];
-        if (!prev) return err(400, "nothing to redo");
-        fromIdx = indexOf(prev.cutoffMessageId);
-        toIdx = indexOf(meta.memoryCutoffMessageId);
-        base = String(prev.summary || "");
+        const last = parts[parts.length - 1];
+        if (!last) return err(400, "nothing to redo");
+        if (!last.to) return err(400, "the latest summary was not written from a stretch of messages");
+        fromIdx = indexOf(last.from);
+        toIdx = chat.msgs.findIndex((m) => m.id === last.to);
+        if (toIdx < 0) return err(409, "the messages the latest summary covered are gone");
+        earlier = parts.slice(0, -1);
       } else if (req.stash && req.stash.compact) {
         // pass B folds exactly the stretch pass A chose, even if a message
         // landed in between
         fromIdx = indexOf(req.stash.compact.from);
         toIdx = chat.msgs.findIndex((m) => m.id === req.stash.compact.to);
         if (toIdx < 0) return err(409, "the chat changed while summarizing; try again");
-        base = String(meta.summary || "");
       } else {
         fromIdx = indexOf(meta.memoryCutoffMessageId);
-        base = String(meta.summary || "");
         if (typeof b.upTo === "string" && b.upTo) {
           toIdx = chat.msgs.findIndex((m) => m.id === b.upTo);
           if (toIdx < 0) return err(404, "message not found");
@@ -3604,43 +4098,112 @@ const toolX = (r) => ({
       }
       const covered = toIdx > fromIdx ? turnsIn(fromIdx, toIdx) : [];
       if (!covered.length) return err(400, redo ? "the latest summary covers no messages" : "nothing new to summarize yet");
+      const words = Math.max(25, Math.floor(Number(scfg.targetLength) || 300));
       const reply = host.llm.results.summary;
       if (!reply) {
         const { userName } = chatPersona(fsx, meta);
         const charName = (members[0] && members[0].name) || "";
-        const words = Math.max(25, Math.floor(Number(scfg.targetLength) || 300));
-        const instructions = String(typeof scfg.prompt === "string" && scfg.prompt.trim() ? scfg.prompt : DEFAULT_SUMMARY_PROMPT)
+        const fill = (t) => String(t)
           .split("{{words}}").join(String(words)).split("{{limit}}").join(String(words))
-          .split("{{user}}").join(userName).split("{{char}}").join(charName)
-          .split("{{summary}}").join(base);
+          .split("{{user}}").join(userName).split("{{char}}").join(charName);
+        const own = typeof scfg.prompt === "string" && scfg.prompt.trim() && !scfg.prompt.startsWith(RETIRED_SUMMARY_PROMPT);
+        const before = earlier.map((p) => p.text.trim()).join("\n\n");
         const transcript = covered.map((m) => (m.role === "user" ? m.name || userName : m.name || charName) + ": " + String(m.text || "")).join("\n\n");
+        const model = memoryModelOf() ? { model: memoryModelOf() } : {};
         host.llm.request("summary", {
           messages: [
-            { role: "system", content: instructions },
-            { role: "user", content: (base.trim() ? "Summary so far:\n" + base.trim() + "\n\n" : "") + "Messages to fold in:\n\n" + transcript },
+            { role: "system", content: fill(own ? scfg.prompt : DEFAULT_SUMMARY_PROMPT).split("{{summary}}").join(before) },
+            { role: "user", content: (before ? "Earlier in the story, already summarized (context only):\n" + before + "\n\n" : "") + "Messages to summarize:\n\n" + transcript },
           ],
-          ...(memoryModelOf() ? { model: memoryModelOf() } : {}),
+          ...model,
         });
-        return pendingOut(meta, redo ? undefined : { compact: { from: (chat.msgs[fromIdx] || {}).id || null, to: chat.msgs[toIdx].id } });
+        // The list has a word budget. When this summary would take it past
+        // that, the oldest half is merged into one in the same pass. The
+        // newest summary is never part of a merge.
+        let merge = null;
+        const budget = Math.max(words * 2, Math.floor(Number(scfg.maxWords) || 1500));
+        if (!redo && parts.length >= 3 && parts.reduce((n, p) => n + countWords(p.text), 0) + words > budget) {
+          const old = parts.slice(0, Math.max(2, Math.floor(parts.length / 2)));
+          merge = old.map((p) => p.id);
+          host.llm.request("merge", {
+            messages: [
+              { role: "system", content: fill(MERGE_SUMMARY_PROMPT) },
+              { role: "user", content: old.map((p, i) => "Summary " + (i + 1) + ":\n" + p.text.trim()).join("\n\n") },
+            ],
+            ...model,
+          });
+        }
+        return pendingOut(meta, redo ? undefined : { compact: { from: (chat.msgs[fromIdx] || {}).id || null, to: chat.msgs[toIdx].id, merge } });
       }
       if (reply.model === "error") return err(503, llmFailReason(reply));
       const text = String(reply.text || "").trim();
       if (!text) return err(502, "the model returned an empty summary");
-      if (!redo) {
-        meta.compactions = [...history, { summary: String(meta.summary || ""), cutoffMessageId: meta.memoryCutoffMessageId || null, at: Date.now() }].slice(-20);
+      if (redo) {
+        setSummaryParts(meta, [...earlier, { ...parts[parts.length - 1], text, at: Date.now() }]);
+      } else {
+        const record = { add: uid("sum"), cutoffMessageId: meta.memoryCutoffMessageId || null, at: Date.now() };
+        let next = parts.slice();
+        // a merge that failed or came back empty is skipped, not fatal: the
+        // list just stays long until the next compaction tries again
+        const ids = req.stash && req.stash.compact && Array.isArray(req.stash.compact.merge) ? req.stash.compact.merge : null;
+        const mergeReply = host.llm.results.merge;
+        const mergedText = mergeReply && mergeReply.model !== "error" ? String(mergeReply.text || "").trim() : "";
+        if (ids && mergedText && ids.every((pid, i) => next[i] && next[i].id === pid)) {
+          const old = next.slice(0, ids.length);
+          const one = {
+            id: uid("sum"), text: mergedText, from: old[0].from || null, to: old[old.length - 1].to || null, at: Date.now(),
+            merged: old.reduce((n, p) => n + (p.merged || 1), 0),
+          };
+          next = [one, ...next.slice(ids.length)];
+          record.merged = { id: one.id, parts: old };
+        }
+        next.push({ id: record.add, text, from: meta.memoryCutoffMessageId || null, to: chat.msgs[toIdx].id, at: Date.now() });
+        setSummaryParts(meta, next);
+        meta.compactions = [...history, record].slice(-20);
         meta.memoryCutoffMessageId = chat.msgs[toIdx].id;
       }
-      meta.summary = text;
       applyStashVars(req, meta);
       saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
-      return ok({ summary: text, cutoffMessageId: meta.memoryCutoffMessageId, covered: covered.length, compactions: meta.compactions.length, genMs: reply.genTimeMs ?? 0 });
+      return ok({ summary: text, parts: summaryParts(meta).length, cutoffMessageId: meta.memoryCutoffMessageId, covered: covered.length, compactions: (meta.compactions || []).length, genMs: reply.genTimeMs ?? 0 });
+    }
+
+    // ---------- a scene kept as a lorebook entry ----------
+    // Drafts an entry (title, keys, content) from a stretch of the chat.
+    // Nothing is saved here: the caller edits the draft and puts it in a
+    // lorebook, where the usual key scan brings it back.
+    //   POST /chats/:id/scene   { from, to }   message ids, both included
+    if (op === "scene" && !seg[3] && req.method === "POST") {
+      const b = body();
+      const a = chat.msgs.findIndex((m) => m.id === b.from);
+      const z = chat.msgs.findIndex((m) => m.id === b.to);
+      if (a < 0 || z < 0) return err(404, "message not found");
+      const span = chat.msgs.slice(Math.min(a, z), Math.max(a, z) + 1)
+        .filter((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);
+      if (!span.length) return err(400, "no messages in that range");
+      const reply = host.llm.results.scene;
+      if (!reply) {
+        const { userName } = chatPersona(fsx, meta);
+        const charName = (members[0] && members[0].name) || "";
+        host.llm.request("scene", {
+          messages: [
+            { role: "system", content: SCENE_ENTRY_PROMPT.split("{{user}}").join(userName).split("{{char}}").join(charName) },
+            { role: "user", content: span.map((m) => (m.role === "user" ? m.name || userName : m.name || charName) + ": " + String(m.text || "").slice(0, 6000)).join("\n\n") },
+          ],
+          ...(memoryModelOf() ? { model: memoryModelOf() } : {}),
+        });
+        return pendingOut(meta);
+      }
+      if (reply.model === "error") return err(503, llmFailReason(reply));
+      const draft = parseSceneReply(reply.text);
+      if (!draft) return err(502, "the model returned nothing to keep");
+      return ok({ draft, covered: span.length });
     }
 
     // impersonate: draft the user's next message — NEVER written
     if (op === "impersonate" && req.method === "POST") {
       const reply = host.llm.results.reply;
       if (!reply) {
-        const a = assemble(fsx, meta, chat.msgs, members[0] || null, null, { gen: "impersonate" });
+        const a = assemble(fsx, meta, chat.msgs, members[0] || null, null, { gen: "impersonate", model: modelOf() });
         const un = chatUserName(fsx, meta);
         // impersonation prompt: preset utility prompt, macros expanded
         // (blank = impersonate from history alone — no hidden default text)
@@ -3773,7 +4336,7 @@ const toolX = (r) => ({
       const swipes = msg.swipes && msg.swipes.length ? msg.swipes : [msg.text];
       const want = Math.floor(Number(body().index));
       if (!(want >= 0 && want < swipes.length)) return err(400, "swipe index out of range");
-      const text = expandMacros(String(swipes[want]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), summary: String(meta.summary || "") }));
+      const text = expandMacros(String(swipes[want]), transcriptMacros(chat.msgs, { userName: chatUserName(fsx, meta), charName: msg.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), globals: globalVars(fsx), summary: String(meta.summary || "") }));
       const savedExtra = syncSwipeThinking(msg, false).extra;
       chat.msgs[idx] = { ...msg, text, swipe: want, swipes, translation: undefined, extra: restoreSwipeThinking(savedExtra, want) };
       saveChat(fsx, id, touch(meta), chat.msgs);
@@ -3822,7 +4385,7 @@ const toolX = (r) => ({
         if (card) {
           const greetings = cardGreetings(fsx, meta, meta.characterId, card);
           if (greetings.length) {
-            const g = expandMacros(greetings[0], transcriptMacros([], { userName: chatUserName(fsx, meta), charName: card.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), summary: String(meta.summary || "") }));
+            const g = expandMacros(greetings[0], transcriptMacros([], { userName: chatUserName(fsx, meta), charName: card.name, personaText: "", chatId: id, vars: meta.chatVars || (meta.chatVars = {}), globals: globalVars(fsx), summary: String(meta.summary || "") }));
             msgs = [{ id: uid(), name: card.name, charId: meta.characterId, role: "char", text: g, at: Date.now(), swipes: greetings, swipe: 0, greeting: true }];
           }
         }

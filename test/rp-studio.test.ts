@@ -1479,6 +1479,130 @@ describe("rp studio engine: memory cutoff + summary", () => {
     expect(none.status).toBe(400);
   }, 30_000);
 
+  it("each compaction adds a summary of its own stretch and leaves the earlier ones as written", async () => {
+    const m = mockHost({ text: "PART ONE: they met." });
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    for (const t of ["one", "two", "three"]) await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: t } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 4 } }, m);
+    const m2 = mockHost({ text: "PART TWO: they argued." });
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 2 } }, m2);
+    // the second request summarizes only its own messages; the first summary is context
+    const asked = (m2.requests.at(-1)!.req as { messages: { content: string }[] }).messages[1]!.content;
+    expect(asked).toContain("already summarized");
+    expect(asked.split("Messages to summarize:")[1]).toContain("two");
+    expect(asked.split("Messages to summarize:")[1]).not.toContain("one");
+    const chat = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m2);
+    const meta = chat.json.meta as { summary: string; summaryParts: { id: string; text: string; from: string | null; to: string }[]; memoryCutoffMessageId: string };
+    expect(meta.summaryParts.map((p) => p.text)).toEqual(["PART ONE: they met.", "PART TWO: they argued."]);
+    expect(meta.summary).toBe("PART ONE: they met.\n\nPART TWO: they argued.");
+    // each part knows its stretch: the second starts where the first ended
+    expect(meta.summaryParts[0]!.from).toBeNull();
+    expect(meta.summaryParts[1]!.from).toBe(meta.summaryParts[0]!.to);
+    expect(meta.summaryParts[1]!.to).toBe(meta.memoryCutoffMessageId);
+    // both ride the prompt, oldest first
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "fresh" } }, m2);
+    const sys = (m2.requests.at(-1)!.req as { messages: { content: string }[] }).messages.map((x) => x.content).join("\n");
+    expect(sys.indexOf("PART ONE")).toBeGreaterThan(-1);
+    expect(sys.indexOf("PART TWO")).toBeGreaterThan(sys.indexOf("PART ONE"));
+  }, 30_000);
+
+  it("summaries are edited one at a time; an emptied one is gone; a flat summary becomes one part", async () => {
+    const m = mockHost({ text: "FIRST" });
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    for (const t of ["one", "two", "three"]) await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: t } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 4 } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 2 } }, mockHost({ text: "SECOND" }));
+    type Meta = { summary: string; summaryParts?: { id: string; text: string; to?: string }[] };
+    const read = async () => (await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m)).json.meta as Meta;
+    const [a, b] = (await read()).summaryParts!;
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { summaryParts: [{ id: a!.id, text: "FIRST, fixed by hand" }, { id: b!.id, text: "SECOND" }] } }, m);
+    let meta = await read();
+    expect(meta.summary).toBe("FIRST, fixed by hand\n\nSECOND");
+    expect(meta.summaryParts![0]!.to).toBe(a!.to!); // still knows what it covers
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { summaryParts: [{ id: a!.id, text: "" }, { id: b!.id, text: "SECOND" }] } }, m);
+    meta = await read();
+    expect(meta.summaryParts!.map((p) => p.text)).toEqual(["SECOND"]);
+    // writing the flat summary (an older client, or an edit on disk) replaces the list with one part
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { summary: "All of it, written by hand." } }, m);
+    meta = await read();
+    expect(meta.summaryParts!.map((p) => p.text)).toEqual(["All of it, written by hand."]);
+    // a chat from before parts existed: its summary reads as one part and is kept by the next compaction
+    const file = path.join(root, "chats", `${id}.meta.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+    delete raw.summaryParts;
+    raw.summary = "OLD RUNNING SUMMARY";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "four" } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "five" } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 2 } }, mockHost({ text: "NEWEST" }));
+    expect((await read()).summaryParts!.map((p) => p.text)).toEqual(["OLD RUNNING SUMMARY", "NEWEST"]);
+  }, 30_000);
+
+  it("past the word budget the oldest summaries merge into one, and undo brings them back", async () => {
+    fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ model: null, personaId: "you", ui: { summary: { targetLength: 25, maxWords: 60 } } }));
+    const m = mockHost();
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    type Meta = { summaryParts: { text: string; from: string | null; to: string; merged?: number }[]; memoryCutoffMessageId: string };
+    const read = async () => (await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m)).json.meta as Meta;
+    const twenty = (tag: string) => Array.from({ length: 20 }, (_, i) => `${tag}${i}`).join(" ");
+    // three compactions, 20 words each: 60 words, right at the budget
+    for (const tag of ["a", "b", "c"]) {
+      await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: `turn ${tag}` } }, m);
+      const h = mockHost({ text: twenty(tag) });
+      await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 1 } }, h);
+      expect(h.requests.filter((x) => x.key === "merge")).toHaveLength(0);
+    }
+    const before = await read();
+    expect(before.summaryParts).toHaveLength(3);
+    // the fourth would pass it: the oldest two are merged in the same pass
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "turn d" } }, m);
+    const h = mockHost({ text: "ONE REPLY FOR BOTH REQUESTS" });
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact`, body: { keepRecent: 1 } }, h);
+    const mergeReq = h.requests.find((x) => x.key === "merge")!.req as { messages: { content: string }[] };
+    expect(mergeReq.messages[1]!.content).toContain("a0");
+    expect(mergeReq.messages[1]!.content).toContain("b0");
+    expect(mergeReq.messages[1]!.content).not.toContain("c0"); // the newer ones stay as written
+    const after = await read();
+    expect(after.summaryParts).toHaveLength(3); // merged, c, the new one
+    expect(after.summaryParts[0]!.merged).toBe(2);
+    expect(after.summaryParts[0]!.from).toBeNull();
+    expect(after.summaryParts[0]!.to).toBe(before.summaryParts[1]!.to);
+    expect(after.summaryParts[1]!.text).toBe(twenty("c"));
+    const undo = await drive(engineUrl, { method: "POST", path: `/chats/${id}/compact/undo` }, m);
+    expect(undo.status).toBe(200);
+    const back = await read();
+    expect(back.summaryParts.map((p) => p.text)).toEqual(before.summaryParts.map((p) => p.text));
+    expect(back.memoryCutoffMessageId).toBe(before.memoryCutoffMessageId);
+  }, 30_000);
+
+  it("a scene is drafted as a lorebook entry from the chosen messages and nothing is saved", async () => {
+    const m = mockHost();
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "I hand over the brass compass" } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "an unrelated later turn" } }, m);
+    const msgs = (await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m)).json.messages as { id: string; text: string }[];
+    const from = msgs[0]!.id;
+    const to = msgs.find((x) => x.text === "I hand over the brass compass")!.id;
+    const h = mockHost({ text: 'Sure:\n{"title": "The compass", "keys": ["compass", "brass", "compass"], "content": "The traveler gave Aria a brass compass."}' });
+    const r = await drive(engineUrl, { method: "POST", path: `/chats/${id}/scene`, body: { from, to } }, h);
+    expect(r.json.draft).toEqual({ title: "The compass", keys: ["compass", "brass"], content: "The traveler gave Aria a brass compass." });
+    expect(r.json.covered).toBe(2);
+    const asked = (h.requests.at(-1)!.req as { messages: { content: string }[] }).messages;
+    expect(asked[1]!.content).toContain("brass compass");
+    expect(asked[1]!.content).not.toContain("unrelated later turn");
+    expect(asked[0]!.content).toContain("Aria alone is not a key");
+    expect(fs.readdirSync(path.join(root, "lorebooks")).filter((f) => f.endsWith(".json"))).toHaveLength(0);
+    // a reply that is not JSON still gives an entry to edit
+    const plain = await drive(engineUrl, { method: "POST", path: `/chats/${id}/scene`, body: { from, to } }, mockHost({ text: "The traveler gave Aria a compass." }));
+    expect(plain.json.draft).toEqual({ title: "", keys: [], content: "The traveler gave Aria a compass." });
+    const bad = await drive(engineUrl, { method: "POST", path: `/chats/${id}/scene`, body: { from: "nope", to } }, m);
+    expect(bad.status).toBe(404);
+  }, 30_000);
+
   it("a send reports history the context could not hold", async () => {
     fs.writeFileSync(path.join(root, "presets", "default.json"), JSON.stringify({ id: "default", name: "Default", prompts: [], prompt_order: [], openai_max_context: 60 }));
     const m = mockHost({ text: "x".repeat(400) });
@@ -1913,26 +2037,25 @@ describe("rp studio import", () => {
     expect(sys2).toContain("brass compass");
   }, 30_000);
 
-  it("semantic memory: extraction embeds facts, recall matches by meaning not words", async () => {
-    // deterministic embeddings: lantern/flame texts land at [1,0], else [0,1]
-    // — the scan shares NO keyword with the stored fact, only the direction
+  it("facts are matched by words: finding and recalling them never asks for embeddings", async () => {
     const m = mockHost(
       { text: '[{"text": "Ember guards a lantern that never goes out.", "importance": 4}]' },
       undefined,
-      (texts) => texts.map((t) => (/lantern|flame/i.test(t) ? [1, 0] : [0, 1])),
+      (texts) => texts.map(() => [1, 0]),
     );
     const chat = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
     const id = (chat.json.meta as { id: string }).id;
     const r = await drive(engineUrl, { method: "POST", path: `/chats/${id}/memories/extract` }, m);
     expect((r.json.added as unknown[])).toHaveLength(1);
     const mems = await drive(engineUrl, { method: "GET", path: `/chats/${id}/memories` }, m);
-    expect(((mems.json.memories as { vector: number[] }[])[0]!.vector)).toEqual([1, 0]); // fact embedded
-    // a scan about "flame and its light" shares NO keyword with the stored
-    // fact — only the embedding direction matches. Lexical alone would miss;
-    // cosine 1.0 recalls it.
-    const peek = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id, userText: "the flame and its light" } }, m);
-    const sys = (peek.json.messages as { content: string }[]).map((x) => x.content).join("\n");
-    expect(sys).toContain("guards a lantern");
+    expect((mems.json.memories as { vector?: number[] }[])[0]!.vector).toBeUndefined();
+    // a shared word brings the fact back; a turn that shares none leaves it out
+    const hit = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id, userText: "is the lantern still lit" } }, m);
+    expect((hit.json.messages as { content: string }[]).map((x) => x.content).join("\n")).toContain("guards a lantern");
+    const miss = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id, userText: "the flame and its light" } }, m);
+    expect((miss.json.messages as { content: string }[]).map((x) => x.content).join("\n")).not.toContain("guards a lantern");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "tell me about the lantern" } }, m);
+    expect(m.embedRequests).toHaveLength(0);
   }, 30_000);
 
   it("vectorized lorebook entries activate on similarity, with a cached sidecar", async () => {
@@ -2461,6 +2584,37 @@ describe("rp studio: outside preset/book formats", () => {
     expect(sys).toContain("AUTHOR-ARRANGEMENT-MARK");
   }, 30_000);
 
+  it("keeps embedded lore inactive until chosen, preserves Later, and imports once", async () => {
+    const m = mockHost();
+    const rawBook = { name: "Deferred lore", scan_depth: 6, entries: [{ keys: ["vault"], content: "Hidden vault", enabled: true }] };
+    const result = await drive(stUrl, { method: "POST", path: "/import/batch", body: {
+      deferEmbeddedLore: true, cards: [{ spec: "chara_card_v2", data: { name: "Deferred Keeper", character_book: rawBook } }],
+    } }, m);
+    expect(result.json.lorebooks).toEqual([]);
+    const id = (result.json.characters as string[])[0]!;
+    const file = path.join(root, "characters", id, "card.json");
+    let card = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(card.character_book).toEqual(rawBook);
+    expect(card.studio.embeddedLorebookPending).toBe(true);
+    expect(card.studio.embeddedLorebookId).toBeNull();
+    await drive(stUrl, { method: "POST", path: "/import/embedded-lorebook", body: { characterId: id, import: false } }, m);
+    card = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(card.character_book).toEqual(rawBook);
+    expect(card.studio.embeddedLorebookPending).toBe(false);
+    expect(fs.readdirSync(path.join(root, "lorebooks"))).toEqual([]);
+    const imported = await drive(stUrl, { method: "POST", path: "/import/embedded-lorebook", body: { characterId: id, import: true } }, m);
+    const again = await drive(stUrl, { method: "POST", path: "/import/embedded-lorebook", body: { characterId: id, import: true } }, m);
+    expect(again.json.lorebookId).toBe(imported.json.lorebookId);
+    expect(fs.readdirSync(path.join(root, "lorebooks"))).toHaveLength(1);
+    const book = JSON.parse(fs.readFileSync(path.join(root, "lorebooks", `${imported.json.lorebookId}.json`), "utf8"));
+    expect(book.isEmbedded).toBe(true);
+    expect(book.globalActive).not.toBe(true);
+    expect(book.settings.scanDepth).toBe(6);
+    card = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(card.studio.embeddedLorebookId).toBe(imported.json.lorebookId);
+    expect(card.character_book).toEqual(rawBook);
+  });
+
   it("a card's embedded lorebook imports as a linked, scoped book", async () => {
     const m = mockHost();
     const r = await drive(stUrl, {
@@ -2874,11 +3028,13 @@ describe("rp studio: backup zips survive the trip", () => {
     const m = mockHost();
     await drive(engineUrl, { method: "PUT", path: "/settings", body: { ui: { theme: "midnight", proseFont: "noto" } } }, m);
     await drive(engineUrl, { method: "PUT", path: "/library", body: { themes: [{ id: "t1", name: "Midnight" }], tags: ["noir"] } }, m);
+    fs.writeFileSync(path.join(root, "variables.json"), JSON.stringify({ tone: "grim" }));
     const entries = await exportEntries(m);
     // wipe what we are about to restore, so the assertions can only pass if
     // the zip actually carried it
     fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify({ model: null, personaId: "you" }));
     fs.rmSync(path.join(root, "library.json"), { force: true });
+    fs.rmSync(path.join(root, "variables.json"), { force: true });
     const m2 = mockHost();
     (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
     await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
@@ -2886,6 +3042,8 @@ describe("rp studio: backup zips survive the trip", () => {
     expect(settings.ui.theme).toBe("midnight");
     const lib = JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")) as { tags: string[] };
     expect(lib.tags).toEqual(["noir"]);
+    // the variables every chat shares come back too
+    expect(JSON.parse(fs.readFileSync(path.join(root, "variables.json"), "utf8"))).toEqual({ tone: "grim" });
   }, 30_000);
 
   it("keeps a lorebook's own settings and its link to a card", async () => {
@@ -3254,3 +3412,235 @@ it("upgrades card media without changing metadata and can safely retry or defer 
   expect(JSON.parse(m.host.fs.read(rel))).toEqual(card);
   expect(mod.handleRoute({ method: "GET", path: "/characters", body: null }, m.host).json.characters[0].avatar).toBe(avatar);
 });
+
+
+describe("card import choices and sources", () => {
+  const script = { scriptName: "First", findRegex: "/a/", replaceString: "b", placement: [2] };
+  const card = { spec: "chara_card_v2", data: { name: "Import Test", first_mes: "aaa", extensions: { regex_scripts: [script, { ...script, scriptName: "Off", disabled: true }] }, character_book: { name: "Import Lore", entries: [{ keys: ["a"], content: "Lore", enabled: true }] } } };
+  const readScript = (id: string) => JSON.parse(fs.readFileSync(path.join(root, "regex", id + ".json"), "utf8"));
+  it("imports and links lore while embedded regex waits for an explicit choice", async () => {
+    for (const enabled of [false, true]) {
+      const r = await drive(stUrl, { method: "POST", path: "/import/batch", body: { cards: [card], enableEmbeddedRegex: enabled } }, mockHost());
+      expect(r.json.lorebooks).toHaveLength(1);
+      const scripts = (r.json.regex as string[]).map(readScript);
+      expect(scripts).toHaveLength(2);
+      expect(scripts[0]).toMatchObject({ flags: "", disabled: !enabled, scope: "character", scopeTargetId: (r.json.characters as string[])[0] });
+      expect(scripts[1].disabled).toBe(true);
+    }
+  });
+  it("extracts ordered preset regex in both batch and archive imports", async () => {
+    const preset = { name: "With regex", prompts: [{ identifier: "main", name: "Main", content: "hello" }], extensions: { regex_scripts: [script, { ...script, scriptName: "Second" }] } };
+    for (const body of [{ presets: [preset], enableEmbeddedRegex: true }, { entries: { "presets/shared.json": JSON.stringify(preset) } }]) {
+      const m = mockHost();
+      if ("entries" in body) (m.host as { zip: unknown }).zip = { entries: () => body.entries, list: () => 1 };
+      const r = await drive(stUrl, { method: "POST", path: "entries" in body ? "/import/zip" : "/import/batch", body }, m);
+      expect(r.json.regex).toHaveLength(2);
+      const scripts = (r.json.regex as string[]).map(readScript);
+      expect(scripts.map((s) => s.order)).toEqual([0, 1]);
+      expect(scripts[0]).toMatchObject({ scope: "preset", scopeTargetId: (r.json.presets as string[])[0], disabled: !("enableEmbeddedRegex" in body), flags: "" });
+    }
+  });
+  it("imports catalog JSON cards with their embedded content", async () => {
+    const m = mockHost(undefined, (key, req) => {
+      expect(key).toBe("card");
+      expect(req.url).toBe("https://server.pygmalion.chat/api/export/character/12345678-1234-1234-1234-123456789abc/v2");
+      return { ok: true, json: { character: card } };
+    });
+    const r = await drive(stUrl, { method: "POST", path: "/import/url", body: { url: "https://pygmalion.chat/character/12345678-1234-1234-1234-123456789abc", enableEmbeddedRegex: true } }, m);
+    expect(r.json.characters).toHaveLength(1);
+    expect(r.json.lorebooks).toHaveLength(1);
+    expect(readScript((r.json.regex as string[])[0]!).disabled).toBe(false);
+  });
+  it("imports PNG sources and keeps artwork, lore and regex", async () => {
+    const chunk = (type: string, body: Buffer) => { const length = Buffer.alloc(4); length.writeUInt32BE(body.length); return Buffer.concat([length, Buffer.from(type), body, Buffer.alloc(4)]); };
+    const payload = Buffer.from(JSON.stringify(card)).toString("base64");
+    const base64 = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("tEXt", Buffer.from("chara\0" + payload)), chunk("IEND", Buffer.alloc(0))]).toString("base64");
+    for (const [url, endpoint] of [
+      ["https://realm.risuai.net/character/abcdef12", "https://realm.risuai.net/api/v1/download/png-v3/abcdef12?non_commercial=true"],
+      ["https://aicharactercards.com/characters/author/card/", "https://aicharactercards.com/wp-json/pngapi/v1/image/author/card"],
+    ]) {
+      const m = mockHost(undefined, (_key, req) => { expect(req.url).toBe(endpoint); return { ok: true, base64 }; });
+      const r = await drive(stUrl, { method: "POST", path: "/import/url", body: { url } }, m);
+      expect(r.json.characters).toHaveLength(1);
+      expect(r.json.lorebooks).toHaveLength(1);
+      expect(r.json.regex).toHaveLength(2);
+      const saved = JSON.parse(fs.readFileSync(path.join(root, "characters", (r.json.characters as string[])[0]!, "card.json"), "utf8"));
+      expect(saved.avatar).toBe("data:image/png;base64," + base64);
+    }
+  });
+  it("rejects unsupported hosts and reports failed downloads without writing a card", async () => {
+    const m = mockHost(undefined, () => ({ ok: false, status: 403 }));
+    for (const url of ["https://pygmalion.chat.evil.example/character/12345678-1234-1234-1234-123456789abc", "https://realm.risuai.net.evil.example/character/abc", "https://chub.ai/characters/a/b/extra", "https://example.com/card.png"]) {
+      const r = await drive(stUrl, { method: "POST", path: "/import/url", body: { url } }, m);
+      expect(r.status).toBe(400);
+    }
+    expect(m.netRequests).toHaveLength(0);
+    const r = await drive(stUrl, { method: "POST", path: "/import/url", body: { url: "https://realm.risuai.net/character/abc" } }, m);
+    expect(r.status).toBe(502);
+    expect(String(r.json.error)).toContain("403");
+    expect(fs.readdirSync(path.join(root, "characters"))).toEqual(["aria"]);
+  });
+});
+
+it("backup regex keeps character, preset and chat owners without duplicates", async () => {
+  const m = mockHost();
+  const made = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+  const chatId = (made.json.meta as { id: string }).id;
+  const cardPath = path.join(root, "characters/aria/card.json");
+  const card = JSON.parse(fs.readFileSync(cardPath, "utf8"));
+  card.extensions = { custom: true, regex_scripts: [{ scriptName: "Old embedded", findRegex: "/x/g" }] };
+  fs.writeFileSync(cardPath, JSON.stringify(card));
+  const presetPath = path.join(root, "presets/default.json");
+  const preset = JSON.parse(fs.readFileSync(presetPath, "utf8"));
+  preset.extensions = { custom: true, regex_scripts: [{ scriptName: "Old preset", findRegex: "/x/g" }] };
+  fs.writeFileSync(presetPath, JSON.stringify(preset));
+  for (const [scope, scopeTargetId, order] of [["character", "aria", 3], ["preset", "default", 2], ["chat", chatId, 1]] as const) {
+    fs.writeFileSync(path.join(root, "regex", scope + ".json"), JSON.stringify({ scriptName: "Same name", findRegex: "a", flags: "", replaceString: scope, placement: ["ai_output"], scope, scopeTargetId, order, disabled: scope === "preset" }));
+  }
+  const exp = await drive(engineUrl, { method: "GET", path: "/export/backup" }, m);
+  const files = unzipSync(Buffer.from(exp.json.base64 as string, "base64")) as Record<string, Uint8Array>;
+  const entries: Record<string, string> = {};
+  for (const [name, data] of Object.entries(files)) entries[name] = new TextDecoder().decode(data);
+  expect(Object.keys(entries).filter((n) => n.startsWith("User Settings/regex/"))).toHaveLength(3);
+  const m2 = mockHost();
+  (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+  const restored = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+  expect(restored.json.errors).toEqual([]);
+  expect(restored.json.regex).toHaveLength(3);
+  const scripts = (restored.json.regex as string[]).map((id) => JSON.parse(fs.readFileSync(path.join(root, "regex", id + ".json"), "utf8")));
+  expect(scripts.find((s) => s.scope === "character")).toMatchObject({ scopeTargetId: (restored.json.characters as string[])[0], order: 3, flags: "", disabled: false });
+  expect(scripts.find((s) => s.scope === "preset")).toMatchObject({ scopeTargetId: (restored.json.presets as string[])[0], order: 2, disabled: true });
+  expect(scripts.find((s) => s.scope === "chat")).toMatchObject({ scopeTargetId: (restored.json.chats as string[])[0], order: 1 });
+});
+
+describe('marketplace Wyvern discovery', () => {
+  const character = {
+    id: '_public-character', name: 'Listing title', chat_name: 'Ada', visibility: 'public',
+    first_mes: 'Hello', description: 'An explorer', creator: { displayName: 'Writer' },
+    tags: ['Adventure'], rating: 'none', token_count: 321,
+    statistics_record: { messages: 50, chats: 12, likes: 4 },
+    enable_advanced_greetings: true, greetings: [{ id: 'default', content: 'Hello' }, { id: 'second', content: 'Welcome' }],
+    lorebooks: [{ name: 'Places', entries: [{ keys: ['home'], content: 'A harbor', enabled: true }] }],
+    regex_scripts: [{ scriptName: 'Cleanup', findRegex: '/hello/g', replaceString: 'hi', placement: [2] }],
+  }
+
+  it('searches the full catalog without a popularity pool and keeps real metrics', async () => {
+    const m = mockHost(undefined, () => ({ ok: true, json: { characters: [character], total: 1234 } }))
+    const r = await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'wyvern', search: 'explorer', page: 2, first: 24, tags: ['Adventure'], nsfw: false } }, m)
+    expect(r.status).toBe(200)
+    const url = new URL(String(m.netRequests[0]?.req.url))
+    expect(url.pathname).toBe('/api/characters/public')
+    expect(url.searchParams.get('query')).toBe('explorer')
+    expect(url.searchParams.get('sort')).toBe('total_views')
+    expect(url.searchParams.has('show_nsfw')).toBe(false)
+    expect(url.searchParams.get('rating')).toBe('none')
+    expect(url.searchParams.get('page')).toBe('2')
+    expect(r.json.count).toBe(1234)
+    const item = (r.json.results as Record<string, unknown>[])[0]
+    expect(item?.messages).toBe(50)
+    expect(item?.chats).toBe(12)
+    expect(item?.downloads).toBeNull()
+  })
+
+  it('previews and imports the public card with lore and disabled regex', async () => {
+    const m = mockHost(undefined, () => ({ ok: true, json: character }))
+    const preview = await drive(stUrl, { method: 'POST', path: '/marketplace/detail', body: { source: 'wyvern', id: character.id } }, m)
+    expect(preview.json.importable).toBe(true)
+    expect(preview.json.alternateGreetings).toEqual(['Welcome'])
+    expect(preview.json.lorebookEntries).toBe(1)
+    expect(preview.json.lorebook).toMatchObject({ name: 'Places', entries: [{ keys: ['home'], content: 'A harbor', enabled: true }] })
+    const r = await drive(stUrl, { method: 'POST', path: '/marketplace/import', body: { source: 'wyvern', id: character.id } }, m)
+    expect(r.status).toBe(200)
+    expect((r.json.characters as unknown[]).length).toBe(1)
+    expect((r.json.lorebooks as unknown[]).length).toBe(1)
+    expect((r.json.regex as unknown[]).length).toBe(1)
+    expect(r.json.name).toBe('Ada')
+    const regex = JSON.parse(fs.readFileSync(path.join(root, 'regex', fs.readdirSync(path.join(root, 'regex'))[0]!), 'utf8'))
+    expect(regex.disabled).toBe(true)
+  })
+
+  it('rejects private definitions and malformed ids', async () => {
+    const m = mockHost(undefined, () => ({ ok: true, json: { ...character, secretFields: ['description'] } }))
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/import', body: { source: 'wyvern', id: character.id } }, m)).status).toBe(403)
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/detail', body: { source: 'wyvern', id: '../bad' } }, m)).status).toBe(400)
+  })
+
+  it('reports source errors and invalid totals', async () => {
+    const failed = mockHost(undefined, () => ({ ok: false, status: 503 }))
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'wyvern' } }, failed)).status).toBe(502)
+    const invalid = mockHost(undefined, () => ({ ok: true, json: { results: [], total: 'many' } }))
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'wyvern' } }, invalid)).status).toBe(502)
+  })
+})
+
+describe('marketplace current catalogs', () => {
+  const pageData = (value: unknown) => {
+    const values: unknown[] = []
+    const add = (value: unknown): number => {
+      const index = values.length
+      values.push(null)
+      values[index] = Array.isArray(value) ? value.map(add) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, add(item)])) : value
+      return index
+    }
+    add(value)
+    return JSON.stringify({ type: 'data', nodes: [{ type: 'skip' }, { type: 'skip' }, { type: 'data', data: values }] })
+  }
+  const character = { name: 'Traveler', visibility: 'public', definition_character_description: '**A traveler**', definition_first_message: 'Welcome' }
+  it('requests adult content through the public catalog endpoint', async () => {
+    for (const only of [false, true]) {
+      const m = mockHost(undefined, () => ({ ok: true, json: { characters: [{ id: 'adult-card', name: 'Card', rating: 'mature' }], total: 45 } }))
+      const r = await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'wyvern', nsfw: true, nsfwOnly: only, sort: 'newest' } }, m)
+      const url = new URL(String(m.netRequests[0]?.req.url))
+      expect(url.origin).toBe('https://app.wyvern.chat')
+      expect(url.pathname).toBe('/api/characters/public')
+      expect(url.searchParams.get('show_nsfw')).toBe('true')
+      expect(url.searchParams.get('rating')).toBe(only ? 'explicit' : null)
+      expect(url.searchParams.get('sort')).toBe('dateCreated')
+      expect((r.json.results as { nsfw: boolean }[])[0]?.nsfw).toBe(true)
+    }
+  })
+  it('reads catalog page data and uses the reported page size', async () => {
+    const m = mockHost(undefined, () => ({ ok: true, text: pageData({ searchResults: { hits: [{ path: 'author/card', name: 'Card', author: 'Author', permanentTokens: 789 }], totalHits: 234, hitsPerPage: 30 } }) }))
+    const r = await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'tavern', search: 'Card', sort: 'updated' } }, m)
+    expect(r.status).toBe(200)
+    expect(r.json.first).toBe(30)
+    expect(r.json.count).toBe(234)
+    expect((r.json.results as { id: string; downloads: null }[])[0]).toMatchObject({ id: 'author/card', downloads: null })
+    const url = new URL(String(m.netRequests[0]?.req.url))
+    expect(url.pathname).toBe('/search/cards/__data.json')
+    expect(url.searchParams.get('sort')).toBe('recently_updated')
+  })
+  it('resolves deferred greetings without evaluating page scripts', async () => {
+    const payload = JSON.parse(pageData({ character }))
+    const values = payload.nodes[2].data as unknown[]
+    const rootData = values[0] as Record<string, number>
+    rootData.alternativeGreetings = values.length
+    values.push(['Promise', values.length + 1], 7)
+    const text = JSON.stringify(payload) + '\n' + JSON.stringify({ type: 'chunk', id: 7, data: [[1], 'Another greeting'] })
+    const m = mockHost(undefined, () => ({ ok: true, text }))
+    const r = await drive(stUrl, { method: 'POST', path: '/marketplace/detail', body: { source: 'tavern', id: 'author/card' } }, m)
+    expect(r.status).toBe(200)
+    expect(r.json.alternateGreetings).toEqual(['Another greeting'])
+  })
+  it('imports the embedded PNG definition, lore and disabled regex', async () => {
+    const card = { spec: 'chara_card_v2', data: { name: 'Traveler', description: 'Definition', first_mes: 'Hello', alternate_greetings: ['Welcome'], character_book: { name: 'Travel', entries: [{ keys: ['road'], content: 'A road', enabled: true }] }, extensions: { regex_scripts: [{ scriptName: 'Cleanup', findRegex: '/x/g', replaceString: 'y', placement: [2] }] } } }
+    const chunk = (type: string, body: Buffer) => { const length = Buffer.alloc(4); length.writeUInt32BE(body.length); return Buffer.concat([length, Buffer.from(type), body, Buffer.alloc(4)]) }
+    const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('tEXt', Buffer.from('chara\0' + Buffer.from(JSON.stringify(card)).toString('base64'))), chunk('IEND', Buffer.alloc(0))]).toString('base64')
+    const m = mockHost(undefined, key => key === 'png' ? { ok: true, base64: png } : { ok: true, text: pageData({ character }) })
+    Object.assign(m.host.fs, { image: () => ({ url: 'data:image/png;base64,' + png, metadata: { chara: Buffer.from(JSON.stringify(card)).toString('base64') } }) })
+    const preview = await drive(stUrl, { method: 'POST', path: '/marketplace/detail', body: { source: 'tavern', id: 'author/card' } }, m)
+    expect(preview.json.personality).toBe('**A traveler**')
+    const r = await drive(stUrl, { method: 'POST', path: '/marketplace/import', body: { source: 'tavern', id: 'author/card' } }, m)
+    expect(r.status).toBe(200)
+    expect(r.json.characters).toHaveLength(1)
+    expect(r.json.lorebooks).toHaveLength(1)
+    expect(r.json.regex).toHaveLength(1)
+  })
+  it('rejects invalid paths, missing data and private definitions', async () => {
+    const m = mockHost(undefined, () => ({ ok: true, text: pageData({ character: { ...character, visibility: 'private' } }) }))
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/import', body: { source: 'tavern', id: 'author/card' } }, m)).status).toBe(403)
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/detail', body: { source: 'tavern', id: '../card' } }, m)).status).toBe(400)
+    const invalid = mockHost(undefined, () => ({ ok: true, text: '{"nodes":[]}' }))
+    expect((await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'tavern' } }, invalid)).status).toBe(502)
+  })
+})

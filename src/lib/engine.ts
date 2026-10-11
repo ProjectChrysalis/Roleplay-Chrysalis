@@ -9,7 +9,7 @@
 // cookie auth — the page itself is behind the same session).
 import type {
   Character, Chat, Message, Persona, Preset, Lorebook, LoreEntry, RegexScript,
-  Swipe, ID, ModelInfo, ModelPricing, PromptSection, DataBankFile, PromptFormatSequences,
+  Swipe, ID, ModelInfo, ModelPricing, PromptSection, DataBankFile, PromptFormatSequences, SummaryPart,
 } from './types'
 import { uid } from './tokens'
 import { saves } from './save-queue'
@@ -102,6 +102,7 @@ export interface EngineChatMeta {
   backgroundId?: string | 'none' | null
   temporary?: boolean
   summary?: string
+  summaryParts?: SummaryPart[]
   memoryCutoffMessageId?: string | null
   compactions?: unknown[]
   parentChatId?: string | null
@@ -802,6 +803,7 @@ export function engineChatToUI(meta: EngineChatMeta, msgs: EngineMessage[]): Cha
     authorNote: meta.authorNoteObject ?? { ...DEFAULT_AUTHOR_NOTE, text: meta.authorNote ?? '' },
     memoryCutoffMessageId: meta.memoryCutoffMessageId ?? null,
     summary: meta.summary ?? '',
+    summaryParts: summaryPartsOf(meta),
     compactions: Array.isArray(meta.compactions) ? meta.compactions.length : 0,
     temporary: meta.temporary === true,
     folderId: meta.folderId ?? null,
@@ -816,6 +818,16 @@ export function engineChatToUI(meta: EngineChatMeta, msgs: EngineMessage[]): Cha
   }
 }
 
+/** A chat's summaries as the engine reads them: the stored parts when they
+ *  still add up to the flat summary, else the flat summary as one part (an
+ *  older chat, or one edited on disk). */
+function summaryPartsOf(meta: EngineChatMeta): SummaryPart[] {
+  const parts = (Array.isArray(meta.summaryParts) ? meta.summaryParts : []).filter((p) => p && typeof p.text === 'string' && p.text.trim())
+  const flat = (meta.summary ?? '').trim()
+  if (flat === parts.map((p) => p.text.trim()).join('\n\n')) return parts
+  return flat ? [{ id: 's0', text: flat }] : []
+}
+
 /** Studio chat-level fields the engine stores on the chat meta (PATCH body keys). */
 export function chatPatchOf(p: Partial<Chat>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
@@ -824,7 +836,10 @@ export function chatPatchOf(p: Partial<Chat>): Record<string, unknown> {
   if ('presetId' in p) out.presetId = p.presetId
   if ('authorNote' in p && p.authorNote) { out.authorNote = p.authorNote.text; out.authorNoteObject = p.authorNote }
   if ('memoryCutoffMessageId' in p) out.memoryCutoffMessageId = p.memoryCutoffMessageId
-  if ('summary' in p) out.summary = p.summary
+  // the parts are the summary: the engine joins them, so the flat text is
+  // only sent when it is what was edited
+  if ('summaryParts' in p && p.summaryParts?.length) out.summaryParts = p.summaryParts.map((x) => ({ id: x.id, text: x.text }))
+  else if ('summary' in p) out.summary = p.summary
   if ('temporary' in p) out.temporary = p.temporary
   if ('folderId' in p) out.folderId = p.folderId
   if ('chatLorebookIds' in p) out.chatLorebookIds = p.chatLorebookIds
@@ -913,6 +928,11 @@ export function updateMemory(chatId: string, memId: string, patch: { text?: stri
 }
 export function deleteMemory(chatId: string, memId: string): Promise<{ ok: boolean }> {
   return j(`/chats/${chatId}/memories/${memId}`, { method: 'DELETE' })
+}
+/** Draft a lorebook entry from a stretch of the chat (both ends included).
+ *  Nothing is saved: the caller edits the draft and stores it. */
+export function draftScene(chatId: string, from: string, to: string, model?: string | null): Promise<{ draft: { title: string; keys: string[]; content: string }; covered: number }> {
+  return j(`/chats/${chatId}/scene`, { method: 'POST', body: JSON.stringify({ from, to, ...(model ? { model } : {}) }) })
 }
 /** LLM pass over the recent transcript: durable facts land in the vault. */
 export function extractMemories(chatId: string): Promise<{ added: import('./types').MemoryEntry[]; total: number }> {
@@ -1265,6 +1285,7 @@ export function regexToEngine(r: RegexScript): EngineRegex {
   if (r.placements.wi) placement.push('wi')
   if (r.placements.reasoning) placement.push('reasoning')
   return {
+    ...(r.folder ? { folder: r.folder } : {}),
     id: r.id, scriptName: r.name, findRegex: r.find, replaceString: r.replace,
     placement, markdownOnly: r.markdownOnly, promptOnly: r.promptOnly,
     disabled: !r.enabled, minDepth: r.minDepth, maxDepth: r.maxDepth, flags: r.flags,
@@ -1293,6 +1314,7 @@ export function engineRegexToUI(r: EngineRegex, id: string): RegexScript {
   const placement = new Set([...raw, ...when.extraWhere])
   return {
     id, name: r.scriptName ?? 'Script',
+    ...(typeof r.folder === 'string' && r.folder.trim() ? { folder: r.folder.trim() } : {}),
     scope: (r.scope as RegexScript['scope']) ?? 'global', scopeTargetId: (r.scopeTargetId as string | null) ?? null,
     find: r.findRegex ?? '', replace: r.replaceString ?? '', flags: r.flags ?? 'g',
     placements: {
@@ -1482,4 +1504,11 @@ export async function importArchive(file: File, progress?: (stage: string, done:
   await j(`/__imports/${state.id}`, { method: 'DELETE' })
   try { localStorage.removeItem(key) } catch { /* storage unavailable */ }
   return summary
+}
+
+
+export async function searchChats(options: { query: string; mode: import('./chat-search').ChatSearchMode; folderId: string | null; characterId: string | null; offset: number; limit: number }, signal: AbortSignal): Promise<import('./chat-search').ChatSearchPage> {
+  await saves.settled()
+  const page = await j<{ total: number; results: { meta: EngineChatMeta; matchCount: number; snippets: import('./chat-search').ChatSearchHit['snippets'] }[]; errors: { chatId: string; error: string }[] }>('/chats/search', { method: 'POST', body: JSON.stringify(options), signal })
+  return { ...page, results: page.results.map((hit) => ({ chat: engineChatToUI(hit.meta, []), matchCount: hit.matchCount, snippets: hit.snippets })) }
 }

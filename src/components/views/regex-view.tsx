@@ -1,21 +1,23 @@
 
+import { useViewMemory } from '@/lib/view-memory'
 import { useEffect, useRef, useState } from "react"
-import { Plus, Trash, Asterisk, UploadSimple, DownloadSimple, Flask, X } from '@phosphor-icons/react'
+import { Plus, Trash, CaretRight, DotsThreeVertical, ToggleLeft, ToggleRight, UploadSimple, DownloadSimple, Flask, X } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useApp } from "@/lib/store"
 import { regexImport, regexExport, downloadJson } from "@/lib/interop"
 import { uid } from "@/lib/tokens"
 import type { RegexScript } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { MasterDetail } from "@/components/shell/master-detail"
+import { RegexImportChoice } from '@/components/regex/import-choice-dialog'
 import { useConfirm } from '@/components/ui/confirm'
 import { runRegexSafe, type SafeRegexResult } from '@/lib/safe-regex'
 
@@ -29,11 +31,51 @@ const PLACEMENTS: [keyof RegexScript["placements"], string][] = [
   ["reasoning", "Reasoning"],
 ]
 
-const SCOPE_LABEL: Record<RegexScript["scope"], string> = {
-  global: "Global",
-  character: "Character",
-  chat: "Chat",
-  preset: "Preset",
+// one list section per scope, in the order scripts usually matter
+const SCOPES: { scope: RegexScript["scope"]; label: string; hint: string; unassigned: string }[] = [
+  { scope: "global", label: "Global", hint: "Runs in every chat", unassigned: "" },
+  { scope: "preset", label: "Preset", hint: "Runs while its preset is in use", unassigned: "No preset picked" },
+  { scope: "character", label: "Character", hint: "Runs in chats with its character", unassigned: "No character picked" },
+  { scope: "chat", label: "Chat", hint: "Runs in one chat only", unassigned: "No chat picked" },
+]
+
+type Owner = { key: string; name: string; active: boolean; assigned: boolean; scripts: RegexScript[] }
+
+function byFolder(scripts: RegexScript[]) {
+  const folders = new Map<string, RegexScript[]>()
+  for (const script of scripts) {
+    const name = script.folder?.trim() || ""
+    folders.set(name, [...(folders.get(name) ?? []), script])
+  }
+  // loose scripts first, then folders by name
+  return [...folders].sort(([a], [b]) => (a === "" ? -1 : b === "" ? 1 : a.localeCompare(b)))
+}
+
+function Tally({ scripts }: { scripts: RegexScript[] }) {
+  return <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{scripts.filter((r) => r.enabled).length}/{scripts.length}</span>
+}
+
+function BulkMenu({ label, scripts, onToggle }: { label: string; scripts: RegexScript[]; onToggle: (enabled: boolean) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger render={
+        <Button variant="ghost" size="icon-sm" className="size-7 shrink-0 text-muted-foreground" aria-label={`Actions for ${label} scripts`}>
+          <DotsThreeVertical className="size-4" aria-hidden="true" />
+        </Button>
+      } />
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem disabled={scripts.every((r) => r.enabled)} onClick={() => onToggle(true)}>
+          <ToggleRight className="size-4" aria-hidden="true" />Turn all on
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={scripts.every((r) => !r.enabled)} onClick={() => onToggle(false)}>
+          <ToggleLeft className="size-4" aria-hidden="true" />Turn all off
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => { downloadJson(scripts.map(regexExport), `${label.replace(/[^\w-]+/g, "_")}_regex.json`); toast.success(`Exported ${scripts.length} scripts`) }}>
+          <DownloadSimple className="size-4" aria-hidden="true" />Export all
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 
@@ -55,7 +97,7 @@ function HighlightedInput({ text, matches }: { text: string; matches: { start: n
 }
 
 function TestSandbox({ script }: { script: RegexScript }) {
-  const [input, setInput] = useState("Hello *waves* — this is a \"test\" message.\nShe said: \"Try the pattern here.\"")
+  const [input, setInput] = useState("Hello *waves*, this is a \"test\" message.\nShe said: \"Try the pattern here.\"")
   // runs in a Worker: a catastrophic-backtracking pattern must cost a
   // "timed out" badge, not the whole tab (the blank-screen bug)
   const [result, setResult] = useState<SafeRegexResult>({ ok: true, output: input, matches: [] })
@@ -103,6 +145,8 @@ function TestSandbox({ script }: { script: RegexScript }) {
   )
 }
 
+const NO_OVERRIDES: Record<string, boolean> = {}
+
 export function RegexView() {
   const scripts = useApp((s) => s.regexScripts)
   const characters = useApp((s) => s.characters)
@@ -111,11 +155,74 @@ export function RegexView() {
   const updateRegex = useApp((s) => s.updateRegex)
   const addRegex = useApp((s) => s.addRegex)
   const deleteRegex = useApp((s) => s.deleteRegex)
-  const [selectedId, setSelectedId] = useState<string | null>(scripts[0]?.id ?? null)
-  const [detailOpen, setDetailOpen] = useState(false)
+  const focusRegexId = useApp((s) => s.focusRegexId)
+  const activeChatId = useApp((s) => s.activeChatId)
+  const [selectedId, setSelectedId] = useViewMemory<string | null>('regex.selected', scripts[0]?.id ?? null)
+  const [detailOpen, setDetailOpen] = useViewMemory('regex.detail', false)
   const [confirm, confirmDialog] = useConfirm()
   const [trimDraft, setTrimDraft] = useState("")
   const importRef = useRef<HTMLInputElement>(null)
+  const [pendingImport, setPendingImport] = useState<Omit<RegexScript, 'id' | 'order'>[]>([])
+  const [query, setQuery] = useState('')
+  const [openState, setOpenState] = useViewMemory<Record<string, boolean>>('regex.open', NO_OVERRIDES)
+  const targetName = (script: RegexScript) => script.scope === 'character' ? characters.find((c) => c.id === script.scopeTargetId)?.name
+    : script.scope === 'chat' ? chats.find((c) => c.id === script.scopeTargetId)?.title
+    : script.scope === 'preset' ? presets.find((p) => p.id === script.scopeTargetId)?.name : null
+
+  // what the open chat runs with: those owners sort first and start expanded
+  const activeChat = chats.find((c) => c.id === activeChatId) ?? null
+  const activePresetId = activeChat && presets.some((p) => p.id === activeChat.presetId)
+    ? activeChat.presetId
+    : (presets.find((p) => p.isDefault)?.id ?? null)
+  const activeCharacter = characters.find((c) => c.id === activeChat?.characterId) ?? null
+  const activeCharacterIds = activeCharacter ? [activeCharacter.id, ...(activeCharacter.members ?? [])] : []
+  const activeTarget: Record<RegexScript['scope'], string | null> = {
+    global: null,
+    preset: activePresetId,
+    character: activeCharacter && !activeCharacter.isGroup ? activeCharacter.id : null,
+    chat: activeChat?.id ?? null,
+  }
+  const isActive = (script: RegexScript) => script.scope === 'preset' ? script.scopeTargetId === activePresetId
+    : script.scope === 'character' ? activeCharacterIds.includes(script.scopeTargetId ?? '')
+    : script.scope === 'chat' && script.scopeTargetId === activeChat?.id
+
+  const needle = query.trim().toLowerCase()
+  const sections = SCOPES.map((def) => {
+    const all = scripts.filter((r) => r.scope === def.scope).sort((a, b) => a.order - b.order)
+    const owners = new Map<string, Owner>()
+    for (const script of all) {
+      const name = targetName(script)
+      if (needle && !`${script.name} ${script.folder ?? ''} ${name ?? ''}`.toLowerCase().includes(needle)) continue
+      // a script whose owner is unset or gone never runs: those share one group
+      const key = `${def.scope}:${name ? script.scopeTargetId : ''}`
+      const owner = owners.get(key) ?? { key, name: name ?? def.unassigned, active: !!name && isActive(script), assigned: !!name, scripts: [] }
+      owner.scripts.push(script)
+      owners.set(key, owner)
+    }
+    return {
+      ...def,
+      all,
+      owners: [...owners.values()].sort((a, b) => Number(b.active) - Number(a.active) || Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name)),
+    }
+  })
+
+  const isOpen = (key: string, fallback: boolean) => !!needle || (openState[key] ?? fallback)
+  const toggle = (key: string, fallback: boolean) => setOpenState((s) => ({ ...s, [key]: !(s[key] ?? fallback) }))
+  const reveal = (script: Pick<RegexScript, 'scope' | 'scopeTargetId'>) =>
+    setOpenState((s) => ({ ...s, [script.scope]: true, [`${script.scope}:${script.scopeTargetId ?? ''}`]: true }))
+  const setAll = (list: RegexScript[], enabled: boolean) => {
+    for (const script of list) if (script.enabled !== enabled) updateRegex(script.id, { enabled })
+  }
+
+  useEffect(() => {
+    if (!focusRegexId) return
+    const script = scripts.find((r) => r.id === focusRegexId)
+    if (script) reveal(script)
+    setSelectedId(focusRegexId)
+    setDetailOpen(true)
+    setQuery('')
+    useApp.setState({ focusRegexId: null })
+  }, [focusRegexId])
 
   const selected = scripts.find((r) => r.id === selectedId) ?? null
 
@@ -127,33 +234,59 @@ export function RegexView() {
 
   const handleImport = async (files: FileList | null) => {
     if (!files) return
-    let firstId: string | null = null
+    const imported: Omit<RegexScript, 'id' | 'order'>[] = []
     for (const file of Array.from(files)) {
       try {
         const json = JSON.parse(await file.text())
         const arr = Array.isArray(json) ? json : [json]
-        let ok = 0
+        let valid = 0
         for (const item of arr) {
           const rx = regexImport(item)
-          if (rx) {
-            const id = uid("rx")
-            useApp.setState((s) => ({ regexScripts: [...s.regexScripts, { ...rx, id, order: s.regexScripts.length }] }))
-            firstId ??= id
-            ok++
-          }
+          if (rx) { imported.push(rx); valid++ }
         }
-        if (ok > 0) toast.success(`${file.name}: ${ok} script${ok > 1 ? "s" : ""} imported`)
-        else toast.error(`${file.name}: no valid regex scripts`)
-      } catch {
-        toast.error(`${file.name}: invalid JSON`)
-      }
+        if (!valid) toast.error(`${file.name}: no valid regex scripts`)
+        else if (valid < arr.length) toast.error(`${file.name}: ${arr.length - valid} unsupported scripts`)
+      } catch { toast.error(`${file.name}: invalid JSON`) }
     }
-    if (firstId) setSelectedId(firstId)
+    setPendingImport(imported)
   }
+  const finishImport = (enabled: boolean) => {
+    let firstId: string | null = null
+    for (const rx of pendingImport) {
+      const id = uid('rx')
+      useApp.setState((s) => ({ regexScripts: [...s.regexScripts, { ...rx, enabled: enabled && rx.enabled, id, order: s.regexScripts.length }] }))
+      useApp.getState().updateRegex(id, {})
+      firstId ??= id
+    }
+    toast.success(`Imported ${pendingImport.length} scripts`)
+    setPendingImport([])
+    if (firstId) { setQuery(''); if (pendingImport[0]) reveal(pendingImport[0]); select(firstId) }
+  }
+
+  const rows = (list: RegexScript[]) => byFolder(list).map(([folder, items]) => (
+    <div key={folder} className="flex flex-col gap-0.5">
+      {folder && <span className="truncate px-2 pt-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground" title={folder}>{folder}</span>}
+      {items.map((script) => (
+        <div key={script.id} className={cn('flex min-h-11 items-center gap-3 rounded-md pl-2 pr-3 md:min-h-9', selectedId === script.id ? 'bg-accent' : 'hover:bg-accent/50')}>
+          <button
+            type="button"
+            onClick={() => select(script.id)}
+            className={cn('min-h-11 min-w-0 flex-1 truncate text-left text-sm md:min-h-9', !script.enabled && 'text-muted-foreground')}
+            title={script.name}
+          >
+            {script.name}
+          </button>
+          <Switch checked={script.enabled} onCheckedChange={(enabled) => updateRegex(script.id, { enabled })} aria-label={`Enable ${script.name}`} />
+        </div>
+      ))}
+    </div>
+  ))
 
   return (
     <>
     <MasterDetail
+      pageScroll
+      masterWidth="w-80"
       detailOpen={detailOpen && !!selected}
       onBack={() => setDetailOpen(false)}
       detailTitle={selected?.name}
@@ -173,57 +306,86 @@ export function RegexView() {
             <Button
               variant="ghost"
               size="icon"
-              className="size-6"
+              className="size-9"
               onClick={() => importRef.current?.click()}
               aria-label="Import regex scripts"
               title="Import regex scripts"
             >
               <UploadSimple className="size-3.5" />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-6"
-              onClick={() => select(addRegex("global"))}
-              aria-label="Add regex script"
-            >
-              <Plus className="size-3.5" />
-            </Button>
           </div>
         </div>
-        <ScrollArea className="flex-1">
-          <div className="flex flex-col gap-0.5 p-1.5">
-            {scripts.map((script) => (
-              <button
-                key={script.id}
-                type="button"
-                onClick={() => select(script.id)}
-                className={cn(
-                  "flex min-h-11 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
-                  selectedId === script.id ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:bg-accent/50",
-                )}
-              >
-                <Asterisk className="size-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{script.name}</span>
-                {script.scope !== "global" && (
-                  <span className="shrink-0 rounded bg-muted px-1 text-[9px] uppercase text-muted-foreground">
-                    {SCOPE_LABEL[script.scope].slice(0, 4)}
-                  </span>
-                )}
-                <span
-                  className={cn("size-1.5 shrink-0 rounded-full", script.enabled ? "bg-primary" : "bg-muted-foreground/30")}
-                  aria-hidden
-                />
-              </button>
-            ))}
-            {scripts.length === 0 && <p className="px-2 py-4 text-center text-xs text-muted-foreground">No scripts yet</p>}
+        <div className="border-b border-border p-2">
+          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search scripts, folders or owners" aria-label="Search regex scripts" />
+        </div>
+        <div className="min-h-0 flex-1">
+          <div className="flex flex-col">
+            {sections.map((section) => {
+              if (needle && section.owners.length === 0) return null
+              const open = isOpen(section.scope, true)
+              const shown = section.owners.flatMap((owner) => owner.scripts)
+              return (
+                <section key={section.scope} aria-label={`${section.label} scripts`} className="border-b border-border last:border-b-0">
+                  <div className="flex items-center gap-1 py-1 pl-1 pr-2">
+                    <button type="button" onClick={() => toggle(section.scope, true)} aria-expanded={open} className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left">
+                      <CaretRight className={cn('size-3 shrink-0 text-muted-foreground transition-transform', open && 'rotate-90')} aria-hidden="true" />
+                      <span className="flex min-w-0 flex-col">
+                        <span className="flex items-baseline gap-2 text-sm font-medium">{section.label}<Tally scripts={section.all} /></span>
+                        <span className="truncate text-[11px] text-muted-foreground">{section.hint}</span>
+                      </span>
+                    </button>
+                    {section.scope === 'global' && shown.length > 0 && <BulkMenu label="Global" scripts={shown} onToggle={(enabled) => setAll(shown, enabled)} />}
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 shrink-0 text-muted-foreground"
+                      onClick={() => {
+                        const scopeTargetId = activeTarget[section.scope]
+                        reveal({ scope: section.scope, scopeTargetId })
+                        setQuery('')
+                        select(addRegex(section.scope, scopeTargetId))
+                      }}
+                      aria-label={`Add ${section.label.toLowerCase()} script`}
+                      title={`Add ${section.label.toLowerCase()} script`}
+                    >
+                      <Plus className="size-4" aria-hidden="true" />
+                    </Button>
+                  </div>
+                  {open && (
+                    <div className="flex flex-col gap-0.5 px-2 pb-2">
+                      {section.owners.map((owner) => {
+                        if (section.scope === 'global') return <div key={owner.key} className="flex flex-col gap-0.5">{rows(owner.scripts)}</div>
+                        const fallback = owner.active || owner.scripts.some((r) => r.id === selectedId)
+                        const ownerOpen = isOpen(owner.key, fallback)
+                        return (
+                          <div key={owner.key} className="flex flex-col gap-0.5">
+                            <div className="flex items-center gap-1">
+                              <button type="button" onClick={() => toggle(owner.key, fallback)} aria-expanded={ownerOpen} className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-xs md:min-h-9">
+                                <CaretRight className={cn('size-3 shrink-0 text-muted-foreground transition-transform', ownerOpen && 'rotate-90')} aria-hidden="true" />
+                                <span className={cn('min-w-0 truncate', owner.active ? 'font-medium' : 'text-muted-foreground', !owner.assigned && 'italic')} title={owner.name}>{owner.name}</span>
+                                {owner.active && <span className="shrink-0 text-[11px] text-primary">current</span>}
+                                <span className="ml-auto flex"><Tally scripts={owner.scripts} /></span>
+                              </button>
+                              <BulkMenu label={owner.name} scripts={owner.scripts} onToggle={(enabled) => setAll(owner.scripts, enabled)} />
+                            </div>
+                            {ownerOpen && <div className="ml-3.5 flex flex-col gap-0.5 border-l border-border pl-1.5">{rows(owner.scripts)}</div>}
+                          </div>
+                        )
+                      })}
+                      {section.owners.length === 0 && <p className="px-2 pb-1 text-xs text-muted-foreground">None yet</p>}
+                    </div>
+                  )}
+                </section>
+              )
+            })}
+            {needle && sections.every((section) => section.owners.length === 0) && <p className="px-2 py-4 text-center text-xs text-muted-foreground">No matching scripts</p>}
           </div>
-        </ScrollArea>
+        </div>
         </div>
       }
       detail={
         selected ? (
-        <ScrollArea className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1">
           <div className="mx-auto flex max-w-2xl flex-col gap-4 p-4">
             <div className="flex items-center gap-2">
               <Input
@@ -263,7 +425,7 @@ export function RegexView() {
               </Button>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="flex flex-col gap-1.5">
                 <Label className="text-xs">Scope</Label>
                 <Select
@@ -328,6 +490,10 @@ export function RegexView() {
               )}
             </div>
 
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">Folder</Label>
+              <Input value={selected.folder ?? ''} onChange={(e) => set({ folder: e.target.value })} placeholder="No folder" aria-label="Script folder" />
+            </div>
             <div className="grid grid-cols-[1fr_auto] gap-3">
               <div className="flex flex-col gap-1.5">
                 <Label className="text-xs">Find Regex</Label>
@@ -349,11 +515,12 @@ export function RegexView() {
               </div>
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label className="text-xs">Replace With</Label>
-              <Input
+              <Label className="text-xs">Replace with</Label>
+              <Textarea rows={5}
                 value={selected.replace}
                 onChange={(e) => set({ replace: e.target.value })}
-                placeholder="replacement: $1, $2 for groups, {{match}} for the trimmed match"
+                placeholder="Replacement text or markup"
+                aria-label="Replacement text"
                 className="font-mono text-xs"
               />
             </div>
@@ -385,7 +552,7 @@ export function RegexView() {
                     }
                   }}
                   placeholder="Add string to erase from matches, Enter to add"
-                  className="h-7 w-64 font-mono text-xs"
+                  className="h-8 w-full max-w-64 font-mono text-xs"
                   aria-label="Add trim string"
                 />
               </div>
@@ -449,7 +616,7 @@ export function RegexView() {
                   {"Whether {{macros}} in the Find pattern are replaced before matching, raw or regex-escaped."}
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="flex flex-col gap-1.5">
                   <Label className="text-xs">Min Depth</Label>
                   <Input
@@ -471,7 +638,7 @@ export function RegexView() {
               </div>
             </div>
           </div>
-        </ScrollArea>
+        </div>
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
             Select or create a regex script
@@ -479,6 +646,7 @@ export function RegexView() {
         )
       }
     />
+    <RegexImportChoice open={pendingImport.length > 0} count={pendingImport.length} onCancel={() => setPendingImport([])} onChoose={finishImport} />
     {confirmDialog}
     </>
   )

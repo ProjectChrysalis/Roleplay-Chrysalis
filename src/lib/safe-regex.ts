@@ -27,7 +27,7 @@ export const WORKER_SRC = `
 self.onmessage = (e) => {
   const { id, find, flags, replace, trims, macros, input } = e.data;
   try {
-    const re = new RegExp(find, (flags || "").includes("g") ? flags : (flags || "") + "g");
+    const re = new RegExp(find, flags ?? "");
     const trim = (v) => {
       let t = v;
       for (const s of (trims || [])) if (s) t = t.split(s).join("");
@@ -42,7 +42,11 @@ self.onmessage = (e) => {
     let m;
     let guard = 0;
     while ((m = re.exec(input)) !== null && guard++ < 5000) {
-      if (m.index === re.lastIndex) re.lastIndex++;
+      if (m[0].length === 0 && re.global) {
+        const pos = re.lastIndex;
+        const code = input.codePointAt(pos);
+        re.lastIndex += (re.unicode || re.unicodeSets) && code > 0xffff ? 2 : 1;
+      }
       matches.push({ start: m.index, end: m.index + m[0].length });
       let repl = String(replace ?? "").replace(/\\{\\{match\\}\\}/gi, "\\u0000");
       repl = repl.replace(/\\$(\\d+)|\\$<([^>]+)>/g, (_, num, name) => {
@@ -52,6 +56,7 @@ self.onmessage = (e) => {
       repl = subMacros(repl.split("\\u0000").join(trim(m[0])));
       output += input.slice(last, m.index) + repl;
       last = m.index + m[0].length;
+      if (!re.global) break;
     }
     output += input.slice(last);
     self.postMessage({ id, ok: true, output, matches });

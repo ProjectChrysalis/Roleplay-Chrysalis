@@ -1,6 +1,7 @@
+import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BookOpenText, Plus, Trash, Copy, MagnifyingGlass, Globe, Flask, Pulse, CaretDown, CaretRight } from '@phosphor-icons/react'
+import { BookOpenText, Plus, Trash, Copy, MagnifyingGlass, Globe, Flask, Pulse, CaretDown, CaretRight, GearSix, DotsThreeVertical, ArrowSquareOut } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,8 +14,11 @@ import { Pager, clampPage } from '@/components/ui/pager'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Collapsible, CollapsibleContent } from '@/components/ui/collapsible'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useApp } from '@/lib/store'
 import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
+import { newLoreEntry } from '@/lib/seed'
+import { loreEntryMatch } from '@/lib/lore-match'
 import { importLorebookFiles, fetchWIStatus, type WIStatus } from '@/lib/engine'
 import { cn } from '@/lib/utils'
 import type { Lorebook, LoreEntry } from '@/lib/types'
@@ -24,7 +28,15 @@ import { useConfirm } from '@/components/ui/confirm'
 
 const toast = createToast('lorebooks')
 
-const positions: LoreEntry['position'][] = ['before_char', 'after_char', 'before_em', 'after_em', 'before_an', 'after_an', 'at_depth', 'before_examples', 'after_examples']
+/** The places an entry can be sent to. Every other stored position is saved as
+ *  one of the first two, so the picker offers only these. */
+const POSITIONS = [
+  ['before_char', 'Before character'],
+  ['after_char', 'After character'],
+  ['at_depth', 'In chat, at depth'],
+] as const
+const shownPosition = (p: LoreEntry['position']): (typeof POSITIONS)[number][0] =>
+  p === 'at_depth' ? 'at_depth' : p.startsWith('after') ? 'after_char' : 'before_char'
 
 export function LorebooksView() {
   const lorebooks = useApp((s) => s.lorebooks)
@@ -32,14 +44,22 @@ export function LorebooksView() {
   const addLorebook = useApp((s) => s.addLorebook)
   const duplicateLorebook = useApp((s) => s.duplicateLorebook)
   const deleteLorebook = useApp((s) => s.deleteLorebook)
-  const [selectedId, setSelectedId] = useState(lorebooks[0]?.id ?? null)
-  const [detailOpen, setDetailOpen] = useState(false)
+  const focusLorebookId = useApp((s) => s.focusLorebookId)
+  const [selectedId, setSelectedId] = useViewMemory<string | null>('lorebooks.selected', lorebooks[0]?.id ?? null)
+  const [detailOpen, setDetailOpen] = useViewMemory('lorebooks.detail', false)
   const [testOpen, setTestOpen] = useState(false)
   const [confirm, confirmDialog] = useConfirm()
   const [activeViewerOpen, setActiveViewerOpen] = useState(false)
   const importInput = useRef<HTMLInputElement>(null)
   const refreshLorebooks = useApp((s) => s.refreshLorebooks)
   const hydrate = useApp((s) => s.hydrate)
+  useEffect(() => {
+    if (!focusLorebookId) return
+    setSelectedId(focusLorebookId)
+    setDetailOpen(true)
+    useApp.setState({ focusLorebookId: null })
+  }, [focusLorebookId])
+
   const book = lorebooks.find((b) => b.id === selectedId) ?? lorebooks[0]
 
   /** Import: native studio lorebook JSON (PUT as-is) or world-info
@@ -67,12 +87,13 @@ export function LorebooksView() {
 
   // lorebooks grow for years — the sidebar pages through them
   const BOOK_PAGE = 100
-  const [bookPage, setBookPage] = useState(0)
+  const [bookPage, setBookPage] = useViewMemory('lorebooks.page', 0)
   const pagedBooks = lorebooks.slice(clampPage(bookPage, lorebooks.length, BOOK_PAGE) * BOOK_PAGE, (clampPage(bookPage, lorebooks.length, BOOK_PAGE) + 1) * BOOK_PAGE)
 
   return (
     <>
     <MasterDetail
+      memoryKey={`lorebook.${selectedId}`}
       detailOpen={detailOpen && !!book}
       onBack={() => setDetailOpen(false)}
       detailTitle={book?.name}
@@ -95,9 +116,9 @@ export function LorebooksView() {
                   onClick={() => select(b.id)}
                   className={cn('flex min-h-11 w-full flex-col justify-center gap-0.5 rounded-md px-2 py-1.5 text-left text-sm', b.id === book?.id ? 'bg-accent' : 'hover:bg-accent/50')}
                 >
-                  <span className="flex items-center gap-1.5 font-medium">
-                    {b.name}
-                    {b.globalActive && <Globe className="size-3 text-primary" aria-hidden="true" />}
+                  <span className="flex min-w-0 items-center gap-1.5 font-medium">
+                    <span className="truncate">{b.name}</span>
+                    {b.globalActive && <Globe className="size-3 shrink-0 text-primary" aria-hidden="true" />}
                   </span>
                   <span className="text-[11px] text-muted-foreground">
                     {b.entries.length} entries{b.isEmbedded ? ' · embedded' : ''}{b.linkedCharacterIds.length > 0 ? ` · ${b.linkedCharacterIds.length} linked` : ''}
@@ -132,9 +153,15 @@ export function LorebooksView() {
       })}
       onDuplicate={() => { setSelectedId(duplicateLorebook(book.id)); toast.success('Lorebook duplicated') }}
       onTest={() => setTestOpen(true)}
+      onActive={() => setActiveViewerOpen(true)}
           />
         ) : (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">No lorebooks</div>
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+            No lorebooks yet
+            <Button variant="outline" size="sm" className="text-xs" onClick={() => select(addLorebook())}>
+              <Plus className="size-3.5" aria-hidden="true" />New lorebook
+            </Button>
+          </div>
         )
       }
     />
@@ -146,21 +173,22 @@ export function LorebooksView() {
   )
 }
 
-function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
-  book: Lorebook; onUpdate: (p: Partial<Lorebook>) => void; onDelete: () => void; onDuplicate: () => void; onTest: () => void
+function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest, onActive }: {
+  book: Lorebook; onUpdate: (p: Partial<Lorebook>) => void; onDelete: () => void; onDuplicate: () => void; onTest: () => void; onActive: () => void
 }) {
-  const [query, setQuery] = useState('')
-  const [sort, setSort] = useState('order')
-  const [openIds, setOpenIds] = useState<string[]>([])
-  const [showSettings, setShowSettings] = useState(false)
+  const [query, setQuery] = useViewMemory(`lorebook.${book.id}.query`, '')
+  const [sort, setSort] = useViewMemory(`lorebook.${book.id}.sort`, 'order')
+  const [openIds, setOpenIds] = useViewMemory<string[]>(`lorebook.${book.id}.entries`, [])
+  const [showSettings, setShowSettings] = useViewMemory(`lorebook.${book.id}.settings`, false)
   const [selected, setSelected] = useState<string[]>([])
   const [copyEntry, setCopyEntry] = useState<LoreEntry | null>(null)
   const allBooks = useApp((s) => s.lorebooks)
   const updateLorebook = useApp((s) => s.updateLorebook)
+  const [confirm, confirmDialog] = useConfirm()
 
   const entries = useMemo(() => {
     const q = query.toLowerCase()
-    let list = book.entries.filter((e) => !q || e.title.toLowerCase().includes(q) || e.keys.some((k) => k.includes(q)) || e.content.toLowerCase().includes(q))
+    let list = book.entries.filter((e) => !q || e.title.toLowerCase().includes(q) || e.keys.some((k) => k.toLowerCase().includes(q)) || e.content.toLowerCase().includes(q))
     switch (sort) {
       case 'title': list = [...list].sort((a, b) => a.title.localeCompare(b.title)); break
       case 'tokens': list = [...list].sort((a, b) => estimateTokens(b.content) - estimateTokens(a.content)); break
@@ -171,7 +199,8 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
   }, [book.entries, query, sort])
 
   const ENTRY_PAGE = 50
-  const [entryPage, setEntryPage] = useState(0)
+  const [entryPage, setEntryPage] = useViewMemory(`lorebook.${book.id}.page`, 0)
+  const scrollRef = useViewScroll(`lorebook.${book.id}`)
   const safeEntryPage = clampPage(entryPage, entries.length, ENTRY_PAGE)
   const pagedEntries = entries.slice(safeEntryPage * ENTRY_PAGE, safeEntryPage * ENTRY_PAGE + ENTRY_PAGE)
 
@@ -185,21 +214,46 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col @container">
       {/* header + settings + entries toolbar scroll WITH the entries — the
           toolbar pinning at the top was eating the viewport on mobile */}
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
       <header className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
-        <Input value={book.name} onChange={(e) => onUpdate({ name: e.target.value })} className="h-8 w-full text-sm font-medium md:w-52" aria-label="Book name" />
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Input value={book.name} onChange={(e) => onUpdate({ name: e.target.value })} className="h-8 min-w-0 flex-1 basis-40 text-sm font-medium md:max-w-64" aria-label="Book name" />
+        <label className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground" title="On in every chat">
           <Switch checked={book.globalActive} onCheckedChange={(v) => onUpdate({ globalActive: v })} aria-label="Global activation" />
           Global
         </label>
-        <Badge variant="outline" className="text-[10px]">{formatTokens(book.entries.reduce((a, e) => a + estimateTokens(e.content), 0))} tok total</Badge>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
-          <Button variant="outline" size="sm" className="text-xs" onClick={onTest}>
-            <Flask className="size-3.5" aria-hidden="true" />Keyword test
+        <span className="shrink-0 text-[11px] text-muted-foreground">
+          {book.entries.length} entries · {formatTokens(book.entries.reduce((a, e) => a + estimateTokens(e.content), 0))} tok
+        </span>
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          <Button
+            variant="ghost" size="icon-sm"
+            className={cn('text-muted-foreground', showSettings && 'bg-accent text-foreground')}
+            onClick={() => setShowSettings(!showSettings)}
+            aria-label="Book settings" aria-expanded={showSettings} title="Book settings"
+          >
+            <GearSix className="size-4" aria-hidden="true" />
           </Button>
-          <Button variant="outline" size="sm" className="text-xs" onClick={() => setShowSettings(!showSettings)}>Settings</Button>
-          <Button variant="ghost" size="sm" onClick={onDuplicate} aria-label="Duplicate book"><Copy className="size-4" aria-hidden="true" /></Button>
-          <Button variant="ghost" size="sm" className="text-destructive" onClick={onDelete} aria-label="Delete book"><Trash className="size-4" aria-hidden="true" /></Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger render={
+              <Button variant="ghost" size="icon-sm" className="text-muted-foreground" aria-label={`More actions for ${book.name}`}>
+                <DotsThreeVertical className="size-4" aria-hidden="true" />
+              </Button>
+            } />
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={onTest}>
+                <Flask className="size-4" aria-hidden="true" />Keyword test
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onActive}>
+                <Pulse className="size-4" aria-hidden="true" />Active in chat
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={onDuplicate}>
+                <Copy className="size-4" aria-hidden="true" />Duplicate
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-destructive" onClick={onDelete}>
+                <Trash className="size-4" aria-hidden="true" />Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </header>
 
@@ -274,14 +328,6 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
               )}
             </code>
           </div>
-          {/* Vectorization is an imported feature the engine has no embedding
-              service for — entries keep their imported vectorized STATUS, but
-              there is no re-embed run to perform, so no button pretends one. */}
-          <div className="col-span-full flex flex-wrap items-center gap-3 border-t border-border pt-2">
-            <Button variant="outline" size="sm" className="h-6 text-[11px]" onClick={onTest}>
-              Diagnose chat
-            </Button>
-          </div>
         </div>
       )}
 
@@ -307,11 +353,17 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
           <div className="ml-auto flex items-center gap-1.5 text-xs">
             <span className="text-muted-foreground">{selected.length} selected</span>
             <Button variant="outline" size="sm" className="h-6 text-[11px]" onClick={() => { onUpdate({ entries: book.entries.map((e) => selected.includes(e.id) ? { ...e, status: 'constant' } : e) }); setSelected([]) }}>Make constant</Button>
-            <Button variant="outline" size="sm" className="h-6 text-[11px]" onClick={() => { onUpdate({ entries: book.entries.filter((e) => !selected.includes(e.id)) }); setSelected([]); toast.success('Deleted') }}>Delete</Button>
+            <Button variant="outline" size="sm" className="h-6 text-[11px]" onClick={() => void confirm({
+              title: `Delete ${selected.length} ${selected.length === 1 ? 'entry' : 'entries'}?`,
+              description: 'They are removed from this lorebook.',
+            }).then((yes) => {
+              if (!yes) return
+              onUpdate({ entries: book.entries.filter((e) => !selected.includes(e.id)) }); setSelected([]); toast.success('Deleted')
+            })}>Delete</Button>
           </div>
         )}
         <Button size="sm" className={cn('h-7 text-xs', selected.length === 0 && 'ml-auto')} onClick={() => {
-          const e: LoreEntry = { id: uid('we'), title: 'New entry', memo: '', keys: [], keysRegex: false, secondaryKeys: [], logic: 'AND_ANY', status: 'normal', content: '', position: 'after_char', depth: 4, role: 'system', order: 100, probability: 100, useProbability: false, group: '', groupWeight: 100, groupPrioritize: false, sticky: 0, cooldown: 0, delay: 0, enabled: true, characterFilter: [], characterFilterExclude: false, tagFilter: [], triggerFilters: [], nonRecursable: false, preventFurtherRecursion: false, delayUntilRecursion: false, ignoreBudget: false, scanDepthOverride: null, caseSensitiveOverride: null, wholeWordsOverride: null, groupScoringOverride: null, automationId: '', matchSources: { description: false, personality: false, scenario: false, persona: false } }
+          const e = newLoreEntry()
           onUpdate({ entries: [e, ...book.entries] })
           setOpenIds((o) => [...o, e.id])
         }}>
@@ -345,7 +397,7 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
                         <span>{formatTokens(estimateTokens(e.content))} tok</span>
                       </span>
                     </span>
-                    {e.keys.length > 0 && (
+                    {!open && e.keys.length > 0 && (
                       <span className="flex w-full flex-wrap gap-1 pl-11">
                         {e.keys.slice(0, 3).map((k) => (
                           <Badge key={k} variant="secondary" className="min-w-0 max-w-40 text-[10px]"><span className="truncate">{k}</span></Badge>
@@ -371,6 +423,9 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
             )
           })}
         </ul>
+        {entries.length === 0 && (
+          <p className="px-4 pb-8 text-center text-xs text-muted-foreground">{query ? 'No entries match.' : 'No entries yet.'}</p>
+        )}
         <Pager total={entries.length} page={safeEntryPage} pageSize={ENTRY_PAGE} onPage={setEntryPage} />
       </ScrollArea>
       <Dialog open={!!copyEntry} onOpenChange={(o) => { if (!o) setCopyEntry(null) }}>
@@ -393,11 +448,12 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest }: {
           </ul>
         </DialogContent>
       </Dialog>
+      {confirmDialog}
     </div>
   )
 }
 
-function KeyListInput({ keys, label, onChange }: { keys: string[]; label: string; onChange: (keys: string[]) => void }) {
+function KeyListInput({ keys, label, placeholder, onChange }: { keys: string[]; label: string; placeholder?: string; onChange: (keys: string[]) => void }) {
   // Local draft holds the RAW text so delimiters survive keystrokes (a
   // controlled `value={keys.join(', ')}` would eat the comma mid-typing);
   // parsed keys still commit on every change — engine stays live.
@@ -411,80 +467,113 @@ function KeyListInput({ keys, label, onChange }: { keys: string[]; label: string
         onChange(ev.target.value.split(',').map((k) => k.trim()).filter(Boolean))
       }}
       onBlur={() => setDraft(null)}
-      className="h-7 font-mono text-xs"
+      placeholder={placeholder}
+      className="h-7 min-w-0 flex-1 font-mono text-xs"
       aria-label={label}
     />
   )
 }
 
+const ENTRY_FLAGS = [
+  ['nonRecursable', 'Non-recursable', 'Text of other entries cannot switch this one on'],
+  ['preventFurtherRecursion', 'Prevent further recursion', 'This entry\'s text cannot switch other entries on'],
+  ['delayUntilRecursion', 'Delay until recursion', 'Only switches on from the text of other entries'],
+  ['ignoreBudget', 'Ignore budget', 'Sent even when the book is over its budget'],
+] as const
+const MATCH_SOURCES = ['description', 'personality', 'scenario', 'persona'] as const
+
+/** What the folded options hold that is not the default, for the closed line. */
+function entryOptionSummary(e: LoreEntry): string {
+  const parts: string[] = []
+  if (e.secondaryKeys.length) parts.push(`${e.logic.replace('_', ' ')} ${e.secondaryKeys.length} more ${e.secondaryKeys.length === 1 ? 'key' : 'keys'}`)
+  if (e.sticky > 0) parts.push(`sticky ${e.sticky}`)
+  if (e.cooldown > 0) parts.push(`cooldown ${e.cooldown}`)
+  if (e.delay > 0) parts.push(`delay ${e.delay}`)
+  if (e.group.trim()) parts.push(`group ${e.group.trim()}`)
+  for (const [key, label] of ENTRY_FLAGS) if (e[key]) parts.push(label.toLowerCase())
+  const sources = MATCH_SOURCES.filter((k) => e.matchSources[k])
+  if (sources.length) parts.push(`scans ${sources.join(', ')}`)
+  if (e.automationId.trim()) parts.push('automation')
+  return parts.join(' · ')
+}
+
 function EntryEditor({ entry: e, onChange, onDelete, onDuplicate, onCopyToBook }: { entry: LoreEntry; onChange: (p: Partial<LoreEntry>) => void; onDelete: () => void; onDuplicate: () => void; onCopyToBook: () => void }) {
+  // one switch for every entry: whoever works with the options keeps them open
+  const [moreOpen, setMoreOpen] = useViewMemory('lorebook.entryOptions', false)
+  const summary = moreOpen ? '' : entryOptionSummary(e)
   return (
-    <div className="flex flex-col gap-2.5 border-t border-border px-3 py-2.5">
-      <div className="grid grid-cols-1 gap-2 @[26rem]:grid-cols-2">
-        <div className="flex flex-col gap-1">
-          <Label className="text-[11px]">Title / memo</Label>
-          <Input value={e.title} onChange={(ev) => onChange({ title: ev.target.value })} className="h-7 text-xs" aria-label="Entry title" />
-        </div>
-        <div className="flex items-end gap-2">
-          <div className="flex flex-1 flex-col gap-1">
-            <Label className="text-[11px]">Status</Label>
-            <Select value={e.status} onValueChange={(v) => onChange({ status: v as never })}>
-              <SelectTrigger className="h-7 text-xs" aria-label="Status"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="constant">Constant</SelectItem>
-                <SelectItem value="normal">Normal</SelectItem>
-                <SelectItem value="vectorized">Vectorized</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <label className="flex items-center gap-1.5 pb-1 text-[11px] text-muted-foreground">
-            <Switch checked={e.keysRegex} onCheckedChange={(v) => onChange({ keysRegex: v })} aria-label="Regex keys" />
-            regex keys
-          </label>
-        </div>
+    <div className="flex flex-col gap-2 border-t border-border px-3 py-2.5">
+      <div className="flex items-center gap-1.5">
+        <Input value={e.title} onChange={(ev) => onChange({ title: ev.target.value })} placeholder="Title" className="h-7 min-w-0 flex-1 text-xs" aria-label="Entry title" />
+        <Select value={e.status} onValueChange={(v) => onChange({ status: v as never })}>
+          <SelectTrigger className="h-7 w-28 shrink-0 text-xs" aria-label="Status"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="constant">Constant</SelectItem>
+            <SelectItem value="normal">Normal</SelectItem>
+            <SelectItem value="vectorized">Vectorized</SelectItem>
+          </SelectContent>
+        </Select>
+        <DropdownMenu>
+          <DropdownMenuTrigger render={
+            <Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label={`More actions for ${e.title}`}>
+              <DotsThreeVertical className="size-4" aria-hidden="true" />
+            </Button>
+          } />
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={onDuplicate}>
+              <Copy className="size-4" aria-hidden="true" />Duplicate
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onCopyToBook}>
+              <ArrowSquareOut className="size-4" aria-hidden="true" />Copy to book
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-destructive" onClick={onDelete}>
+              <Trash className="size-4" aria-hidden="true" />Delete entry
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
-      <div className="grid grid-cols-1 gap-2 @[26rem]:grid-cols-2">
-        <div className="flex flex-col gap-1">
-          <Label className="text-[11px]">Primary keys (comma separated)</Label>
-          <KeyListInput keys={e.keys} label="Primary keys" onChange={(keys) => onChange({ keys })} />
-        </div>
-        <div className="flex gap-2">
-          <div className="flex flex-1 flex-col gap-1">
-            <Label className="text-[11px]">Secondary keys</Label>
-            <KeyListInput keys={e.secondaryKeys} label="Secondary keys" onChange={(secondaryKeys) => onChange({ secondaryKeys })} />
-          </div>
-          <div className="flex w-28 flex-col gap-1">
-            <Label className="text-[11px]">Logic</Label>
-            <Select value={e.logic} onValueChange={(v) => onChange({ logic: v as never })}>
-              <SelectTrigger className="h-7 text-xs" aria-label="Key logic"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {['AND_ANY', 'AND_ALL', 'NOT_ANY', 'NOT_ALL'].map((l) => <SelectItem key={l} value={l}>{l.replace('_', ' ')}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+
+      <div className="flex items-center gap-1.5">
+        <KeyListInput keys={e.keys} label="Primary keys" placeholder={e.status === 'constant' ? 'Keys (a constant entry is always on)' : 'Keys, comma separated'} onChange={(keys) => onChange({ keys })} />
+        <button
+          type="button"
+          aria-pressed={e.keysRegex}
+          aria-label="Regex keys"
+          title="Read the keys as regular expressions"
+          onClick={() => onChange({ keysRegex: !e.keysRegex })}
+          className={cn('h-7 shrink-0 rounded-md border px-2 font-mono text-[11px]', e.keysRegex ? 'border-primary/60 bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:text-foreground')}
+        >
+          .*
+        </button>
       </div>
-      <div className="flex flex-col gap-1">
-        <Label className="flex items-center gap-2 text-[11px]">Content <Badge variant="outline" className="text-[10px]">{formatTokens(estimateTokens(e.content))} tok</Badge></Label>
-        <Textarea value={e.content} rows={3} onChange={(ev) => onChange({ content: ev.target.value })} aria-label="Entry content" className="text-xs" />
-      </div>
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="flex w-36 flex-col gap-1">
-          <Label className="text-[11px]">Position</Label>
-          <Select value={e.position} onValueChange={(v) => onChange({ position: v as never })}>
-            <SelectTrigger className="h-7 text-xs" aria-label="Position"><SelectValue /></SelectTrigger>
+
+      <Textarea
+        value={e.content}
+        onChange={(ev) => onChange({ content: ev.target.value })}
+        aria-label="Entry content"
+        placeholder="What the model is told when a key comes up…"
+        className="max-h-96 min-h-20 text-xs"
+      />
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-1.5">
+          <span>Position</span>
+          <Select value={shownPosition(e.position)} onValueChange={(v) => v && onChange({ position: v as never })}>
+            <SelectTrigger className="h-7 w-40 text-xs" aria-label="Position">
+              <SelectValue>{(v) => POSITIONS.find(([id]) => id === v)?.[1] ?? ''}</SelectValue>
+            </SelectTrigger>
             <SelectContent>
-              {positions.map((p) => <SelectItem key={p} value={p}>{p.replace(/_/g, ' ')}</SelectItem>)}
+              {POSITIONS.map(([id, label]) => <SelectItem key={id} value={id}>{label}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         {e.position === 'at_depth' && (
           <>
-            <NumMini label="Depth" value={e.depth} onChange={(v) => onChange({ depth: v })} />
-            <div className="flex w-24 flex-col gap-1">
-              <Label className="text-[11px]">Role</Label>
+            <NumMini label="Depth" title="Messages from the end of the chat" value={e.depth} onChange={(v) => onChange({ depth: v })} />
+            <div className="flex items-center gap-1.5">
+              <span>as</span>
               <Select value={e.role} onValueChange={(v) => onChange({ role: v as never })}>
-                <SelectTrigger className="h-7 text-xs" aria-label="Role"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-7 w-24 text-xs" aria-label="Role"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {['system', 'user', 'assistant'].map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
                 </SelectContent>
@@ -492,92 +581,128 @@ function EntryEditor({ entry: e, onChange, onDelete, onDuplicate, onCopyToBook }
             </div>
           </>
         )}
-        <NumMini label="Order" value={e.order} onChange={(v) => onChange({ order: v })} />
-        <NumMini label="Trigger %" value={e.probability} onChange={(v) => onChange({ probability: v })} />
-        <NumMini label="Sticky" value={e.sticky} onChange={(v) => onChange({ sticky: v })} />
-        <NumMini label="Cooldown" value={e.cooldown} onChange={(v) => onChange({ cooldown: v })} />
-        <NumMini label="Delay" value={e.delay} onChange={(v) => onChange({ delay: v })} />
-        <div className="flex w-28 flex-col gap-1">
-          <Label className="text-[11px]">Group</Label>
-          <Input value={e.group} onChange={(ev) => onChange({ group: ev.target.value })} className="h-7 text-xs" aria-label="Inclusion group" />
+        <NumMini label="Order" title="Higher is placed later, closer to the chat" value={e.order} onChange={(v) => onChange({ order: v })} />
+        <NumMini label="Trigger %" title="Chance to switch on when its keys match" value={e.probability} onChange={(v) => onChange({ probability: v })} />
+      </div>
+
+      {/* everything used now and then is one fold: closed, it still names
+          whatever is set away from the default */}
+      <button
+        type="button"
+        onClick={() => setMoreOpen(!moreOpen)}
+        aria-expanded={moreOpen}
+        className="flex min-w-0 items-center gap-1 self-start rounded py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+      >
+        <CaretDown className={cn('size-3 shrink-0 transition-transform', !moreOpen && '-rotate-90')} aria-hidden="true" />
+        <span className="shrink-0">More options</span>
+        {summary && <span className="min-w-0 truncate text-foreground/80">{summary}</span>}
+      </button>
+
+      {moreOpen && (
+        <div className="flex flex-col gap-2.5 rounded-md bg-muted/30 px-2.5 py-2.5 text-[11px] text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="shrink-0">Secondary keys</span>
+            <Select value={e.logic} onValueChange={(v) => onChange({ logic: v as never })}>
+              <SelectTrigger className="h-7 w-28 shrink-0 text-xs" aria-label="Key logic"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {['AND_ANY', 'AND_ALL', 'NOT_ANY', 'NOT_ALL'].map((l) => <SelectItem key={l} value={l}>{l.replace('_', ' ')}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <div className="flex min-w-0 flex-1 basis-40">
+              <KeyListInput keys={e.secondaryKeys} label="Secondary keys" placeholder="Blank = primary keys alone decide" onChange={(secondaryKeys) => onChange({ secondaryKeys })} />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <NumMini label="Sticky" title="Stays on for this many messages after it switches on" value={e.sticky} onChange={(v) => onChange({ sticky: v })} />
+            <NumMini label="Cooldown" title="Stays off for this many messages afterwards" value={e.cooldown} onChange={(v) => onChange({ cooldown: v })} />
+            <NumMini label="Delay" title="Stays off until the chat has this many messages" value={e.delay} onChange={(v) => onChange({ delay: v })} />
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <label className="flex items-center gap-1.5" title="Of the entries sharing a group name, one is sent">
+              <span>Group</span>
+              <Input value={e.group} onChange={(ev) => onChange({ group: ev.target.value })} className="h-7 w-28 text-xs" aria-label="Inclusion group" />
+            </label>
+            <NumMini label="Weight" title="Chance to be the one picked in its group" value={e.groupWeight} onChange={(v) => onChange({ groupWeight: v })} />
+            <label className="flex items-center gap-1.5" title="Picked ahead of the weighted draw">
+              <Switch checked={e.groupPrioritize} onCheckedChange={(v) => onChange({ groupPrioritize: v })} aria-label="Prioritize in group" />
+              Prioritize in group
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            {ENTRY_FLAGS.map(([key, label, hint]) => (
+              <label key={key} className="flex items-center gap-1.5" title={hint}>
+                <Switch checked={e[key]} onCheckedChange={(v) => onChange({ [key]: v })} aria-label={label} />
+                {label}
+              </label>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span title="Keys are also looked for in these, besides the chat">Also scan</span>
+            {MATCH_SOURCES.map((k) => (
+              <label key={k} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={e.matchSources[k]}
+                  onChange={(ev) => onChange({ matchSources: { ...e.matchSources, [k]: ev.target.checked } })}
+                  aria-label={`Match ${k}`}
+                  className="size-3 accent-primary"
+                />
+                {k}
+              </label>
+            ))}
+          </div>
+          <label className="flex items-center gap-1.5">
+            <span>Automation ID</span>
+            <Input value={e.automationId} onChange={(ev) => onChange({ automationId: ev.target.value })} className="h-7 w-40 text-xs" aria-label="Automation ID" />
+          </label>
         </div>
-        <NumMini label="Weight" value={e.groupWeight} onChange={(v) => onChange({ groupWeight: v })} />
-      </div>
-      <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
-        {([
-          ['nonRecursable', 'non-recursable'], ['preventFurtherRecursion', 'prevent further recursion'],
-          ['delayUntilRecursion', 'delay until recursion'], ['groupPrioritize', 'prioritize in group'],
-          ['ignoreBudget', 'ignore budget'],
-        ] as const).map(([key, label]) => (
-          <label key={key} className="flex items-center gap-1.5">
-            <Switch checked={e[key]} onCheckedChange={(v) => onChange({ [key]: v })} aria-label={label} />
-            {label}
-          </label>
-        ))}
-        <span className="ml-1">match:</span>
-        {(['description', 'personality', 'scenario', 'persona'] as const).map((k) => (
-          <label key={k} className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={e.matchSources[k]}
-              onChange={(ev) => onChange({ matchSources: { ...e.matchSources, [k]: ev.target.checked } })}
-              aria-label={`Match ${k}`}
-              className="size-3 accent-primary"
-            />
-            {k}
-          </label>
-        ))}
-      </div>
-      <div className="flex items-center gap-2">
-        <Input value={e.automationId} onChange={(ev) => onChange({ automationId: ev.target.value })} placeholder="Automation ID" className="h-7 w-40 text-xs" aria-label="Automation ID" />
-        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onCopyToBook}>Copy to book</Button>
-        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onDuplicate}>Duplicate</Button>
-        <Button variant="ghost" size="sm" className="ml-auto h-7 text-xs text-destructive" onClick={onDelete}>
-          <Trash className="size-3.5" aria-hidden="true" />Delete entry
-        </Button>
-      </div>
+      )}
     </div>
   )
 }
 
-function NumMini({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+function NumMini({ label, title, value, onChange }: { label: string; title?: string; value: number; onChange: (v: number) => void }) {
   return (
-    <div className="flex w-20 flex-col gap-1">
-      <Label className="text-[11px]">{label}</Label>
-      <Input type="number" value={value} onChange={(e) => onChange(Number(e.target.value))} className="h-7 text-xs" aria-label={label} />
-    </div>
+    <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground" title={title}>
+      <span>{label}</span>
+      <Input type="number" value={value} onChange={(e) => onChange(Number(e.target.value))} className="h-7 w-16 text-xs text-foreground" aria-label={label} />
+    </label>
   )
 }
 
 function KeywordTest({ open, onOpenChange, book }: { open: boolean; onOpenChange: (o: boolean) => void; book: Lorebook | null }) {
   const [text, setText] = useState('')
+  // the same key rules a generation scans with, so the two agree
   const matches = useMemo(() => {
-    if (!book || !text) return []
-    const lower = text.toLowerCase()
-    return book.entries.filter((e) => e.enabled && (e.status === 'constant' || e.keys.some((k) => lower.includes(k.toLowerCase()))))
+    if (!book || !text.trim()) return []
+    return book.entries
+      .filter((e) => e.enabled)
+      .map((e) => ({ entry: e, ...loreEntryMatch(text, e, book.settings) }))
+      .filter((m) => m.fires)
   }, [book, text])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader><DialogTitle>Keyword test: {book?.name}</DialogTitle></DialogHeader>
-        <Textarea value={text} rows={4} onChange={(e) => setText(e.target.value)} placeholder="Paste chat text here to see which entries would fire…" aria-label="Test text" className="text-sm" />
+        <Textarea value={text} rows={4} onChange={(e) => setText(e.target.value)} placeholder="Paste chat text here to see which entries would switch on…" aria-label="Test text" className="text-sm" />
         <div className="flex min-h-0 flex-col gap-1.5">
-          <Label className="text-xs shrink-0">{matches.length} entries match</Label>
+          <Label className="shrink-0 text-xs">{matches.length} {matches.length === 1 ? 'entry matches' : 'entries match'}</Label>
           <div className="flex max-h-[45dvh] flex-col gap-1.5 overflow-y-auto overscroll-contain">
-            {matches.map((e) => (
+            {matches.map(({ entry: e, keys }) => (
               <div key={e.id} className="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5 text-sm">
                 <LoreStatusIcon status={e.status} />
-                {e.title}
-                <span className="ml-auto flex gap-1">
-                  {e.keys.filter((k) => text.toLowerCase().includes(k.toLowerCase())).map((k) => (
-                    <Badge key={k} className="text-[10px]">{k}</Badge>
+                <span className="min-w-0 flex-1 truncate">{e.title}</span>
+                <span className="flex min-w-0 shrink-0 flex-wrap justify-end gap-1">
+                  {keys.map((k) => (
+                    <Badge key={k} className="max-w-32 text-[10px]"><span className="truncate">{k}</span></Badge>
                   ))}
                   {e.status === 'constant' && <Badge variant="secondary" className="text-[10px]">constant</Badge>}
                 </span>
               </div>
             ))}
           </div>
+          <p className="shrink-0 text-[11px] text-muted-foreground">Keys only. Trigger chance, timing, groups and budget are left out.</p>
         </div>
       </DialogContent>
     </Dialog>

@@ -1,5 +1,6 @@
+import { useViewMemory } from '@/lib/view-memory'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plug, SealCheck, Brain, CircleNotch, ArrowsClockwise, PencilSimple, Plus, MagnifyingGlass, X } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
@@ -16,6 +17,7 @@ import {
 import { ProfilesSheet } from '@/components/connections/profiles-sheet'
 import { ModelMark } from '@/components/model-mark'
 import type { ModelInfo, ModelPricing } from '@/lib/types'
+import { formatModelRate } from '@/lib/model-pricing'
 import { cn, shortModel } from '@/lib/utils'
 
 const toast = createToast('connections')
@@ -64,8 +66,10 @@ export function ConnectionsView() {
   const [providers, setProviders] = useState<EngineProviderInfo[]>(providerCache ?? [])
   const [busy, setBusy] = useState(false)
   /** the provider whose models are listed; null follows the model in use */
-  const [browse, setBrowse] = useState<string | null>(null)
-  const [q, setQ] = useState('')
+  const [browse, setBrowse] = useViewMemory<string | null>('connections.provider', null)
+  const [q, setQ] = useViewMemory('connections.query', '')
+  const [modelLimit, setModelLimit] = useState(40)
+  const modelSentinel = useRef<HTMLDivElement>(null)
   const [profilesOpen, setProfilesOpen] = useState(false)
   const [ctxEdit, setCtxEdit] = useState(false)
   const [ctxDraft, setCtxDraft] = useState('')
@@ -111,7 +115,21 @@ export function ConnectionsView() {
 
   const needle = q.trim().toLowerCase()
   const matches = (m: ModelInfo) => !needle || m.id.toLowerCase().includes(needle)
-  const list = models.filter((m) => m.provider === shown && matches(m))
+  const list = useMemo(() => models.filter((m) => m.provider === shown && matches(m)), [models, shown, needle])
+  useEffect(() => setModelLimit(40), [shown, needle])
+  useEffect(() => {
+    const sentinel = modelSentinel.current
+    if (!sentinel || modelLimit >= list.length) return
+    let active = true
+    const observer = new IntersectionObserver(entries => {
+      if (active && entries.some(entry => entry.isIntersecting)) {
+        observer.disconnect()
+        setModelLimit(limit => Math.min(list.length, limit + 40))
+      }
+    }, { root: sentinel.closest('[data-slot="scroll-area-viewport"]'), rootMargin: '200px 0px' })
+    observer.observe(sentinel)
+    return () => { active = false; observer.disconnect() }
+  }, [list, modelLimit])
   /** a search that misses (or also hits) elsewhere points at the providers
    *  that do have it, so switching provider is never guesswork */
   const elsewhere = useMemo(() => {
@@ -148,9 +166,9 @@ export function ConnectionsView() {
   const openPrice = () => {
     if (!current) return
     setPriceDraft({
-      input: current.pricing ? String(current.pricing.input) : '',
-      output: current.pricing ? String(current.pricing.output) : '',
-      cacheRead: current.pricing?.cacheRead ? String(current.pricing.cacheRead) : '',
+      input: current.pricing ? formatModelRate(current.pricing.input) : '',
+      output: current.pricing ? formatModelRate(current.pricing.output) : '',
+      cacheRead: current.pricing?.cacheRead ? formatModelRate(current.pricing.cacheRead) : '',
     })
     setPriceEdit(true)
   }
@@ -220,7 +238,7 @@ export function ConnectionsView() {
                       onClick={openPrice}
                       aria-label="Token prices"
                     >
-                      {current.pricing ? `$${current.pricing.input}/$${current.pricing.output} per Mtok` : 'set prices'}
+                      {current.pricing ? `$${formatModelRate(current.pricing.input)}/$${formatModelRate(current.pricing.output)} per Mtok` : 'set prices'}
                     </Button>
                     {current.reasoning && <Badge variant="secondary" className="text-[10px]">reasoning</Badge>}
                   </span>
@@ -340,7 +358,7 @@ export function ConnectionsView() {
                 </p>
               )}
               <ul className="flex flex-col">
-                {list.map((m) => {
+                {list.slice(0, modelLimit).map((m) => {
                   const active = m.ref === current?.ref
                   const slash = m.id.lastIndexOf('/')
                   return (
@@ -372,6 +390,7 @@ export function ConnectionsView() {
                   )
                 })}
               </ul>
+              {list.length > modelLimit && <div ref={modelSentinel} aria-hidden="true" className="h-px" />}
               <p className="px-2 pt-3 text-[11px] text-muted-foreground">
                 Add or edit providers in the engine client: Settings → API connections.
               </p>

@@ -1,5 +1,6 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { fitComposerInput } from '@/lib/composer-size'
 import { PaperPlaneRight, Square, ArrowsClockwise, CaretDoubleRight, User, FolderOpen, Paperclip, X, FileText, Plus, Image as ImageIcon, Lightning, ArrowsOut, UserCircle, Check, Trash, MagicWand, CircleNotch, ChatCenteredText } from '@phosphor-icons/react'
 import { Button } from "@/components/ui/button"
 import {
@@ -72,6 +73,15 @@ export function Composer({ chatId }: { chatId: ID }) {
   const qrSets = useApp((s) => s.qrSets)
   const characters = useApp((s) => s.characters)
   const personas = useApp((s) => s.personas)
+  const personaNamesWithDistinctTitles = useMemo(() => {
+    const titlesByName = new Map<string, Set<string>>()
+    for (const persona of personas) {
+      const titles = titlesByName.get(persona.name) ?? new Set<string>()
+      titles.add(persona.title.trim())
+      titlesByName.set(persona.name, titles)
+    }
+    return new Set([...titlesByName].filter(([, titles]) => titles.size > 1).map(([name]) => name))
+  }, [personas])
   const updateChat = useApp((s) => s.updateChat)
   const setView = useApp((s) => s.setView)
   const setDeleteMode = useApp((s) => s.setDeleteMode)
@@ -122,27 +132,51 @@ export function Composer({ chatId }: { chatId: ID }) {
    * so the message you were reading never slides behind the composer
    * (user: "when it expands up it has to move the chat up with it").
    */
-  const autoFit = () => {
+  const autoFit = useCallback(() => {
     const el = textareaRef.current
     if (!el) return
-    const before = el.offsetHeight
-    el.style.height = '1px'
-    el.style.height = `${el.scrollHeight}px`
-    const after = el.offsetHeight
+    const delta = fitComposerInput(el)
     // Most keystrokes do not change the box height at all; when nothing moved
     // there is nothing to compensate, and the chat log is never measured.
-    if (after === before) return
+    if (delta === 0) return
     // The log's own content height is unchanged — only its viewport grew or
     // shrank — so shifting the scroll by the same delta keeps the line you
     // were reading in place instead of sliding it behind the composer.
     const log = document.querySelector<HTMLElement>('[data-chat-log]')
-    if (log) log.scrollTop += after - before
-  }
+    if (log) log.scrollTop += delta
+  }, [])
 
   // Re-fit whenever the text changes from anywhere (typing, drafts, slash
   // insertions, quick replies, clearing after send). Layout effect, not a
   // passive one: resizing after paint shows a frame at the old height.
-  useLayoutEffect(autoFit, [value])
+  useLayoutEffect(autoFit, [value, autoFit])
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    let width = 0
+    let frame: number | null = null
+    const schedule = () => {
+      if (frame !== null) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => { frame = null; autoFit() })
+    }
+    const observer = new ResizeObserver(() => {
+      const next = el.clientWidth
+      if (next !== width) { width = next; if (next > 0) schedule() }
+    })
+    observer.observe(el)
+    window.addEventListener('resize', schedule)
+    window.addEventListener('pageshow', schedule)
+    document.addEventListener('visibilitychange', schedule)
+    document.fonts.addEventListener('loadingdone', schedule)
+    return () => {
+      observer.disconnect()
+      if (frame !== null) cancelAnimationFrame(frame)
+      window.removeEventListener('resize', schedule)
+      window.removeEventListener('pageshow', schedule)
+      document.removeEventListener('visibilitychange', schedule)
+      document.fonts.removeEventListener('loadingdone', schedule)
+    }
+  }, [autoFit])
 
   // Consume drafts pushed by impersonate
   useEffect(() => {
@@ -486,6 +520,9 @@ export function Composer({ chatId }: { chatId: ID }) {
                   >
                     <img src={p.avatar || DEFAULT_AVATAR} alt="" className="size-5 shrink-0 rounded-full object-cover" />
                     <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                    {personaNamesWithDistinctTitles.has(p.name) && p.title.trim() && (
+                      <span className="max-w-[50%] truncate text-xs text-muted-foreground" title={p.title}>{p.title}</span>
+                    )}
                     {p.id === activePersonaId && <Check className="size-3.5 shrink-0 text-primary" />}
                   </DropdownMenuItem>
                 ))}
@@ -551,7 +588,7 @@ export function Composer({ chatId }: { chatId: ID }) {
             // `h-9` matches the 36px buttons so the row lines up at rest;
             // `autoFit` overwrites the inline height as content grows, capped
             // at half the viewport. `leading-5`/`py-2` keep one line at 36px.
-            className="block h-9 max-h-[50dvh] w-full resize-none overflow-y-auto rounded-md border border-border bg-background px-3 py-2 text-base leading-5 outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring sm:text-sm"
+            className="block h-9 min-h-9 max-h-[50dvh] w-full resize-none overflow-y-auto rounded-md border border-border bg-background px-3 py-2 text-base leading-5 outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring sm:text-sm"
           />
         </div>
 

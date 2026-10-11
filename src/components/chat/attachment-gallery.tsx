@@ -1,7 +1,7 @@
 
 import { useState } from "react"
 import { FileText } from '@phosphor-icons/react'
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { ImageLightbox } from "@/components/ui/image-lightbox"
 import type { Message } from "@/lib/types"
 import { DEFAULT_AVATAR } from '../../lib/utils'
 
@@ -47,16 +47,7 @@ export function AttachmentGallery({ attachments, picture = false }: { attachment
           ))}
         </div>
       )}
-      <Dialog open={!!lightbox} onOpenChange={(v) => !v && setLightbox(null)}>
-        <DialogContent className="max-w-3xl p-2">
-          <DialogTitle className="sr-only">{lightbox?.name ?? "Image"}</DialogTitle>
-          {lightbox?.url && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={lightbox.url || DEFAULT_AVATAR} alt={lightbox.name} className="max-h-[80dvh] w-full rounded object-contain" />
-          )}
-          {picture && lightbox?.name && <p className="px-1 pb-1 text-xs text-muted-foreground">{lightbox.name}</p>}
-        </DialogContent>
-      </Dialog>
+      <ImageLightbox open={!!lightbox} onOpenChange={open => { if (!open) setLightbox(null) }} src={lightbox?.url || DEFAULT_AVATAR} alt={lightbox?.name || 'Image'} caption={picture ? lightbox?.name : undefined} />
     </div>
   )
 }

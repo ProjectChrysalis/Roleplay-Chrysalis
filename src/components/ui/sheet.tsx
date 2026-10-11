@@ -38,6 +38,13 @@ function SheetOverlay({ className, ...props }: SheetPrimitive.Backdrop.Props) {
   )
 }
 
+/** Clips a sheet to a box (see clipClassName). The box itself never takes a
+ *  click, so the backdrop beside the sheet still does. */
+function SheetClip({ className, children }: { className?: string; children: React.ReactNode }) {
+  if (!className) return <>{children}</>
+  return <div data-slot="sheet-clip" className={cn("pointer-events-none fixed z-50 overflow-hidden", className)}>{children}</div>
+}
+
 function SheetContent({
   className,
   children,
@@ -46,6 +53,7 @@ function SheetContent({
   initialFocus,
   overlayClassName,
   onOverlayClick,
+  clipClassName,
   ...props
 }: SheetPrimitive.Popup.Props & {
   side?: "top" | "right" | "bottom" | "left"
@@ -54,19 +62,28 @@ function SheetContent({
   overlayClassName?: string
   /** click handler for the backdrop (self-managed close when pointer dismissal is off) */
   onOverlayClick?: () => void
+  /** the fixed box the sheet lives in and is clipped by, for a sheet that
+   *  starts beside a bar instead of at the screen edge: it slides out from
+   *  under that bar and back, never across it. The sheet is positioned
+   *  inside this box. */
+  clipClassName?: string
 }) {
   // no auto-focus into text fields on open (mobile keyboards) — see popup-focus
   const popupRef = React.useRef<HTMLDivElement | null>(null)
   return (
     <SheetPortal>
       <SheetOverlay className={overlayClassName} onClick={onOverlayClick} />
+      <SheetClip className={clipClassName}>
       <SheetPrimitive.Popup
         ref={popupRef}
         data-slot="sheet-content"
         data-side={side}
         initialFocus={initialFocus ?? popupInitialFocus(popupRef)}
         className={cn(
-          "fixed z-50 flex flex-col gap-4 bg-popover bg-clip-padding text-sm text-popover-foreground shadow-lg transition duration-200 ease-in-out data-ending-style:opacity-0 data-starting-style:opacity-0 data-[side=bottom]:inset-x-0 data-[side=bottom]:bottom-0 data-[side=bottom]:max-h-[90dvh] data-[side=bottom]:border-t data-[side=bottom]:data-ending-style:translate-y-[2.5rem] data-[side=bottom]:data-starting-style:translate-y-[2.5rem] data-[side=left]:inset-y-0 data-[side=left]:left-0 data-[side=left]:h-full data-[side=left]:w-3/4 data-[side=left]:border-r data-[side=left]:data-ending-style:translate-x-[-2.5rem] data-[side=left]:data-starting-style:translate-x-[-2.5rem] data-[side=right]:inset-y-0 data-[side=right]:right-0 data-[side=right]:h-full data-[side=right]:w-3/4 data-[side=right]:border-l data-[side=right]:data-ending-style:translate-x-[2.5rem] data-[side=right]:data-starting-style:translate-x-[2.5rem] data-[side=top]:inset-x-0 data-[side=top]:top-0 data-[side=top]:max-h-[90dvh] data-[side=top]:border-b data-[side=top]:data-ending-style:translate-y-[-2.5rem] data-[side=top]:data-starting-style:translate-y-[-2.5rem] data-[side=left]:sm:max-w-sm data-[side=right]:sm:max-w-sm",
+          // a real slide: the sheet travels its whole size from the edge it
+          // belongs to and back, with no fade standing in for the movement
+          "fixed z-50 flex flex-col gap-4 bg-popover bg-clip-padding text-sm text-popover-foreground shadow-lg transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] data-ending-style:duration-200 data-ending-style:ease-in motion-reduce:transition-none data-[side=bottom]:inset-x-0 data-[side=bottom]:bottom-0 data-[side=bottom]:max-h-[90dvh] data-[side=bottom]:border-t data-[side=bottom]:data-ending-style:translate-y-full data-[side=bottom]:data-starting-style:translate-y-full data-[side=left]:inset-y-0 data-[side=left]:left-0 data-[side=left]:h-full data-[side=left]:w-3/4 data-[side=left]:border-r data-[side=left]:data-ending-style:-translate-x-full data-[side=left]:data-starting-style:-translate-x-full data-[side=right]:inset-y-0 data-[side=right]:right-0 data-[side=right]:h-full data-[side=right]:w-3/4 data-[side=right]:border-l data-[side=right]:data-ending-style:translate-x-full data-[side=right]:data-starting-style:translate-x-full data-[side=top]:inset-x-0 data-[side=top]:top-0 data-[side=top]:max-h-[90dvh] data-[side=top]:border-b data-[side=top]:data-ending-style:-translate-y-full data-[side=top]:data-starting-style:-translate-y-full data-[side=left]:sm:max-w-sm data-[side=right]:sm:max-w-sm",
+          clipClassName && "pointer-events-auto absolute",
           className
         )}
         {...props}
@@ -89,6 +106,7 @@ function SheetContent({
           </SheetPrimitive.Close>
         )}
       </SheetPrimitive.Popup>
+      </SheetClip>
     </SheetPortal>
   )
 }
