@@ -2446,17 +2446,17 @@ function syncSwipeThinking(msg, overwrite = true) {
     if (extra[key] === undefined) delete own[key];
     else own[key] = extra[key];
   }
-  for (const key of ["model", "usage", "genMs", "params"]) if (extra[key] !== undefined) own[key] = extra[key];
+  for (const key of ["model", "usage", "genMs", "params", "presetName"]) if (extra[key] !== undefined) own[key] = extra[key];
   extra.swipeMeta[msg.swipe || 0] = own;
   return { ...msg, extra };
 }
 function restoreSwipeThinking(extra, index) {
   const next = { ...extra };
-  for (const key of [...THINKING_FIELDS, "model", "usage", "genMs", "params"]) delete next[key];
+  for (const key of [...THINKING_FIELDS, "model", "usage", "genMs", "params", "presetName"]) delete next[key];
   const own = extra?.swipeMeta?.[index];
   if (own) {
     for (const key of THINKING_FIELDS) if (own[key] !== undefined) next[key] = own[key];
-    for (const key of ["model", "usage", "genMs", "params"]) if (own[key] !== undefined) next[key] = own[key];
+    for (const key of ["model", "usage", "genMs", "params", "presetName"]) if (own[key] !== undefined) next[key] = own[key];
   }
   return next;
 }
@@ -3212,13 +3212,14 @@ export function handleRoute(req, host) {
         const content = typeof b.content === "string" ? b.content : "";
         if (!name) return err(400, "name required");
         if (!content.trim()) return err(400, "content is empty");
-        if (content.length > 2 * 1024 * 1024) return err(413, "file too large (2 MB text limit)");
+        const size = utf8Bytes(content).length;
+        if (size > 2 * 1024 * 1024) return err(413, "file too large (2 MB text limit)");
         const fid = uid("db");
         const chunks = chunkText(content);
         const file = {
           id: fid, name, scope: ["global", "character", "chat"].includes(b.scope) ? b.scope : "global",
           scopeTargetId: null, enabled: true, addedAt: Date.now(),
-          size: content.length, chunks,
+          size, chunks,
         };
         writeJson("databank/" + fid + ".json", file);
         return ok({ file: { id: fid, name, scope: file.scope, scopeTargetId: null, status: "ready", size: file.size, chunks: chunks.length, enabled: true, addedAt: file.addedAt } });
@@ -3403,7 +3404,8 @@ const forkTitle = (fsx, title) => {
   while (taken.has(n)) n++;
   return n === 1 ? base + " fork" : base + " fork " + n;
 };
-const swipeMetaEntry = (reply) => ({ model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0,
+const generationPreset = () => typeof req.stash?.presetName === "string" ? { presetName: req.stash.presetName } : {};
+const swipeMetaEntry = (reply) => ({ ...generationPreset(), model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0,
   params: reply.requestParams, reasoning: reply.reasoning, reasoningMs: reply.reasoningTimeMs, ...toolX(reply) });
 const pushSwipeMeta = (extra, swipesLen, entry) => {
   // pad unknown/misaligned history with nulls so indices always match swipes
@@ -3575,7 +3577,7 @@ const toolX = (r) => ({
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
           ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
-          stream: { chatId: id, name: speaker ? speaker.name : "" },
+          stream: { chatId: id, name: speaker ? speaker.name : "", speakerId: speaker ? speaker.id : null },
         });
         // auto memory extraction: every N messages a second pass pulls durable
         // facts into the vault (auto-in only — manual runs the extract route)
@@ -3591,7 +3593,7 @@ const toolX = (r) => ({
           }
         }
         markGenerating();
-        return pendingOut(meta, a.trimmed || plan ? { ...(a.trimmed ? { trimmed: a.trimmed } : {}), ...(plan ? { plan } : {}) } : undefined);
+        return pendingOut(meta, { presetName: a.presetName, ...(a.trimmed ? { trimmed: a.trimmed } : {}), ...(plan ? { plan } : {}) });
       }
       // PASS B: commit
       // A failed model call must not eat the user's turn: the user message is
@@ -3622,7 +3624,7 @@ const toolX = (r) => ({
       const charMsg = {
         id: typeof b.replyMessageId === "string" && b.replyMessageId ? b.replyMessageId : uid(), name: speaker.name, charId: speaker.id, role: "char",
         text: replyText, at: Date.now(), swipes: [replyText], swipe: 0,
-        extra: { model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, swipeMeta: [swipeMetaEntry(reply)], ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) },
+        extra: { ...generationPreset(), model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, swipeMeta: [swipeMetaEntry(reply)], ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) },
       };
       chat.msgs.push(charMsg);
       applyStashVars(req, meta);
@@ -3674,10 +3676,10 @@ const toolX = (r) => ({
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
           ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
-          stream: { chatId: id, name: speaker.name },
+          stream: { chatId: id, name: speaker.name, speakerId: speaker.id },
         });
         markGenerating();
-        return pendingOut(meta, a.trimmed ? { trimmed: a.trimmed } : undefined);
+        return pendingOut(meta, { presetName: a.presetName, ...(a.trimmed ? { trimmed: a.trimmed } : {}) });
       }
       if (reply.model === "error") return err(503, llmFailReason(reply));
       let replyText = String(reply.text || "").trim();
@@ -3688,7 +3690,7 @@ const toolX = (r) => ({
       const charMsg = {
         id: typeof b.replyMessageId === "string" && b.replyMessageId ? b.replyMessageId : uid(), name: speaker.name, charId: speaker.id, role: "char",
         text: replyText, at: Date.now(), swipes: [replyText], swipe: 0,
-        extra: { model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, swipeMeta: [swipeMetaEntry(reply)], ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) },
+        extra: { ...generationPreset(), model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, swipeMeta: [swipeMetaEntry(reply)], ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) },
       };
       chat.msgs.push(charMsg);
       applyStashVars(req, meta);
@@ -3748,10 +3750,10 @@ const toolX = (r) => ({
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
           ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
-          stream: { chatId: id, name: msg.name },
+          stream: { chatId: id, name: msg.name, speakerId: msg.charId },
         });
         markGenerating();
-        return pendingOut(meta);
+        return pendingOut(meta, { presetName: a.presetName });
       }
       if (reply.model === "error") return err(503, llmFailReason(reply));
       let fresh = stripEchoedName(String(reply.text || "").trim(), readJson("presets/" + (meta.presetId || "default") + ".json", null), !!group, msg.name);
@@ -3761,7 +3763,7 @@ const toolX = (r) => ({
       if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
       const previousMeta = syncSwipeThinking(msg, false).extra.swipeMeta;
       swipes.push(fresh);
-      chat.msgs[idx] = { ...msg, text: fresh, swipe: swipes.length - 1, swipes, translation: undefined, extra: pushSwipeMeta({ swipeMeta: previousMeta, model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) }, swipes.length, swipeMetaEntry(reply)) };
+      chat.msgs[idx] = { ...msg, text: fresh, swipe: swipes.length - 1, swipes, translation: undefined, extra: pushSwipeMeta({ swipeMeta: previousMeta, ...generationPreset(), model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) }, swipes.length, swipeMetaEntry(reply)) };
       applyStashVars(req, meta);
       saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
       return ok({ message: chat.msgs[idx], swipe: swipes.length - 1, count: swipes.length });
@@ -3781,6 +3783,7 @@ const toolX = (r) => ({
       const keep = !!text.trim() || parts.length > 0;
       const genMs = Math.max(0, Number(b.genMs) || 0);
       const model = typeof b.model === "string" ? b.model : "";
+      const presetName = typeof b.presetName === "string" ? b.presetName : undefined;
       if (b.targetMessageId) {
         if (!target) return err(409, "target message changed");
         const swipes = target.swipes && target.swipes.length ? target.swipes.slice() : [target.text];
@@ -3791,10 +3794,10 @@ const toolX = (r) => ({
         if (continuing) swipes[target.swipe || 0] = text;
         else swipes.push(text);
         const swipe = continuing ? target.swipe || 0 : swipes.length - 1;
-        const extra = { ...syncSwipeThinking(target, false).extra, model, genMs, usage: undefined, params: undefined, replay: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
+        const extra = { ...syncSwipeThinking(target, false).extra, presetName, model, genMs, usage: undefined, params: undefined, replay: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
         if (continuing) {
           const swipeMeta = extra.swipeMeta.slice();
-          swipeMeta[swipe] = { genMs, ...(model ? { model } : {}) };
+          swipeMeta[swipe] = { presetName, genMs, ...(model ? { model } : {}) };
           extra.swipeMeta = swipeMeta;
         }
         chat.msgs[chat.msgs.indexOf(target)] = syncSwipeThinking({ ...target, text, swipes, swipe, translation: undefined,
@@ -3814,7 +3817,7 @@ const toolX = (r) => ({
         if (keep) chat.msgs.push({
           id: b.replyMessageId || uid(), name: speaker.name, charId: speaker.id, role: "char",
           text, at: Date.now(), swipes: [text], swipe: 0,
-          extra: { ...(parts.length ? { parts } : {}), genMs, ...(model ? { model } : {}) },
+          extra: { presetName, ...(parts.length ? { parts } : {}), genMs, ...(model ? { model } : {}) },
         });
       }
       applyStashVars(req, meta);
@@ -3864,10 +3867,10 @@ const toolX = (r) => ({
           ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
           ...(a.cache ? { cache: a.cache } : {}),
           wantsTools: true,
-          stream: { chatId: id, name: msg.name },
+          stream: { chatId: id, name: msg.name, speakerId: msg.charId },
         });
         markGenerating();
-        return pendingOut(meta);
+        return pendingOut(meta, { presetName: a.presetName });
       }
       if (reply.model === "error") return err(503, llmFailReason(reply));
       const extra = onSave(String(reply.text || "").trim(), "ai_output", speaker);
@@ -3875,7 +3878,7 @@ const toolX = (r) => ({
       const merged = msg.text + (/\s$/.test(msg.text) ? "" : " ") + extra;
       const swipes = msg.swipes && msg.swipes.length ? msg.swipes.slice() : [msg.text];
       swipes[msg.swipe || 0] = merged;
-      const contExtra = { ...msg.extra, model: reply.model, continued: true, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) };
+      const contExtra = { ...msg.extra, presetName: undefined, ...generationPreset(), model: reply.model, continued: true, params: reply.requestParams ?? undefined, ...toolX(reply), ...(reply.reasoning ? { reasoning: reply.reasoning } : {}), ...(reply.reasoningTimeMs ? { reasoningMs: reply.reasoningTimeMs } : {}) };
       contExtra.reasoning = [msg.extra?.reasoning, reply.reasoning].filter(Boolean).join("\n") || undefined;
       const thinkingMs = (msg.extra?.reasoningMs || 0) + (reply.reasoningTimeMs || 0);
       contExtra.reasoningMs = thinkingMs || undefined;

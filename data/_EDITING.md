@@ -137,6 +137,23 @@ in `studio`: `namesBehavior`, `verbosity`, `continuePrefill`,
 read `Preset` / `SamplerSettings` for all nested options. Unknown metadata and
 inactive prompt layouts survive UI edits.
 
+## Folders and list order
+
+Presets and lorebooks can sit in folders in their sidebar lists. A folder is
+an item of `library.json` `folders`: `{id, name, color, scope}`. `scope` is
+`presets` or `lorebooks` for these lists (other values belong to other lists)
+and `id` is new and unique. Folders show in the order the array holds them.
+Membership lives on the item, not the folder: `studio.folderId` in a preset,
+top-level `folderId` in a lorebook. It is the ID of a folder with the matching
+scope, or `null` for none. A locked preset accepts a folder change and nothing
+else. Removing a folder does not remove its items: set their `folderId` to
+`null` as well. Folders never affect generation or lore activation.
+
+The order of items in both lists is `settings.json` `ui.libraryOrder`:
+`{presets: [ids], lorebooks: [ids]}`. One sequence per list; every folder
+shows its items in that sequence, and IDs it does not hold come last. To
+reorder, replace that list's whole array and keep every ID it already had.
+
 ## Other data
 
 - Lorebooks: template has entry matching, insertion, and scan settings. Entry

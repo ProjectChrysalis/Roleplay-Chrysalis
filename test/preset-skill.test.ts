@@ -102,3 +102,20 @@ it("sandbox editor rejects stale, locked and mismatched mappings and removes dis
   const plan = edit({ preset: "one", revision: fixtureHost.revision, samplers: { temperature: { enabled: false } } }, fixtureHost.host); const saved = JSON.parse(plan.writes[0].content); expect(saved.temperature).toBeUndefined(); expect(saved.studio.samplers.temperature).toEqual({ value: 1, enabled: false });
   preset.studio.readOnly = true; fixtureHost = editorHost(preset); expect(() => edit({ preset: "one", section: "section", revision: fixtureHost.revision, patch: { content: "after" } }, fixtureHost.host)).toThrow("locked");
 });
+it("a locked preset moves between folders, and a folder lists its presets", () => {
+  const { preset } = fixture();
+  const stored = { ...preset, name: "Stock", studio: { ...preset.studio, readOnly: true, folderId: null as string | null } };
+  const files: Record<string, string> = { "presets/one.json": JSON.stringify(stored), "library.json": JSON.stringify({ folders: [{ id: "styles", name: "Styles", scope: "presets" }, { id: "lore", name: "Places", scope: "lorebooks" }] }) };
+  const revision = () => createHash("sha256").update(files["presets/one.json"]!).digest("hex");
+  const host = { fs: { list: () => ["one.json"], read: (file: string) => files[file]!, readVersioned: (file: string) => ({ text: files[file]!, revision: revision() }) } };
+  expect(() => edit({ preset: "one", revision: revision(), studio: { folderId: "styles", verbosity: "long" } }, host)).toThrow("locked");
+  expect(() => edit({ preset: "one", revision: revision(), studio: { folderId: "lore" } }, host)).toThrow("scope is presets");
+  const plan = edit({ preset: "one", revision: revision(), studio: { folderId: "styles" } }, host);
+  files["presets/one.json"] = plan.writes[0].content;
+  const saved = JSON.parse(files["presets/one.json"]!);
+  expect(saved.studio).toMatchObject({ folderId: "styles", readOnly: true }); expect(saved.prompts).toEqual(stored.prompts);
+  const listed = inspect({ folder: "styles" }, host);
+  expect(listed.matches).toHaveLength(1); expect(listed.matches[0]).toMatchObject({ id: "one", folderId: "styles", readOnly: true }); expect(listed.matches[0].sections).toBeUndefined();
+  expect(inspect({ folder: "lore" }, host).matches).toEqual([]);
+  expect(inspect({ preset: "one" }, host).matches[0]).toMatchObject({ folderId: "styles" });
+});

@@ -19,6 +19,8 @@ Pass `query` (when applicable), the inspected `revision`, and `patch` to `skill_
 
 There is one settings.json. Omit query. fields:["/ui","/ui/notifications","/ui/notificationPosition"] reads selected controls; fields:[""] reads the existing configuration when necessary. Deep patches preserve unrelated settings. Do not overwrite settings with a template. Engine-wide credentials and server settings are outside this app skill; use their engine tools instead. Theme definitions and connection profiles are library data.
 
+`ui.libraryOrder` is the manual order of the preset and lorebook lists: `{"presets":[ids],"lorebooks":[ids]}`. To reorder, patch that list's whole array and keep every ID it already had; IDs it does not hold show last.
+
 ## Additional fields and fallback
 
 The helper can inspect any stored field and merge unknown extension fields without discarding them. For unfamiliar controls, read only the matching entity section of `../../../data/_EDITING.md`, its entry in `../../../data/_catalog.json`, and the indicated types/adapter or route. Runtime file fields can differ from UI names. Never guess a translation or rebuild a record from a subset.

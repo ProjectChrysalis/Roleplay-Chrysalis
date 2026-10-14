@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { unzipSync } from "fflate";
 import { fileURLToPath } from "node:url";
+import type { EngineMessage } from "../src/lib/engine";
 
 const engineUrl = new URL("../plugins/engine/plugin.js", import.meta.url).href;
 const stUrl = new URL("../plugins/studio-import/plugin.js", import.meta.url).href;
@@ -293,6 +294,31 @@ describe("rp studio engine: chats + swipes", () => {
     expect(users[0]!.text).toBe("hello");
   }, 30_000);
 
+  it("keeps the generation preset snapshot through edits, swipes and Continue", async () => {
+    const m = mockHost();
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = (created.json.meta as { id: string }).id;
+    const mod = (await import(engineUrl)) as { handleRoute: Function };
+    const call = { method: "POST", path: `/chats/${id}/send`, query: {}, body: { text: "Hello" } };
+    const pending = mod.handleRoute(call, m.host);
+    expect(pending.stash.presetName).toBe("Default");
+    const presetFile = path.join(root, "presets", "default.json");
+    const preset = JSON.parse(fs.readFileSync(presetFile, "utf8"));
+    fs.writeFileSync(presetFile, JSON.stringify({ ...preset, name: "Renamed" }));
+    m.resolve();
+    const sent = mod.handleRoute({ ...call, stash: pending.stash }, m.host);
+    const reply = sent.json.reply;
+    expect(reply.extra.presetName).toBe("Default");
+    expect(reply.extra.swipeMeta[0].presetName).toBe("Default");
+    const swiped = await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe`, body: { dir: 1 } }, m);
+    expect((swiped.json.message as EngineMessage).extra?.swipeMeta?.map((entry) => entry?.presetName)).toEqual(["Default", "Renamed"]);
+    const previous = await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe`, body: { dir: -1 } }, m);
+    expect((previous.json.message as EngineMessage).extra?.presetName).toBe("Default");
+    const continued = await drive(engineUrl, { method: "POST", path: `/chats/${id}/continue` }, m);
+    expect((continued.json.message as EngineMessage).extra?.presetName).toBe("Renamed");
+    expect((continued.json.message as EngineMessage).extra?.swipeMeta?.[0]?.presetName).toBe("Renamed");
+  });
+
   it("send commits user + char messages (two-phase) with macros and sampler", async () => {
     const m = mockHost();
     await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
@@ -387,7 +413,7 @@ describe("rp studio engine: chats + swipes", () => {
     const id = (created.json.meta as { id: string }).id;
     const failing = mockHost("error");
     await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hello", userMessageId: "pending-user" } }, failing);
-    const body = { text: "A partial reply", userText: "hello", userMessageId: "pending-user", replyMessageId: "pending-reply" };
+    const body = { presetName: "Original preset", text: "A partial reply", userText: "hello", userMessageId: "pending-user", replyMessageId: "pending-reply" };
     for (let i = 0; i < 2; i++) {
       const saved = await drive(engineUrl, { method: "POST", path: `/chats/${id}/cancelled`, body }, m);
       expect(saved.status).toBe(200);
@@ -395,7 +421,7 @@ describe("rp studio engine: chats + swipes", () => {
     const saved = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
     const messages = saved.json.messages as { id: string; text: string }[];
     expect(messages.filter((msg) => msg.id === "pending-user")).toHaveLength(1);
-    expect(messages.filter((msg) => msg.id === "pending-reply")).toEqual([expect.objectContaining({ text: "A partial reply" })]);
+    expect(messages.filter((msg) => msg.id === "pending-reply")).toEqual([expect.objectContaining({ text: "A partial reply", extra: expect.objectContaining({ presetName: "Original preset" }) })]);
   });
 
   it("a completed reply wins a late interrupted save without cloning it", async () => {
@@ -1156,6 +1182,15 @@ describe("rp studio engine: export + regex + prompt preview", () => {
 });
 
 describe("rp studio engine: data bank retrieval", () => {
+  it("measures Unicode documents and enforces the UTF-8 byte limit", async () => {
+    const content = "日本語 🐉 café\n".repeat(100);
+    const m = mockHost();
+    const uploaded = await drive(engineUrl, { method: "POST", path: "/databank", body: { name: "unicode.txt", content } }, m);
+    expect(uploaded.status).toBe(200);
+    expect((uploaded.json.file as { size: number }).size).toBe(Buffer.byteLength(content));
+    const oversized = await drive(engineUrl, { method: "POST", path: "/databank", body: { name: "large.txt", content: "日".repeat(700000) } }, m);
+    expect(oversized.status).toBe(413);
+  });
   it("dense short chunks outrank long filler; stopword-only queries match nothing", async () => {
     const m = mockHost();
     await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
@@ -2950,6 +2985,20 @@ describe("rp studio: backup zips survive the trip", () => {
       const book = JSON.parse(fs.readFileSync(path.join(root, "lorebooks", `${meta.chatLorebookIds[0]}.json`), "utf8"));
       expect(book.name).toBe("Local lore");
     }
+  });
+
+  it("restores chat backups when no regex directory has been created", async () => {
+    const chat = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, mockHost());
+    const entries = await exportEntries(mockHost());
+    fs.rmSync(path.join(root, "regex"), { recursive: true });
+    const restored = mockHost();
+    (restored.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const result = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, restored);
+    expect(result.json.errors).toEqual([]);
+    expect(result.json.chats).toHaveLength(1);
+    const id = (result.json.chats as string[])[0];
+    const transcript = fs.readFileSync(path.join(root, "chats", `${id}.jsonl`), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(transcript.map((message) => message.text)).toEqual((chat.json.messages as { text: string }[]).map((message) => message.text));
   });
 
   it("writes UTF-8, not latin1 with every other character punched out", async () => {

@@ -1,6 +1,6 @@
 ---
 name: library-editing
-description: Inspect, create, or edit quick replies, reply sets, themes, backgrounds, tags, folders, connection profiles, and shared library collections. Use for read-only questions about these records as well as requested changes.
+description: Inspect, create, or edit quick replies, reply sets, themes, backgrounds, tags, folders (including preset and lorebook folders), connection profiles, and shared library collections. Use for read-only questions about these records as well as requested changes.
 ---
 
 # Library collections
@@ -18,6 +18,8 @@ Answer once the requested facts are returned. If names are ambiguous, show relev
 Pass `query` (when applicable), the inspected `revision`, and `patch` to `skill_edit`. Use stored property names in patch, not JSON pointers: `patch:{"enabled":false}`. A key such as `"/disabled"` is invalid in a patch. Object patches merge deeply and preserve unknown fields. Arrays explicitly supplied in a patch replace that array; preserve unrequested elements. Null clears a nullable field; do not substitute false or an empty string. A stale revision fails: inspect again and reconcile the newer values instead of blindly retrying. Read the changed fields back to verify the result. Do not edit code for a data change.
 
 All collections share library.json. Inspect without collection to get real collection names and counts. Then provide collection: the stored array name, and item: an ID or unique name. patch edits one item; add-item requires a new unique ID; remove-item requires exact resolution. Arrays are replaced when explicitly patched, so inspecting a reply set and changing replies requires preserving all other replies. Do not rename IDs to move references. Preserve other collections and built-in flags. Inspect types and existing item shapes before creating a theme or connection profile; do not store provider secrets here.
+
+Folders group presets, lorebooks and other lists. Inspect `{"collection":"folders"}` to see each folder's id, name and scope. Create one with `operation:"add-item"`, `collection:"folders"` and `patch:{"id":"new-unique-id","name":"...","color":"#8ec9a8","scope":"presets"}`; scope is `presets` or `lorebooks` for those lists. Folders show in array order. A folder holds no member list: put a preset in it with the preset skill (`studio:{"folderId":"..."}`) and a lorebook with the lorebook skill (`patch:{"folderId":"..."}`). Before removing a folder, set the `folderId` of its items to null. Item order inside the lists is `ui.libraryOrder` in settings.json.
 
 For a nested item, supply `item` and patch only the requested fields. `operation:"add-item"` creates an item; `operation:"remove-item"` removes it. Inspect the existing collection and relevant schema before changing structure.
 

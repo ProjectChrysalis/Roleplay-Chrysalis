@@ -285,6 +285,7 @@ export function RegexView() {
   return (
     <>
     <MasterDetail
+      resizeKey="regex"
       pageScroll
       masterWidth="w-80"
       detailOpen={detailOpen && !!selected}

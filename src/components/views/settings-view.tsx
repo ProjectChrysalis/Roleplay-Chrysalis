@@ -272,6 +272,7 @@ export function SettingsView() {
 
   return (
     <MasterDetail
+      resizeKey="settings"
       detailOpen={detailOpen}
       onBack={() => setDetailOpen(false)}
       detailTitle={activeLabel}

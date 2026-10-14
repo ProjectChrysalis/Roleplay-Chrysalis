@@ -78,6 +78,14 @@ it("data-bank content uses upload chunk boundaries and actual size", async () =>
   f.apply(await edit("databank", { query: "doc", revision: result.results[0].revision, content }, f.host));
   const saved = JSON.parse(f.read("databank/doc.json")); expect(saved.size).toBe(content.length); expect(saved.unknown).toBe(9); expect(saved.chunks.map((item: any) => item.text)).toEqual([content.slice(0, 1000), content.slice(850, 1850), content.slice(1700, 2700)]);
 });
+it("data-bank edits measure UTF-8 bytes and enforce the same upload limit", async () => {
+  const f = fixture(), row = (await inspect("databank", { query: "doc" }, f.host)).results[0];
+  const content = "日本語 🐉 café\n".repeat(100);
+  f.apply(await edit("databank", { query: "doc", revision: row.revision, content }, f.host));
+  expect(JSON.parse(f.read("databank/doc.json")).size).toBe(Buffer.byteLength(content));
+  const current = (await inspect("databank", { query: "doc" }, f.host)).results[0];
+  await expect(edit("databank", { query: "doc", revision: current.revision, content: "日".repeat(700000) }, f.host)).rejects.toThrow("2 MB");
+});
 it("rejects ambiguous targets, stale revisions, invalid references, pattern errors, and identity changes", async () => {
   const f = fixture(); f.put("lorebooks/copy.json", { ...JSON.parse(f.read("lorebooks/book.json")), id: "copy", name: "Coastal Lore Copy" });
   const ambiguous = await inspect("lorebook", { query: "Coastal" }, f.host); expect(ambiguous.ambiguous).toBe(true);
@@ -108,4 +116,19 @@ it("unknown arguments fail before inspection instead of silently widening the se
   const f = fixture();
   await expect(inspect("lorebook", { search: "Coastal Lore" }, f.host)).rejects.toThrow("Unknown argument");
   await expect(inspect("chat", { query: "chat", chat: "other", message: "m1" }, f.host)).rejects.toThrow("Conflicting");
+});
+it("folders are created with a scope and items join only folders of their own list", async () => {
+  const f = fixture();
+  const library = async () => (await inspect("library", { collection: "folders" }, f.host)).results[0];
+  await expect(edit("library", { collection: "folders", operation: "add-item", revision: (await library()).revision, patch: { id: "loose", name: "No scope" } }, f.host)).rejects.toThrow("scope");
+  f.apply(await edit("library", { collection: "folders", operation: "add-item", revision: (await library()).revision, patch: { id: "lore", name: "Places", color: "#8ec9a8", scope: "lorebooks" } }, f.host));
+  f.apply(await edit("library", { collection: "folders", operation: "add-item", revision: (await library()).revision, patch: { id: "styles", name: "Styles", color: "#8ec9a8", scope: "presets" } }, f.host));
+  expect((await library()).items).toEqual([{ id: "folder", name: "keep", enabled: null, scope: null }, { id: "lore", name: "Places", enabled: null, scope: "lorebooks" }, { id: "styles", name: "Styles", enabled: null, scope: "presets" }]);
+  const book = async () => (await inspect("lorebook", {}, f.host)).results[0];
+  expect((await book()).folderId).toBeNull();
+  for (const folderId of ["styles", "missing"]) await expect(edit("lorebook", { query: "book", revision: (await book()).revision, patch: { folderId } }, f.host)).rejects.toThrow("scope is lorebooks");
+  f.apply(await edit("lorebook", { query: "book", revision: (await book()).revision, patch: { folderId: "lore" } }, f.host));
+  expect((await book()).folderId).toBe("lore");
+  f.apply(await edit("lorebook", { query: "book", revision: (await book()).revision, patch: { folderId: null } }, f.host));
+  expect(JSON.parse(f.read("lorebooks/book.json"))).toMatchObject({ folderId: null, extensions: { opaque: true } });
 });

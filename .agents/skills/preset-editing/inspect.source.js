@@ -30,7 +30,8 @@ function sectionResult(record, prompt, includeContent) {
 }
 
 export function inspect(args, host) {
-  if (typeof args.preset !== "string" || !args.preset.trim()) throw new Error("Provide preset: a name, abbreviation, or exact ID");
+  if (args.folder !== undefined && (typeof args.folder !== "string" || !args.folder.trim())) throw new Error("folder must be a folder ID from library.json folders");
+  if (args.folder === undefined || args.preset !== undefined) if (typeof args.preset !== "string" || !args.preset.trim()) throw new Error("Provide preset: a name, abbreviation, or exact ID");
   if (args.section !== undefined && (typeof args.section !== "string" || !args.section.trim())) throw new Error("Section must be a name fragment or identifier");
   if (args.includeContent !== undefined && typeof args.includeContent !== "boolean") throw new Error("includeContent must be boolean");
   const found = [], errors = [];
@@ -43,17 +44,18 @@ export function inspect(args, host) {
     catch (e) { errors.push({ file, error: String(e.message ?? e) }); continue; }
     scanned++;
     const id = record.id ?? file.slice(0, -5);
-    if (!matches(args.preset, record.name, id) && !matches(args.preset, record.studio?.name, id)) continue;
+    if (args.preset !== undefined && !matches(args.preset, record.name, id) && !matches(args.preset, record.studio?.name, id)) continue;
+    if (args.folder !== undefined && record.studio?.folderId !== args.folder) continue;
     const prompts = record.prompts ?? [];
     if (!Array.isArray(prompts)) { errors.push({ file, error: "prompts must be an array" }); continue; }
     const selected = args.section ? prompts.filter((prompt) => matches(args.section, prompt.name, prompt.identifier)) : prompts;
     try { found.push({ id, name: record.name, editorName: record.studio?.name ?? null, file: "presets/" + file,
-      revision, ...(args.fields ? selectedFields(record, args.fields) : {}), readOnly: Boolean(record.studio?.readOnly), isDefault: Boolean(record.studio?.isDefault),
-      sections: selected.map((prompt) => sectionResult(record, prompt, args.includeContent ?? Boolean(args.section))),
+      revision, ...(args.fields ? selectedFields(record, args.fields) : {}), readOnly: Boolean(record.studio?.readOnly), isDefault: Boolean(record.studio?.isDefault), folderId: record.studio?.folderId ?? null,
+      ...(args.preset === undefined ? {} : { sections: selected.map((prompt) => sectionResult(record, prompt, args.includeContent ?? Boolean(args.section))) }),
       ...(args.section && !selected.length ? { availableSections: prompts.map(({ identifier, name }) => ({ identifier, name })) } : {}) }); }
     catch (e) { errors.push({ file, error: String(e.message ?? e) }); }
   }
-  return { query: { preset: args.preset, section: args.section ?? null }, scanned, ambiguous: found.length > 1,
+  return { query: { preset: args.preset ?? null, section: args.section ?? null, folder: args.folder ?? null }, scanned, ambiguous: args.preset !== undefined && found.length > 1,
     matches: found, errors,
-    guidance: found.length > 1 ? "Multiple matching presets. Show the requested field for each, or ask which preset to edit. Do not infer the current chat's preset from defaults or historical chat references." : found.length === 0 ? "No matching preset. Ask for its full name or ID." : null };
+    guidance: args.preset === undefined ? null : found.length > 1 ? "Multiple matching presets. Show the requested field for each, or ask which preset to edit. Do not infer the current chat's preset from defaults or historical chat references." : found.length === 0 ? "No matching preset. Ask for its full name or ID." : null };
 }

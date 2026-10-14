@@ -1,15 +1,17 @@
-import { useViewScroll } from '@/lib/view-memory'
+import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
 import type { ReactNode } from 'react'
 import { CaretLeft } from '@phosphor-icons/react'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useBackClose } from '@/hooks/use-back-close'
 import { cn } from '@/lib/utils'
+import { ResizeHandle } from '@/components/ui/resize-handle'
 
 /**
  * Two-pane master/detail layout.
  *
- * Desktop (>=768px): master and detail sit side by side, exactly as before.
+ * Desktop (>=768px): master and detail sit side by side. The border between
+ *                    them drags, and the width is remembered per `resizeKey`.
  * Mobile  (<768px):  only one pane is mounted at a time. The detail pane takes
  *                    the full width in a single page scroller whose first row
  *                    is the back header — it scrolls WITH the page instead of
@@ -23,6 +25,7 @@ export function MasterDetail({
   onBack,
   detailTitle,
   memoryKey,
+  resizeKey,
   masterWidth = 'w-64',
   pageScroll = false,
   master,
@@ -34,7 +37,9 @@ export function MasterDetail({
   /** Shown in the mobile back header. */
   detailTitle?: string
   memoryKey?: string
-  /** Tailwind width class for the master pane on desktop. */
+  /** Names this layout: the master width the user dragged is kept under it. */
+  resizeKey: string
+  /** Tailwind width class for the master pane on desktop, until resized. */
   masterWidth?: string
   pageScroll?: boolean
   master: ReactNode
@@ -43,6 +48,8 @@ export function MasterDetail({
   const isMobile = useIsMobile()
   useBackClose(detailOpen, onBack)
   const scrollRef = useViewScroll(`${memoryKey}.mobile`, !!memoryKey && isMobile && detailOpen, true)
+  // 0 until the user picks a width
+  const [width, setWidth] = useViewMemory(`layout.${resizeKey}.master`, 0, true)
 
   if (isMobile) {
     if (!detailOpen) {
@@ -80,7 +87,13 @@ export function MasterDetail({
     // grown height, and the overflow becomes unreachable instead of scrolling
     // (the Lorebooks / Presets / Regex "can't scroll down" bug).
     <div className={cn('flex min-h-0', !pageScroll && 'h-full overflow-hidden')}>
-      <div className={cn('flex min-h-0 shrink-0 flex-col border-r border-border', masterWidth)}>{master}</div>
+      <div
+        className={cn('relative flex min-h-0 shrink-0 flex-col border-r border-border', masterWidth, 'max-w-[calc(100%-15rem)] min-w-40')}
+        style={width ? { width } : undefined}
+      >
+        {master}
+        <ResizeHandle label="Resize the list" min={160} reserve={240} onResize={setWidth} onReset={() => setWidth(0)} />
+      </div>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">{detail}</div>
     </div>
   )

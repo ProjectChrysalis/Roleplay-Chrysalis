@@ -8,7 +8,7 @@ Object.defineProperty(globalThis, 'location', { configurable: true, value: { pat
 Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem: () => {}, removeItem: () => {} } })
 Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: globalThis.localStorage, matchMedia: () => ({ matches: false }) } })
 const { useApp } = await import('../src/lib/store')
-const { engineChatToUI } = await import('../src/lib/engine')
+const { engineChatToUI, enginePresetToUI } = await import('../src/lib/engine')
 const { toast } = await import('sonner')
 useApp.persist.setOptions({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } })
 afterAll(() => {
@@ -130,4 +130,17 @@ it('a failed save leaves the partial reply visible and Retry persists it', async
   await idle()
   expect(cancelled).toHaveLength(1)
   expect(useApp.getState().chats[0]!.messages.at(-1)!.id.startsWith('pending-')).toBe(false)
+})
+
+it('stopped replies keep the preset captured before a rename', async () => {
+  const preset = enginePresetToUI({ id: 'default', name: 'Original preset' }, 'default')
+  useApp.setState({ presets: [preset] })
+  useApp.getState().sendMessage(meta.id, 'Hello')
+  await idle()
+  const st = useApp.getState().streaming!
+  expect(st.presetName).toBe('Original preset')
+  useApp.setState({ presets: [{ ...preset, name: 'Renamed preset' }], streaming: { ...st, full: 'Partial', shown: 7 } })
+  useApp.getState().stopStreaming()
+  await idle()
+  expect(cancelled[0]?.presetName).toBe('Original preset')
 })

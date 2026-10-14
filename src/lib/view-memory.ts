@@ -1,8 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 
-function read<T>(key: string, fallback: T): T {
+function read<T>(key: string, fallback: T, persistent = false): T {
   try {
-    const value: unknown = JSON.parse(sessionStorage.getItem(`chrysalis.view.${key}`) ?? 'null')
+    const value: unknown = JSON.parse((persistent ? localStorage.getItem(`chrysalis.view.${key}`) : null) ?? sessionStorage.getItem(`chrysalis.view.${key}`) ?? 'null')
     if (value === null) return fallback
     if (Array.isArray(fallback)) return Array.isArray(value) && value.every((v) => typeof v === 'string') ? value as T : fallback
     if (fallback === null) return typeof value === 'string' ? value as T : fallback
@@ -10,22 +10,22 @@ function read<T>(key: string, fallback: T): T {
   } catch { return fallback }
 }
 
-function write(key: string, value: unknown) {
-  try { sessionStorage.setItem(`chrysalis.view.${key}`, JSON.stringify(value)) } catch { /* storage unavailable */ }
+function write(key: string, value: unknown, persistent = false) {
+  try { (persistent ? localStorage : sessionStorage).setItem(`chrysalis.view.${key}`, JSON.stringify(value)) } catch { /* storage unavailable */ }
 }
 
-export function useViewMemory<T>(key: string, fallback: T): [T, Dispatch<SetStateAction<T>>] {
-  const [record, setRecord] = useState(() => ({ key, value: read(key, fallback) }))
-  const value = record.key === key ? record.value : read(key, fallback)
+export function useViewMemory<T>(key: string, fallback: T, persistent = false): [T, Dispatch<SetStateAction<T>>] {
+  const [record, setRecord] = useState(() => ({ key, value: read(key, fallback, persistent) }))
+  const value = record.key === key ? record.value : read(key, fallback, persistent)
   if (record.key !== key) setRecord({ key, value })
   const setValue = useCallback<Dispatch<SetStateAction<T>>>((next) => {
     setRecord((previous) => {
-      const current = previous.key === key ? previous.value : read(key, fallback)
+      const current = previous.key === key ? previous.value : read(key, fallback, persistent)
       const value = typeof next === 'function' ? (next as (value: T) => T)(current) : next
-      write(key, value)
+      write(key, value, persistent)
       return { key, value }
     })
-  }, [key, fallback])
+  }, [key, fallback, persistent])
   return [value, setValue]
 }
 

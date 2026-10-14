@@ -1,6 +1,6 @@
 ---
 name: preset-editing
-description: Inspect, read, create, or edit Roleplay presets, prompt sections, their text, enabled state, order, and generation settings. Use for questions about any field or section in a preset, including read-only requests.
+description: Inspect, read, create, or edit Roleplay presets, prompt sections, their text, enabled state, order, generation settings, and which folder a preset is in. Use for questions about any field or section in a preset, including read-only requests.
 ---
 
 # Presets
@@ -22,7 +22,10 @@ call; filenames do not need to be known. It returns content, enabled state,
 placement, and agreement between portable/editor values. Without `section`, it
 returns a compact section list; `includeContent:true` requests full text.
 `fields` accepts stored JSON pointers, such as `/studio/samplers`, to inspect
-any other preset control. The result includes the revision for editing.
+any other preset control. The result includes the revision for editing and
+`folderId`, the preset's folder (an ID from `library.json` `folders`, or null).
+`{"folder":"folder-id"}` without `preset` lists the presets in that folder,
+without their sections.
 
 When the requested field is returned, answer from it and stop. If multiple
 presets match, show that field for each in a read-only request, or ask which one
@@ -59,6 +62,10 @@ copies, and `extendedSamplers` changes forwarded parameters and their editor
 copy. Inspect these fields first. Creation uses `operation:"create",id` and
 these same arguments with the preset template. Read back changed fields.
 Stale revisions, locked presets, and ambiguous section mappings are refused.
+
+To move a preset into a folder pass only `studio:{"folderId":"folder-id"}`
+(null takes it out). The folder must exist with scope `presets`; create it with
+the library skill first. This is the one edit a locked preset accepts.
 
 If skill_edit is unavailable, the file helper accepts a final JSON patch argument:
 `node scripts/preset.mjs <preset-file> <identifier> '{"content":"...","enabled":true}'`.

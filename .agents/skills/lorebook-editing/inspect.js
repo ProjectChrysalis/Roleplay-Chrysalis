@@ -113,6 +113,8 @@ function inspectData(kind, args, host) {
   const results = found.slice(recordOffset, recordOffset + limit).map((row) => {
     const record = row.record;
     const out = { id: row.id ?? record.id ?? kind, name: record.name ?? record.title ?? record.scriptName ?? kind, file: row.file, revision: row.revision };
+    if (kind === "lorebook")
+      out.folderId = record.folderId ?? null;
     if (args.query || spec.single)
       Object.assign(out, selectedFields(record, args.fields ?? spec.fields));
     if (kind === "library" && !args.collection)
@@ -120,7 +122,7 @@ function inspectData(kind, args, host) {
     if ((args.query || spec.single) && (spec.items || args.collection)) {
       const items = itemRows(row, spec, args);
       out.itemCount = items.entries.length;
-      out.items = items.entries.slice(args.item === undefined ? offset : 0, (args.item === undefined ? offset : 0) + limit).map((item) => args.item !== undefined ? item : { id: itemId(item), name: item.title ?? item.name ?? item.scriptName ?? item.memo ?? null, enabled: item.enabled ?? null });
+      out.items = items.entries.slice(args.item === undefined ? offset : 0, (args.item === undefined ? offset : 0) + limit).map((item) => args.item !== undefined ? item : { id: itemId(item), name: item.title ?? item.name ?? item.scriptName ?? item.memo ?? null, enabled: item.enabled ?? null, ...items.collection === "folders" ? { scope: item.scope ?? null } : {} });
       out.itemsMore = items.entries.length > (args.item === undefined ? offset : 0) + limit;
     }
     if (kind === "chat" && (args.message !== undefined || args.messages)) {

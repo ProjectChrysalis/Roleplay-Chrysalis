@@ -2,6 +2,7 @@
   "id": "example-lorebook",
   "name": "Example — The Blue Door Tavern",
   "globalActive": false,
+  "folderId": null,
   "linkedCharacterIds": [],
   "entries": [
     {

@@ -11,6 +11,7 @@ const definitions = {
 };
 const idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
+const folderScopes = ["characters", "personas", "presets", "lorebooks", "chats", "backgrounds", "connections"];
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function terms(value) { return String(value ?? "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []; }
@@ -29,6 +30,11 @@ export function selectedFields(record, fields) {
   const values = {}, missing = [];
   for (const field of fields) { const value = valueAt(record, field); if (value === undefined) missing.push(field); else values[field] = value; }
   return { values, missing };
+}
+export function assertFolder(host, id, scope) {
+  if (id === null) return;
+  const folders = JSON.parse(host.fs.read("library.json")).folders;
+  if (!Array.isArray(folders) || !folders.some((folder) => folder.id === id && folder.scope === scope)) throw new Error("folderId must be null or the ID of a library.json folder whose scope is " + scope);
 }
 export function merge(target, patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("patch must be an object");
@@ -89,12 +95,13 @@ export function inspectData(kind, args, host) {
   const results = found.slice(recordOffset, recordOffset + limit).map((row) => {
     const record = row.record;
     const out = { id: row.id ?? record.id ?? kind, name: record.name ?? record.title ?? record.scriptName ?? kind, file: row.file, revision: row.revision };
+    if (kind === "lorebook") out.folderId = record.folderId ?? null;
     if (args.query || spec.single) Object.assign(out, selectedFields(record, args.fields ?? spec.fields));
     if (kind === "library" && !args.collection) out.collections = Object.entries(record).filter(([, value]) => Array.isArray(value)).map(([name, value]) => ({ name, count: value.length }));
     if ((args.query || spec.single) && (spec.items || args.collection)) {
       const items = itemRows(row, spec, args);
       out.itemCount = items.entries.length;
-      out.items = items.entries.slice(args.item === undefined ? offset : 0, (args.item === undefined ? offset : 0) + limit).map((item) => args.item !== undefined ? item : { id: itemId(item), name: item.title ?? item.name ?? item.scriptName ?? item.memo ?? null, enabled: item.enabled ?? null });
+      out.items = items.entries.slice(args.item === undefined ? offset : 0, (args.item === undefined ? offset : 0) + limit).map((item) => args.item !== undefined ? item : { id: itemId(item), name: item.title ?? item.name ?? item.scriptName ?? item.memo ?? null, enabled: item.enabled ?? null, ...(items.collection === "folders" ? { scope: item.scope ?? null } : {}) });
       out.itemsMore = items.entries.length > (args.item === undefined ? offset : 0) + limit;
     }
     if (kind === "chat" && (args.message !== undefined || args.messages)) {
@@ -136,10 +143,15 @@ function assertReferences(kind, record, host) {
 }
 function serialize(row) { return { path: row.file, expectedRevision: row.revision, content: JSON.stringify(row.record, null, 2) + "\n" }; }
 function setDocument(record, content) {
-  if (typeof content !== "string" || !content.trim() || content.length > 2 * 1024 * 1024) throw new Error("Provide nonempty document content under 2 MB");
+  let size = 0;
+  if (typeof content === "string") for (const char of content) {
+    const code = char.codePointAt(0);
+    size += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+  }
+  if (typeof content !== "string" || !content.trim() || size > 2 * 1024 * 1024) throw new Error("Provide nonempty document content under 2 MB");
   const chunks = [];
   for (let i = 0; i < content.length; i += 850) { const text = content.slice(i, i + 1000); if (text.trim()) chunks.push({ i: chunks.length, text }); if (i + 1000 >= content.length) break; }
-  record.chunks = chunks; record.size = content.length;
+  record.chunks = chunks; record.size = size;
 }
 export function editData(kind, args, host) {
   args = argumentsFor(kind, args, true);
@@ -158,6 +170,7 @@ export function editData(kind, args, host) {
     if (own(record, "createdAt")) record.createdAt = Date.now();
     if (record.studio && own(record.studio, "createdAt")) record.studio.createdAt = Date.now();
     merge(record, args.patch ?? {});
+    if (kind === "lorebook" && own(args.patch ?? {}, "folderId")) assertFolder(host, record.folderId, "lorebooks");
     if (kind === "databank") setDocument(record, args.content);
     if (record.id !== undefined && record.id !== args.id) throw new Error("ID must match the new file");
     assertReferences(kind, record, host);
@@ -194,7 +207,7 @@ export function editData(kind, args, host) {
       if (kind === "lorebook") { const template = JSON.parse(host.fs.read("_templates/_lorebook.json")); item = merge({ ...clone(template.entries[0]), title: "New entry", memo: "", keys: [], secondaryKeys: [], content: "" }, item); if (!own(args.patch ?? {}, "uid")) delete item.uid; }
       if (kind === "lorebook" && item.uid === undefined && item.id === undefined) item.uid = Math.max(0, ...row.record.entries.map((entry) => Number(entry.uid) || 0)) + 1;
       if (itemId(item) === undefined || row.record[items.collection].some((entry) => String(itemId(entry)) === String(itemId(item)))) throw new Error("New item needs a unique ID");
-      row.record[items.collection].push(item);
+      row.record[items.collection].push(item); target = item;
     } else {
       if (items.entries.length !== 1) throw new Error("Choose one item by ID or unique name");
       target = items.entries[0];
@@ -206,6 +219,8 @@ export function editData(kind, args, host) {
     merge(target, args.patch ?? {});
   }
   if (target === row.record && args.patch && own(args.patch, "id")) throw new Error("Do not change record IDs");
+  if (kind === "lorebook" && target === row.record && own(args.patch ?? {}, "folderId")) assertFolder(host, row.record.folderId, "lorebooks");
+  if (kind === "library" && items?.collection === "folders" && target !== row.record && operation !== "remove-item" && (typeof target.name !== "string" || !target.name.trim() || !folderScopes.includes(target.scope))) throw new Error("A folder needs a name and a scope: " + folderScopes.join(", "));
   assertReferences(kind, row.record, host);
   if (kind === "chat") row.record.updatedAt = Date.now();
   return { writes: [serialize(row)], result: { kind, id: row.id ?? kind, operation, item: args.item ?? null } };

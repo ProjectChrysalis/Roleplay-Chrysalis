@@ -161,19 +161,20 @@ export function ChatView() {
   const [convertOpen, setConvertOpen] = useState(false)
   // group auto mode: keep the scene moving while this chat is open — a bare
   // send (continue) fires every N seconds when nothing is generating and the
-  // user isn't typing; any activity re-arms the timer
+  // user isn't typing; any activity re-arms the timer. An interval, so a tick
+  // skipped for typing is tried again
   const autoMode = chat?.groupSettings?.autoMode ?? false
   const autoDelaySec = Math.max(2, chat?.groupSettings?.autoDelaySec ?? 5)
   const msgCount = chat?.messages.length ?? 0
   const sendMessage = useApp((s) => s.sendMessage)
   useEffect(() => {
     if (!autoMode || !chat || isStreaming) return
-    const t = setTimeout(() => {
+    const t = setInterval(() => {
       const el = document.activeElement
       const typing = el instanceof HTMLElement && !!el.closest('textarea, input[type="text"], [contenteditable="true"]')
       if (!typing) sendMessage(chat.id, '')
     }, autoDelaySec * 1000)
-    return () => clearTimeout(t)
+    return () => clearInterval(t)
   }, [autoMode, autoDelaySec, isStreaming, msgCount, chat, sendMessage])
   const pageSize = Math.max(10, settings.messagesToLoad || 50)
   const [visibleCount, setVisibleCount] = useState(pageSize)

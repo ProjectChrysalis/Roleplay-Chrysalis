@@ -546,7 +546,9 @@ export const MessageRow = memo(function MessageRow({
   // REAL usage when the engine reported it (generated swipes carry the
   // provider's own numbers — tokens and cost). No client-side price guessing:
   // messages generated before usage tracking simply have no cost to show.
-  const realUsage = !isUser ? swipe?.usage : undefined
+  // a stream that never sent totals leaves an all-zero record: not a count
+  const reportedUsage = !isUser ? swipe?.usage : undefined
+  const realUsage = reportedUsage && (reportedUsage.input > 0 || reportedUsage.output > 0 || (reportedUsage.cacheRead ?? 0) > 0 || (reportedUsage.cacheWrite ?? 0) > 0) ? reportedUsage : undefined
   const msgCost = knownCost(realUsage)
   const isCutoff = chat.memoryCutoffMessageId === message.id
 
@@ -1096,6 +1098,8 @@ export const MessageRow = memo(function MessageRow({
             <DialogTitle>Generation data</DialogTitle>
           </DialogHeader>
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+            <dt className="text-muted-foreground">Preset</dt>
+            <dd className="break-words">{swipe?.presetName || <span className="text-muted-foreground">Not recorded</span>}</dd>
             <dt className="text-muted-foreground">Model</dt>
             <dd>{swipe?.model ? shortModel(swipe.model) : <span className="text-muted-foreground">Not recorded</span>}</dd>
             {realUsage ? (

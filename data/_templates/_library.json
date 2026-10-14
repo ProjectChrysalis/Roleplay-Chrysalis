@@ -72,6 +72,13 @@
   ],
   "backgrounds": [],
   "tags": [],
-  "folders": [],
+  "folders": [
+    {
+      "id": "example-folder",
+      "name": "Example folder",
+      "color": "#8ec9a8",
+      "scope": "presets"
+    }
+  ],
   "connectionProfiles": []
 }

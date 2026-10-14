@@ -1,5 +1,5 @@
 import { inspect } from "./inspect.source.js";
-import { merge } from "../../lib/data-tools.js";
+import { assertFolder, merge } from "../../lib/data-tools.js";
 const safeId = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const samplerKeys = { temperature: "temperature", top_p: "top_p", top_k: "top_k", min_p: "min_p", rep_pen: "repetition_penalty", freq_pen: "frequency_penalty", pres_pen: "presence_penalty" };
 function samplers(record, patch) {
@@ -30,7 +30,8 @@ export function edit(args, host) {
     file = found.matches[0].file; version = host.fs.readVersioned(file);
     if (args.revision !== version.revision) throw new Error("Record changed or revision missing. Inspect the preset again.");
     record = JSON.parse(version.text);
-    if (record.studio?.readOnly) throw new Error("Preset is locked. Create an editable copy.");
+    const folderOnly = args.section === undefined && Object.keys(args.studio ?? {}).join() === "folderId" && !["patch", "samplers", "utilityPrompts", "extendedSamplers"].some((key) => args[key] && Object.keys(args[key]).length);
+    if (record.studio?.readOnly && !folderOnly) throw new Error("Preset is locked. Create an editable copy; only its folder can change.");
   }
   record.studio ??= {};
   if (args.section !== undefined) {
@@ -58,7 +59,7 @@ export function edit(args, host) {
     merge(record, args.patch);
     if (Object.hasOwn(args.patch, "name")) record.studio.name = record.name;
   }
-  if (args.studio) { if (["id", "name", "sections", "samplers", "utilityPrompts", "readOnly", "extendedSamplers"].some((key) => Object.hasOwn(args.studio, key))) throw new Error("Use paired arguments for these editor fields"); merge(record.studio, args.studio); }
+  if (args.studio) { if (["id", "name", "sections", "samplers", "utilityPrompts", "readOnly", "extendedSamplers"].some((key) => Object.hasOwn(args.studio, key))) throw new Error("Use paired arguments for these editor fields"); merge(record.studio, args.studio); if (Object.hasOwn(args.studio, "folderId")) assertFolder(host, record.studio.folderId, "presets"); }
   if (args.samplers) samplers(record, args.samplers);
   if (args.utilityPrompts) { merge(record.utilityPrompts ??= {}, args.utilityPrompts); merge(record.studio.utilityPrompts ??= {}, args.utilityPrompts); }
   if (args.extendedSamplers) { merge(record.studio.extendedSamplers ??= {}, args.extendedSamplers); for (const [key, value] of Object.entries(args.extendedSamplers)) { if (!["number", "boolean", "string"].includes(typeof value) || ["id", "name", "studio", "prompts", "prompt_order", "utilityPrompts", "openai_max_tokens", "openai_max_context", "seed", "stop", "reasoning", "thinkingBudget", "reasoningTags", ...Object.values(samplerKeys)].includes(key) || (record[key] !== undefined && typeof record[key] === "object")) throw new Error("Invalid extended sampler"); record[key] = value; } }

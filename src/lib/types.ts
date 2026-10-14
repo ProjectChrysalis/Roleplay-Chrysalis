@@ -110,6 +110,7 @@ export interface Swipe {
   reasoning?: string
   reasoningTime?: number
   hasThinking?: boolean
+  presetName?: string
   model: string
   genTimeMs: number
   timestamp: number
@@ -632,6 +633,8 @@ export interface AppSettings {
   notificationPosition: NonNullable<import('sonner').ToasterProps['position']>
   notifications: import('./notifications').NotificationSettings
   characterBrowser?: { grid: boolean; sort: import('./character-browser').CharacterSort }
+  /** manual order of the preset and lorebook lists, as item ids */
+  libraryOrder?: import('./library-order').LibraryOrder
   themeMode: 'dark' | 'light'
   activeThemeId: ID
   displayMode: 'bubbles' | 'flat' | 'minimal' | 'document'

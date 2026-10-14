@@ -69,7 +69,13 @@ command palette. Sections open as drawers over the page (components/shell/
 sections.ts is the one list). A drawer slides its whole width out from under
 the rail and back under it; sheets everywhere travel their full size with no
 fade (components/ui/sheet.tsx, `clipClassName` is the box a sheet beside a
-bar is clipped to). On mobile, only over an open chat, whose header
+bar is clipped to). On desktop the drawer's right edge and the border
+between a view's list and its editor (MasterDetail, keyed by `resizeKey`) are
+components/ui/resize-handle.tsx: drag to resize, arrow keys step, double-click
+goes back to the default. A drawer dragged to the window's edge, or the header
+button, fills the window. Widths and the filled state are persistent view
+memory (`layout.*`), so they belong to the browser, not the data folder. On
+mobile, only over an open chat, whose header
 becomes a row of section icons (tap to drop the section down over the chat,
 tap again to close); elsewhere on mobile a section is the page, reached from
 the bottom tab bar. Views are components/views/*, the chat experience lives in
@@ -132,6 +138,8 @@ older turns. Pictures and inactive swipes are excluded. Missing/corrupt data is
 reported. Search responses do not hydrate whole transcripts. Unchanged hydrated chat lists do not restart search. The composer skips
 hidden-frame measurements, keeps a one-line minimum and refits on visibility,
 width, viewport and font changes.
+Generation data shows the preset name saved at generation time for each swipe; older replies without a snapshot show Not recorded.
+
 Messages are a FLAT list with swipes. Interrupted generations freeze and save streamed output through /cancelled; sends use stable user/reply IDs to avoid duplicate saves, Continue updates the active swipe, and failed saves protect the local transcript until Retry succeeds.
 
 Markdown horizontal rules use a brighter line. Thinking disclosure and panel borders
@@ -476,3 +484,5 @@ New card imports set deferEmbeddedLore and preserve character_book. The shell qu
 Preset regex appears only as a compact shortcut for the active preset. RegexImportChoice supplies the Enable / Keep off dialog for preset and standalone imports. The Regex manager lists scripts in four fixed scope sections (Global, Preset, Character, Chat), each with a one-line hint, an enabled/total tally and its own add button; scoped sections group by owner, with the open chat's preset, character and chat marked current, sorted first and expanded, and scripts whose owner is unset or gone gathered in one group since they never run. Folders are sub-headings inside an owner. Each row has a direct switch, and each owner (and Global) has a menu to turn all on, turn all off or export. Adding from a scoped section assigns the current owner (addRegex takes an optional target). Collapse state is kept in view memory; folder metadata survives portable and engine saves. Sampler and bias sliders use full-width rows in narrow panels.
 
 Tools uses one page scroller for its header, tab strip and Regex workspace. Regex passes pageScroll to MasterDetail and uses content-sized panes so nested scrollers do not trap the tab strip.
+
+Presets and lorebooks share LibraryFolderTree (components/shell/library-folder-tree.tsx), which owns the sidebar's search box, New folder button, scroll area and rows: folders first, then items without a folder. The views pass renderLabel (row content) and renderMenu (their own menu items); the tree adds Move to. Rows are 28px (36px on mobile) and the whole row is the drag surface through lib/tree-drag.ts: press and move with a mouse, hold then move on touch, Escape cancels, the list scrolls at its edges, and a floating label follows the pointer. An item dropped between rows lands there, in that row's folder, shown as a line; dropped on a folder header (open or closed) it goes to the end of that folder. While an item is dragged a bar under the list offers No folder and New folder (the new folder holds the item and opens for naming). Item order is one id list per collection in settings.ui.libraryOrder (lib/library-order.ts): rows sort by it inside every folder, and items it has never seen follow in their stored sequence. A folder dragged past another header reorders, shown as a line. Folder dragging is off while searching. Children marked data-no-drag never start a drag. Folders are created with a unique default name and renamed in place (also double-click or F2); names stay unique per collection. Folder order is the order of library.folders (reorderFolders keeps other scopes' slots); open folders are kept in view memory. Folder headers show a check for the actual active preset, independent of editor selection. Folder membership uses preset studio.folderId and lorebook folderId. Deleting a folder clears membership without removing items. Stock presets allow folder placement while prompt content stays locked. Agents handle folders through the skills: library-editing adds folders (name and scope are required), preset-editing and lorebook-editing set and report folderId (checked against the folders of that list; a locked preset accepts only that change), preset inspection takes `folder` to list a folder's presets, and settings-editing patches ui.libraryOrder. data/_EDITING.md has the Folders and list order section.

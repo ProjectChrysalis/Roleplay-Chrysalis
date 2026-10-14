@@ -23,6 +23,7 @@ import { importLorebookFiles, fetchWIStatus, type WIStatus } from '@/lib/engine'
 import { cn } from '@/lib/utils'
 import type { Lorebook, LoreEntry } from '@/lib/types'
 import { MasterDetail } from '@/components/shell/master-detail'
+import { LibraryFolderTree } from '@/components/shell/library-folder-tree'
 import { LoreStatusIcon, LORE_STATUS_LABEL } from '@/components/lore-status-icon'
 import { useConfirm } from '@/components/ui/confirm'
 
@@ -85,14 +86,10 @@ export function LorebooksView() {
     setDetailOpen(true)
   }
 
-  // lorebooks grow for years — the sidebar pages through them
-  const BOOK_PAGE = 100
-  const [bookPage, setBookPage] = useViewMemory('lorebooks.page', 0)
-  const pagedBooks = lorebooks.slice(clampPage(bookPage, lorebooks.length, BOOK_PAGE) * BOOK_PAGE, (clampPage(bookPage, lorebooks.length, BOOK_PAGE) + 1) * BOOK_PAGE)
-
   return (
     <>
     <MasterDetail
+      resizeKey="lorebooks"
       memoryKey={`lorebook.${selectedId}`}
       detailOpen={detailOpen && !!book}
       onBack={() => setDetailOpen(false)}
@@ -107,28 +104,18 @@ export function LorebooksView() {
             <Plus className="size-4" aria-hidden="true" />
           </Button>
         </div>
-        <ScrollArea className="min-h-0 flex-1">
-          <ul className="flex flex-col p-1.5">
-            {pagedBooks.map((b) => (
-              <li key={b.id}>
-                <button
-                  type="button"
-                  onClick={() => select(b.id)}
-                  className={cn('flex min-h-11 w-full flex-col justify-center gap-0.5 rounded-md px-2 py-1.5 text-left text-sm', b.id === book?.id ? 'bg-accent' : 'hover:bg-accent/50')}
-                >
-                  <span className="flex min-w-0 items-center gap-1.5 font-medium">
-                    <span className="truncate">{b.name}</span>
-                    {b.globalActive && <Globe className="size-3 shrink-0 text-primary" aria-hidden="true" />}
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">
-                    {b.entries.length} entries{b.isEmbedded ? ' · embedded' : ''}{b.linkedCharacterIds.length > 0 ? ` · ${b.linkedCharacterIds.length} linked` : ''}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-          <Pager total={lorebooks.length} page={clampPage(bookPage, lorebooks.length, BOOK_PAGE)} pageSize={BOOK_PAGE} onPage={setBookPage} />
-        </ScrollArea>
+        <LibraryFolderTree
+          scope="lorebooks"
+          items={lorebooks}
+          selectedId={book?.id}
+          onSelect={select}
+          onMove={(id, folderId) => updateLorebook(id, { folderId })}
+          renderLabel={(b) => <>
+            <span className="min-w-0 flex-1 truncate">{b.name}</span>
+            {b.globalActive && <span title="Always active"><Globe className="size-3 shrink-0 text-primary" aria-label="Always active" /></span>}
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground" title="Entries">{b.entries.length}</span>
+          </>}
+        />
         <div className="flex gap-1 border-t border-border p-1.5">
           <input ref={importInput} type="file" accept="application/json" multiple className="hidden" onChange={(e) => { void importFiles(e.target.files); e.target.value = '' }} />
           <Button variant="ghost" size="sm" className="flex-1 text-xs" onClick={() => importInput.current?.click()}>Import</Button>

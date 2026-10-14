@@ -12,6 +12,7 @@ var definitions = {
 };
 var idPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 var forbidden = new Set(["__proto__", "prototype", "constructor"]);
+var folderScopes = ["characters", "personas", "presets", "lorebooks", "chats", "backgrounds", "connections"];
 var own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 var clone = (value) => JSON.parse(JSON.stringify(value));
 function terms(value) {
@@ -22,6 +23,13 @@ function matches(query, record, id) {
     return true;
   const wanted = terms(query), words = terms([record.name, record.title, record.scriptName, record.memo].filter(Boolean).join(" "));
   return wanted.length > 0 && wanted.every((term) => words.some((word) => word.startsWith(term)));
+}
+function assertFolder(host, id, scope) {
+  if (id === null)
+    return;
+  const folders = JSON.parse(host.fs.read("library.json")).folders;
+  if (!Array.isArray(folders) || !folders.some((folder) => folder.id === id && folder.scope === scope))
+    throw new Error("folderId must be null or the ID of a library.json folder whose scope is " + scope);
 }
 function merge(target, patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch))
@@ -169,7 +177,13 @@ function serialize(row) {
 ` };
 }
 function setDocument(record, content) {
-  if (typeof content !== "string" || !content.trim() || content.length > 2 * 1024 * 1024)
+  let size = 0;
+  if (typeof content === "string")
+    for (const char of content) {
+      const code = char.codePointAt(0);
+      size += code <= 127 ? 1 : code <= 2047 ? 2 : code <= 65535 ? 3 : 4;
+    }
+  if (typeof content !== "string" || !content.trim() || size > 2 * 1024 * 1024)
     throw new Error("Provide nonempty document content under 2 MB");
   const chunks = [];
   for (let i = 0;i < content.length; i += 850) {
@@ -180,7 +194,7 @@ function setDocument(record, content) {
       break;
   }
   record.chunks = chunks;
-  record.size = content.length;
+  record.size = size;
 }
 function editData(kind, args, host) {
   args = argumentsFor(kind, args, true);
@@ -219,6 +233,8 @@ function editData(kind, args, host) {
     if (record.studio && own(record.studio, "createdAt"))
       record.studio.createdAt = Date.now();
     merge(record, args.patch ?? {});
+    if (kind === "lorebook" && own(args.patch ?? {}, "folderId"))
+      assertFolder(host, record.folderId, "lorebooks");
     if (kind === "databank")
       setDocument(record, args.content);
     if (record.id !== undefined && record.id !== args.id)
@@ -287,6 +303,7 @@ function editData(kind, args, host) {
       if (itemId(item) === undefined || row.record[items.collection].some((entry) => String(itemId(entry)) === String(itemId(item))))
         throw new Error("New item needs a unique ID");
       row.record[items.collection].push(item);
+      target = item;
     } else {
       if (items.entries.length !== 1)
         throw new Error("Choose one item by ID or unique name");
@@ -308,6 +325,10 @@ function editData(kind, args, host) {
   }
   if (target === row.record && args.patch && own(args.patch, "id"))
     throw new Error("Do not change record IDs");
+  if (kind === "lorebook" && target === row.record && own(args.patch ?? {}, "folderId"))
+    assertFolder(host, row.record.folderId, "lorebooks");
+  if (kind === "library" && items?.collection === "folders" && target !== row.record && operation !== "remove-item" && (typeof target.name !== "string" || !target.name.trim() || !folderScopes.includes(target.scope)))
+    throw new Error("A folder needs a name and a scope: " + folderScopes.join(", "));
   assertReferences(kind, row.record, host);
   if (kind === "chat")
     row.record.updatedAt = Date.now();

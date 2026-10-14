@@ -12,7 +12,6 @@ import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Pager, clampPage } from '@/components/ui/pager'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -26,6 +25,7 @@ import { cn } from '@/lib/utils'
 import type { Preset, PromptSection, SectionGroup, ID } from '@/lib/types'
 import { SamplersPanel } from '@/components/views/samplers-panel'
 import { MasterDetail } from '@/components/shell/master-detail'
+import { LibraryFolderTree } from '@/components/shell/library-folder-tree'
 import { RegexImportChoice } from '@/components/regex/import-choice-dialog'
 import { PresetDiffDialog } from '@/components/presets/preset-diff-dialog'
 import { ShapingPanel } from '@/components/presets/shaping-panel'
@@ -130,13 +130,9 @@ export function PresetsView() {
     else await finishImport(json, name, false)
   }
 
-    // presets accumulate for years; the sidebar pages through them
-  const PRESET_PAGE = 100
-  const [presetPage, setPresetPage] = useViewMemory('presets.page', 0)
-  const pagedPresets = presets.slice(clampPage(presetPage, presets.length, PRESET_PAGE) * PRESET_PAGE, (clampPage(presetPage, presets.length, PRESET_PAGE) + 1) * PRESET_PAGE)
-
   return (
     <MasterDetail
+      resizeKey="presets"
       memoryKey={`presets.${selectedId}`}
       detailOpen={detailOpen && !!preset}
       onBack={() => setDetailOpen(false)}
@@ -163,60 +159,42 @@ export function PresetsView() {
             <Plus className="size-4" aria-hidden="true" />
           </Button>
         </div>
-        <ScrollArea className="min-h-0 flex-1">
-          <ul className="flex flex-col p-1.5">
-            {pagedPresets.map((p) => (
-              <li key={p.id} className="flex items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => select(p.id)}
-                  className={cn('flex min-h-11 min-w-0 flex-1 flex-col justify-center gap-0.5 rounded-md px-2 py-1.5 text-left text-sm', p.id === preset?.id ? 'bg-accent' : 'hover:bg-accent/50')}
-                >
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
-                    {p.readOnly && <Lock className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
-                  </span>
-                  <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                    {p.id === activeId && <SealCheck className="size-3 text-primary" aria-hidden="true" />}
-                    {p.id === activeId && <span className="text-primary">currently using</span>}
-                    <span>{p.sections.filter((s) => s.enabled).length}/{p.sections.length} prompts</span>
-                  </span>
-                </button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger render={
-                    <Button variant="ghost" size="icon-sm" className="size-7 shrink-0 text-muted-foreground" aria-label={`Actions for ${p.name}`}>
-                      <DotsThreeVertical className="size-4" aria-hidden="true" />
-                    </Button>
-                  } />
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem disabled={p.id === activeId} onClick={() => { usePreset(p.id); toast.success(`Using preset: ${p.name}`) }}>
-                      <Star className="size-4" aria-hidden="true" />Use this preset
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => { const id = duplicatePreset(p.id); select(id) }}>
-                      <Copy className="size-4" aria-hidden="true" />Duplicate
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-destructive"
-                      disabled={p.id === 'default' || presets.length <= 1}
-                      onClick={() => void confirm({
-                        title: `Delete ${p.name}?`,
-                        description: 'The preset file is removed from disk. Chats that used it fall back to the default.',
-                      }).then((yes) => {
-                        if (!yes) return
-                        deletePreset(p.id)
-                        setSelectedId(presets.find((x) => x.id !== p.id)?.id ?? '')
-                        setDetailOpen(false)
-                      })}
-                    >
-                      <Trash className="size-4" aria-hidden="true" />Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </li>
-            ))}
-          </ul>
-          <Pager total={presets.length} page={clampPage(presetPage, presets.length, PRESET_PAGE)} pageSize={PRESET_PAGE} onPage={setPresetPage} />
-        </ScrollArea>
+        <LibraryFolderTree
+          scope="presets"
+          items={presets}
+          selectedId={preset?.id}
+          activeId={activeId}
+          onSelect={select}
+          onMove={(id, folderId) => updatePreset(id, { folderId })}
+          renderLabel={(p) => <>
+            <span className="min-w-0 flex-1 truncate">{p.name}</span>
+            {p.readOnly && <Lock className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />}
+            {p.id === activeId && <span title="In use"><SealCheck className="size-3 shrink-0 text-primary" aria-label="In use" /></span>}
+          </>}
+          renderMenu={(p) => <>
+            <DropdownMenuItem disabled={p.id === activeId} onClick={() => { usePreset(p.id); toast.success(`Using preset: ${p.name}`) }}>
+              <Star className="size-4" aria-hidden="true" />Use this preset
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => { const id = duplicatePreset(p.id); select(id) }}>
+              <Copy className="size-4" aria-hidden="true" />Duplicate
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-destructive"
+              disabled={p.id === 'default' || presets.length <= 1}
+              onClick={() => void confirm({
+                title: `Delete ${p.name}?`,
+                description: 'The preset file is removed from disk. Chats that used it fall back to the default.',
+              }).then((yes) => {
+                if (!yes) return
+                deletePreset(p.id)
+                setSelectedId(presets.find((x) => x.id !== p.id)?.id ?? '')
+                setDetailOpen(false)
+              })}
+            >
+              <Trash className="size-4" aria-hidden="true" />Delete
+            </DropdownMenuItem>
+          </>}
+        />
       </aside>
       }
       detail={

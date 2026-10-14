@@ -27,6 +27,13 @@ function selectedFields(record, fields) {
   }
   return { values, missing };
 }
+function assertFolder(host, id, scope) {
+  if (id === null)
+    return;
+  const folders = JSON.parse(host.fs.read("library.json")).folders;
+  if (!Array.isArray(folders) || !folders.some((folder) => folder.id === id && folder.scope === scope))
+    throw new Error("folderId must be null or the ID of a library.json folder whose scope is " + scope);
+}
 function merge(target, patch) {
   if (!patch || typeof patch !== "object" || Array.isArray(patch))
     throw new Error("patch must be an object");
@@ -89,8 +96,12 @@ function sectionResult(record, prompt, includeContent) {
   return result;
 }
 function inspect(args, host) {
-  if (typeof args.preset !== "string" || !args.preset.trim())
-    throw new Error("Provide preset: a name, abbreviation, or exact ID");
+  if (args.folder !== undefined && (typeof args.folder !== "string" || !args.folder.trim()))
+    throw new Error("folder must be a folder ID from library.json folders");
+  if (args.folder === undefined || args.preset !== undefined) {
+    if (typeof args.preset !== "string" || !args.preset.trim())
+      throw new Error("Provide preset: a name, abbreviation, or exact ID");
+  }
   if (args.section !== undefined && (typeof args.section !== "string" || !args.section.trim()))
     throw new Error("Section must be a name fragment or identifier");
   if (args.includeContent !== undefined && typeof args.includeContent !== "boolean")
@@ -112,7 +123,9 @@ function inspect(args, host) {
     }
     scanned++;
     const id = record.id ?? file.slice(0, -5);
-    if (!matches(args.preset, record.name, id) && !matches(args.preset, record.studio?.name, id))
+    if (args.preset !== undefined && !matches(args.preset, record.name, id) && !matches(args.preset, record.studio?.name, id))
+      continue;
+    if (args.folder !== undefined && record.studio?.folderId !== args.folder)
       continue;
     const prompts = record.prompts ?? [];
     if (!Array.isArray(prompts)) {
@@ -130,7 +143,8 @@ function inspect(args, host) {
         ...args.fields ? selectedFields(record, args.fields) : {},
         readOnly: Boolean(record.studio?.readOnly),
         isDefault: Boolean(record.studio?.isDefault),
-        sections: selected.map((prompt) => sectionResult(record, prompt, args.includeContent ?? Boolean(args.section))),
+        folderId: record.studio?.folderId ?? null,
+        ...args.preset === undefined ? {} : { sections: selected.map((prompt) => sectionResult(record, prompt, args.includeContent ?? Boolean(args.section))) },
         ...args.section && !selected.length ? { availableSections: prompts.map(({ identifier, name }) => ({ identifier, name })) } : {}
       });
     } catch (e) {
@@ -138,12 +152,12 @@ function inspect(args, host) {
     }
   }
   return {
-    query: { preset: args.preset, section: args.section ?? null },
+    query: { preset: args.preset ?? null, section: args.section ?? null, folder: args.folder ?? null },
     scanned,
-    ambiguous: found.length > 1,
+    ambiguous: args.preset !== undefined && found.length > 1,
     matches: found,
     errors,
-    guidance: found.length > 1 ? "Multiple matching presets. Show the requested field for each, or ask which preset to edit. Do not infer the current chat's preset from defaults or historical chat references." : found.length === 0 ? "No matching preset. Ask for its full name or ID." : null
+    guidance: args.preset === undefined ? null : found.length > 1 ? "Multiple matching presets. Show the requested field for each, or ask which preset to edit. Do not infer the current chat's preset from defaults or historical chat references." : found.length === 0 ? "No matching preset. Ask for its full name or ID." : null
   };
 }
 
@@ -214,8 +228,9 @@ function edit(args, host) {
     if (args.revision !== version.revision)
       throw new Error("Record changed or revision missing. Inspect the preset again.");
     record = JSON.parse(version.text);
-    if (record.studio?.readOnly)
-      throw new Error("Preset is locked. Create an editable copy.");
+    const folderOnly = args.section === undefined && Object.keys(args.studio ?? {}).join() === "folderId" && !["patch", "samplers", "utilityPrompts", "extendedSamplers"].some((key) => args[key] && Object.keys(args[key]).length);
+    if (record.studio?.readOnly && !folderOnly)
+      throw new Error("Preset is locked. Create an editable copy; only its folder can change.");
   }
   record.studio ??= {};
   if (args.section !== undefined) {
@@ -265,6 +280,8 @@ function edit(args, host) {
     if (["id", "name", "sections", "samplers", "utilityPrompts", "readOnly", "extendedSamplers"].some((key) => Object.hasOwn(args.studio, key)))
       throw new Error("Use paired arguments for these editor fields");
     merge(record.studio, args.studio);
+    if (Object.hasOwn(args.studio, "folderId"))
+      assertFolder(host, record.studio.folderId, "presets");
   }
   if (args.samplers)
     samplers(record, args.samplers);

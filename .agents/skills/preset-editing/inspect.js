@@ -66,8 +66,12 @@ function sectionResult(record, prompt, includeContent) {
   return result;
 }
 function inspect(args, host) {
-  if (typeof args.preset !== "string" || !args.preset.trim())
-    throw new Error("Provide preset: a name, abbreviation, or exact ID");
+  if (args.folder !== undefined && (typeof args.folder !== "string" || !args.folder.trim()))
+    throw new Error("folder must be a folder ID from library.json folders");
+  if (args.folder === undefined || args.preset !== undefined) {
+    if (typeof args.preset !== "string" || !args.preset.trim())
+      throw new Error("Provide preset: a name, abbreviation, or exact ID");
+  }
   if (args.section !== undefined && (typeof args.section !== "string" || !args.section.trim()))
     throw new Error("Section must be a name fragment or identifier");
   if (args.includeContent !== undefined && typeof args.includeContent !== "boolean")
@@ -89,7 +93,9 @@ function inspect(args, host) {
     }
     scanned++;
     const id = record.id ?? file.slice(0, -5);
-    if (!matches(args.preset, record.name, id) && !matches(args.preset, record.studio?.name, id))
+    if (args.preset !== undefined && !matches(args.preset, record.name, id) && !matches(args.preset, record.studio?.name, id))
+      continue;
+    if (args.folder !== undefined && record.studio?.folderId !== args.folder)
       continue;
     const prompts = record.prompts ?? [];
     if (!Array.isArray(prompts)) {
@@ -107,7 +113,8 @@ function inspect(args, host) {
         ...args.fields ? selectedFields(record, args.fields) : {},
         readOnly: Boolean(record.studio?.readOnly),
         isDefault: Boolean(record.studio?.isDefault),
-        sections: selected.map((prompt) => sectionResult(record, prompt, args.includeContent ?? Boolean(args.section))),
+        folderId: record.studio?.folderId ?? null,
+        ...args.preset === undefined ? {} : { sections: selected.map((prompt) => sectionResult(record, prompt, args.includeContent ?? Boolean(args.section))) },
         ...args.section && !selected.length ? { availableSections: prompts.map(({ identifier, name }) => ({ identifier, name })) } : {}
       });
     } catch (e) {
@@ -115,12 +122,12 @@ function inspect(args, host) {
     }
   }
   return {
-    query: { preset: args.preset, section: args.section ?? null },
+    query: { preset: args.preset ?? null, section: args.section ?? null, folder: args.folder ?? null },
     scanned,
-    ambiguous: found.length > 1,
+    ambiguous: args.preset !== undefined && found.length > 1,
     matches: found,
     errors,
-    guidance: found.length > 1 ? "Multiple matching presets. Show the requested field for each, or ask which preset to edit. Do not infer the current chat's preset from defaults or historical chat references." : found.length === 0 ? "No matching preset. Ask for its full name or ID." : null
+    guidance: args.preset === undefined ? null : found.length > 1 ? "Multiple matching presets. Show the requested field for each, or ask which preset to edit. Do not infer the current chat's preset from defaults or historical chat references." : found.length === 0 ? "No matching preset. Ask for its full name or ID." : null
   };
 }
 export {

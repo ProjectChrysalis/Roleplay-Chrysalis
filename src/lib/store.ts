@@ -118,7 +118,7 @@ interface AppState {
   focusRegexId: ID | null
   focusLorebookId: ID | null
   selectedSettingsSection: string
-  streaming: { chatId: ID; messageId: ID; model?: string; operation?: 'send' | 'swipe' | 'continue' | 'next'; prefix?: string; full: string; shown: number; startedAt: number; thinking?: string; thinkingT0?: number; thinkingMs?: number; marks?: Array<{ kind: 'tool'; at: number; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean } | { kind: 'think'; at: number; text: string; t0: number; ms?: number }> } | null
+  streaming: { chatId: ID; messageId: ID; model?: string; presetName?: string; operation?: 'send' | 'swipe' | 'continue' | 'next'; prefix?: string; full: string; shown: number; startedAt: number; thinking?: string; thinkingT0?: number; thinkingMs?: number; marks?: Array<{ kind: 'tool'; at: number; name: string; args: Record<string, unknown>; done?: boolean; resultText?: string; isError?: boolean } | { kind: 'think'; at: number; text: string; t0: number; ms?: number }> } | null
   /** one-shot: suppress the swipe animation for this messageId:swipeIndex
    *  (set when a cancelled regen appends its frozen swipe) */
   swipeFxSkip: string | null
@@ -251,6 +251,9 @@ interface AppState {
   addBackground: (name: string, url: string) => ID
   deleteBackground: (id: ID) => void
   addFolder: (name: string, scope: Folder['scope']) => ID
+  renameFolder: (id: ID, name: string) => void
+  /** `ids` is every folder of `scope` in its new order. */
+  reorderFolders: (scope: Folder['scope'], ids: ID[]) => void
   deleteFolder: (id: ID) => void
   updateTag: (id: ID, patch: Partial<Tag>) => void
   addTag: (name: string) => void
@@ -417,8 +420,10 @@ export const useApp = create<AppState>()(
             // carried no sections bag and often relied on engine fallbacks.
             // Normalize to the full shape; the DEFAULT preset also picks up
             // the shipped main/utility prompt texts when its copies are empty.
-            boot.presets.forEach((raw, i) => {
-              const p = presets[i]
+            // matched by id: `presets` is sorted, the boot payload is not
+            const byId = new Map(presets.map((p) => [p.id, p]))
+            boot.presets.forEach((raw) => {
+              const p = byId.get(String(raw.id ?? ''))
               if (!p) return
               const legacy = !(raw as { studio?: { sections?: unknown[] } }).studio?.sections
               let changed = legacy
@@ -764,6 +769,20 @@ export const useApp = create<AppState>()(
             // engine emits AFTER discovery finished, so a plain hydrate lands
             // the fresh list, no view re-entry needed
             void get().hydrate()
+          }, (chatId, speakerId, name) => {
+            // a group reply starts under the group's own id: the member who
+            // is actually speaking takes the pending row over, so a stopped
+            // reply is saved under that member
+            const st = get().streaming
+            if (!st || st.chatId !== chatId) return
+            const chat = get().chats.find((c) => c.id === chatId)
+            const group = get().characters.find((c) => c.id === chat?.characterId)
+            if (!group?.isGroup || !group.members?.includes(speakerId)) return
+            const target = chat?.messages.find((m) => m.id === st.messageId)
+            if (!target?.id.startsWith('pending-') || target.characterId === speakerId) return
+            set((s) => ({ chats: s.chats.map((c) => c.id === chatId ? {
+              ...c, messages: c.messages.map((m) => m.id === st.messageId ? { ...m, characterId: speakerId, authorName: name } : m),
+            } : c) }))
           })
           get().runAutoExecutes('onStartup')
         } catch (e) {
@@ -1580,10 +1599,9 @@ export const useApp = create<AppState>()(
       },
 
       updatePreset: (id, patch) => {
-        // stock presets are immutable — only switching "currently using" onto
-        // one is allowed; everything else requires an editable copy
+        // Stock prompt content is immutable; selection and folder placement are editable.
         const target = get().presets.find((x) => x.id === id)
-        if (target?.readOnly && Object.keys(patch).some((k) => k !== 'isDefault')) {
+        if (target?.readOnly && Object.keys(patch).some((k) => k !== 'isDefault' && k !== 'folderId')) {
           presetsToast.error('Stock preset, create an editable copy to change it')
           return
         }
@@ -1763,6 +1781,16 @@ export const useApp = create<AppState>()(
         set((s) => ({ folders: [...s.folders, { id, name, color: '#8ec9a8', scope }] }))
         return id
       },
+      renameFolder: (id, name) => { bumpMutate(); set((s) => ({ folders: s.folders.map((f) => (f.id === id ? { ...f, name } : f)) })) },
+      reorderFolders: (scope, ids) => {
+        const scoped = get().folders.filter((f) => f.scope === scope)
+        const ordered = ids.map((id) => scoped.find((f) => f.id === id)).filter((f): f is Folder => !!f)
+        if (ordered.length !== scoped.length) return
+        bumpMutate()
+        // other scopes keep their slots in the shared list
+        let next = 0
+        set((s) => ({ folders: s.folders.map((f) => (f.scope === scope ? ordered[next++] ?? f : f)) }))
+      },
       deleteFolder: (id) => { bumpMutate(); set((s) => ({
         folders: s.folders.filter((f) => f.id !== id),
         chats: s.chats.map((c) => (c.folderId === id ? { ...c, folderId: null } : c)),
@@ -1877,7 +1905,7 @@ function freezeCancelledStream(
           // nothing streamed at all: a staged bubble vanishes, an in-place
           // regen keeps its old swipes untouched
           if (!keep) return isStaged ? null : m
-          const frozenSwipe = { id: uid('sw'), content: text, model: st.model ?? m.swipes[m.activeSwipe]?.model ?? '', genTimeMs: genMs, timestamp: Date.now(), ...(parts.length ? { parts } : {}) }
+          const frozenSwipe = { id: uid('sw'), content: text, presetName: st.presetName, model: st.model ?? m.swipes[m.activeSwipe]?.model ?? '', genTimeMs: genMs, timestamp: Date.now(), ...(parts.length ? { parts } : {}) }
           const swipes = st.operation === 'continue'
             ? m.swipes.map((sw, i) => i === m.activeSwipe ? { ...frozenSwipe, id: sw.id } : sw)
             : isStaged || m.swipes.length === 0 ? [frozenSwipe] : [...m.swipes, frozenSwipe]
@@ -1914,7 +1942,7 @@ async function preserveInterruptedStream(
         await j(`/chats/${encodeURIComponent(st.chatId)}/cancelled`, {
           method: 'POST',
           body: JSON.stringify({
-            text: frozen.text, parts: frozen.parts, genMs: frozen.genMs,
+            text: frozen.text, parts: frozen.parts, genMs: frozen.genMs, presetName: st.presetName,
             model: st.model ?? get().model ?? '', operation: st.operation,
             ...(frozen.isStaged ? {
               replyMessageId: st.messageId.replace(/^pending-/, ''), charId: target?.characterId,
@@ -2005,6 +2033,8 @@ async function runGeneration(
   const chat = get().chats.find((c) => c.id === chatId)
   if (!chat) return false
 
+  const presetName = get().presets.find((p) => p.id === (chat.presetId || 'default'))?.name
+
   // world-info scope for this generation (studio semantics)
   const bookIds = scopeBookIds(get().lorebooks, chat, get().characters)
   const ctrl = new AbortController()
@@ -2017,7 +2047,7 @@ async function runGeneration(
     const target = chat.messages.find((m) => m.id === inPlaceId)
     const content = target?.swipes[target.activeSwipe]?.content ?? ''
     const prefix = op === 'continue' ? content + (content && !/\s$/.test(content) ? ' ' : '') : ''
-    set(() => ({ streaming: { chatId, messageId: inPlaceId, model: String(body.model ?? get().model ?? ''), operation: op, prefix, full: prefix, shown: prefix.length, startedAt: Date.now() } }))
+    set(() => ({ streaming: { chatId, messageId: inPlaceId, presetName, model: String(body.model ?? get().model ?? ''), operation: op, prefix, full: prefix, shown: prefix.length, startedAt: Date.now() } }))
     return runStream(set, get, chatId, op, { ...body, expectedSwipes: target?.swipes.length, expectedText: content }, ctrl, chat, bookIds)
   }
   const pendingId = `pending-${uid('reply')}`
@@ -2040,7 +2070,7 @@ async function runGeneration(
   }
   bumpMutate() // staged bubbles must survive any in-flight hydrate
   set((s) => ({
-    streaming: { chatId, messageId: pendingId, model: String(body.model ?? get().model ?? ''), operation: op, full: '', shown: 0, startedAt: Date.now() },
+    streaming: { chatId, messageId: pendingId, presetName, model: String(body.model ?? get().model ?? ''), operation: op, full: '', shown: 0, startedAt: Date.now() },
     chats: s.chats.map((c) => (c.id === chatId ? {
       ...c,
       messages: [...c.messages, ...(stageUser ? [stageUser] : []), pendingMsg],

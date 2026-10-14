@@ -1,6 +1,6 @@
 ---
 name: lorebook-editing
-description: Inspect, create, or edit lorebooks, world information, lore entries, activation keys, entry content, insertion controls, and lore budgets. Use for read-only questions about these records as well as requested changes.
+description: Inspect, create, or edit lorebooks, world information, lore entries, activation keys, entry content, insertion controls, lore budgets, and which folder a lorebook is in. Use for read-only questions about these records as well as requested changes.
 ---
 
 # Lorebooks
@@ -18,6 +18,8 @@ Answer once the requested facts are returned. If names are ambiguous, show relev
 Pass `query` (when applicable), the inspected `revision`, and `patch` to `skill_edit`. Use stored property names in patch, not JSON pointers: `patch:{"content":"new entry text"}`. A key such as `"/disabled"` is invalid in a patch. Object patches merge deeply and preserve unknown fields. Arrays explicitly supplied in a patch replace that array; preserve unrequested elements. Null clears a nullable field; do not substitute false or an empty string. A stale revision fails: inspect again and reconcile the newer values instead of blindly retrying. Read the changed fields back to verify the result. Do not edit code for a data change.
 
 When the user names both book and entry, pass query and item together in the first inspection rather than dumping /entries. With item selected, `results[].items[]` contains the full stored entries, including content and enabled. Answer directly from these values and stop. The `fields` argument selects paths in the stored book, not paths in the inspection result envelope; never use `/items/...` as a field path. Entry identity is uid or id. status chooses normal, constant, or vectorized; do not replace it with a legacy constant boolean. Runtime stored names include keys, secondaryKeys, selectiveLogic, position, order, probability, enabled, and settings. UI types translate some names; inspect stored values before editing. item selects one entry by ID or unique title/memo. add-item uses the entry template with a new unique uid; remove-item deletes only the selected entry. Editing embedded character_book lore in a card needs character-editing and that existing extension shape.
+
+Every listed book carries `folderId`: the ID of its folder in `library.json` `folders`, or null. Move a book with `patch:{"folderId":"folder-id"}` (null takes it out). The folder must exist with scope `lorebooks`; create it with the library skill first.
 
 Creation uses `operation:"create",id:"new-unique-id",patch:{...}`. Start from the entity template, set the requested real values, and preserve its schema. IDs must be path-safe and existing files are never overwritten.
 

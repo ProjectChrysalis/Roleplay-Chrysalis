@@ -96,6 +96,7 @@ export function PersonasView() {
 
   return (
     <MasterDetail
+      resizeKey="personas"
       memoryKey={`personas.${selectedId}`}
       detailOpen={detailOpen && !!p}
       onBack={() => setDetailOpen(false)}

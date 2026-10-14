@@ -1416,7 +1416,7 @@ export function handleRoute(req, host) {
       writeJson("chats/" + id + ".memories.json", n.memories);
     }
     summary.chats.push(id);
-    if (saved?.id) {
+    if (saved?.id && fsx.list(".").includes("regex")) {
       for (const file of fsx.list("regex").filter((f) => f.endsWith(".json"))) {
         const script = readJson("regex/" + file, null);
         if (script?.scope !== "chat" || script._restoreChatId !== saved.id || script._restoreImportId !== importId) continue;

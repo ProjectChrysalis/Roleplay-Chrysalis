@@ -19,8 +19,8 @@ const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 test('swipe thinking and time override stale message metadata, including an empty thought', async () => {
   const stored = { id: 'thinking-reply', name: 'Test', charId: 'test', role: 'char' as const, at: 1,
     text: 'Second reply', swipes: ['First reply', 'Second reply', 'No thought'], swipe: 1,
-    extra: { reasoning: 'First plan', reasoningMs: 11000, swipeMeta: [
-      { reasoning: 'First plan', reasoningMs: 11000 }, { reasoning: 'Second plan', reasoningMs: 22000 }, {},
+    extra: { presetName: 'Stale preset', reasoning: 'First plan', reasoningMs: 11000, swipeMeta: [
+      { presetName: 'First preset', reasoning: 'First plan', reasoningMs: 11000 }, { presetName: 'Second preset', reasoning: 'Second plan', reasoningMs: 22000 }, {},
     ] },
   }
   const adapted = engineMessageToUI(stored)
@@ -39,6 +39,7 @@ test('swipe thinking and time override stale message metadata, including an empt
     const chosen = message?.swipes[message.activeSwipe]
     expect(chosen?.reasoning).toBe(index === 0 ? 'First plan' : index === 1 ? 'Second plan' : undefined)
     expect(chosen?.reasoningTime).toBe(index === 0 ? 11 : index === 1 ? 22 : undefined)
+    expect(chosen?.presetName).toBe(index === 0 ? 'First preset' : index === 1 ? 'Second preset' : undefined)
   }
 })
 afterEach(async () => { await saves.settled(); globalThis.fetch = originalFetch })
@@ -239,4 +240,38 @@ test('saving a scene writes the whole lorebook once, then binds it to the chat',
   expect(calls.map((c) => c.method)).toEqual(['PUT'])
   expect(useApp.getState().lorebooks.find((b) => b.id === bookId)!.entries.map((e) => e.title)).toEqual(['The storm', 'The compass'])
   await expect(useApp.getState().saveSceneEntry(meta.id, entry, 'missing-book')).rejects.toThrow('Lorebook not found')
+})
+
+test('a preset saved without its studio sections is completed once, under its own id', async () => {
+  const full = { ...presetToEngine({ ...buildDefaultPreset(), id: 'alpha', name: 'Alpha', readOnly: false }), id: 'alpha' }
+  const stored = new Map<string, Record<string, unknown>>([
+    // newest first on disk, so the boot order differs from the sorted list
+    ['zeta', { id: 'zeta', name: 'Zeta', temperature: 0.7, studio: { folderId: 'fold_a' } }],
+    ['alpha', full],
+  ])
+  const puts: string[] = []
+  const library = { qrSets: [], themes: [], backgrounds: [], tags: [], folders: [{ id: 'fold_a', name: 'Imported', scope: 'presets' }], connectionProfiles: [] }
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input)
+    if (init?.method === 'PUT') {
+      const id = url.split('/presets/')[1]
+      if (id) { puts.push(id); stored.set(id, JSON.parse(String(init.body))) }
+      return Response.json({ ok: true })
+    }
+    if (url.includes('/bootstrap')) {
+      return Response.json({ settings: { model: null, personaId: null, ui: defaultSettings() }, library, characters: [], presets: [...stored.values()],
+        personas: [], groups: [], lorebooks: [], regex: [], chats: [], databank: { files: [] }, activeChat: null })
+    }
+    return Response.json(url.endsWith('/models') ? { models: [] } : { connections: [] })
+  }) as typeof fetch
+  useApp.setState({ boot: 'ready', activeChatId: null, characters: [], presets: [] })
+  await useApp.getState().hydrate()
+  await saves.settled()
+  expect(puts).toEqual(['zeta'])
+  expect((stored.get('zeta') as { studio?: { sections?: unknown[]; folderId?: string } }).studio).toMatchObject({ folderId: 'fold_a', sections: expect.any(Array) })
+  expect(stored.get('alpha')).toBe(full)
+  // the saved shape is complete: reading it back writes nothing
+  await useApp.getState().hydrate()
+  await saves.settled()
+  expect(puts).toEqual(['zeta'])
 })

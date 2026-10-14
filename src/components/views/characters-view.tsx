@@ -374,9 +374,11 @@ export function CharactersView() {
                         {c.favorite && <Star weight="fill" className="size-3 text-primary" aria-hidden="true" />}
                         {c.isGroup && <Badge variant="outline" className="text-[10px]">group</Badge>}
                       </span>
-                      <span className="text-[11px] text-muted-foreground">
-                        {settings.charSubheader === 'creator' ? `by ${c.creator}` : `v${c.version}`}
-                      </span>
+                      {(settings.charSubheader !== 'creator' || c.creator.trim()) && (
+                        <span className="text-[11px] text-muted-foreground">
+                          {settings.charSubheader === 'creator' ? `by ${c.creator}` : `v${c.version}`}
+                        </span>
+                      )}
                       <span className="line-clamp-2 text-xs text-muted-foreground">{c.description}</span>
                       <span className="mt-1 flex flex-wrap gap-1">
                         {c.tags.slice(0, 3).map((t) => <Badge key={t} variant="secondary" className="text-[10px]">{t}</Badge>)}

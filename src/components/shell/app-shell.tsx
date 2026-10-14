@@ -1,7 +1,7 @@
 
 import { useEffect, useState } from 'react'
 import { publishAgentContext } from '@/lib/agent-context'
-import { CircleNotch } from '@phosphor-icons/react'
+import { ArrowsInSimple, ArrowsOutSimple, CircleNotch, X } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Toaster } from '@/components/ui/sonner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -11,7 +11,9 @@ import { useIsDesktop } from '@/hooks/use-mobile'
 import { useBackClose } from '@/hooks/use-back-close'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { Sheet, SheetContent } from '@/components/ui/sheet'
+import { Sheet, SheetClose, SheetContent } from '@/components/ui/sheet'
+import { ResizeHandle } from '@/components/ui/resize-handle'
+import { useViewMemory } from '@/lib/view-memory'
 import { EmbeddedLorebookPrompt } from '@/components/shell/embedded-lorebook-prompt'
 import { HomeView } from '@/components/views/home-view'
 import { CharactersView } from '@/components/views/characters-view'
@@ -176,13 +178,18 @@ function renderView(v: ViewKey) {
  *  any running stream) and closing the drawer drops you right back into it.
  *  Desktop: slides out from under the rail over the left part of the screen
  *  and stops short of the right edge; clicking the uncovered side or Esc
- *  closes it and it slides back under the rail.
+ *  closes it and it slides back under the rail. Its right edge drags to any
+ *  width, dragged to the window's edge (or the header button) it fills the
+ *  window, and both are remembered.
  *  Mobile: drops down from under the chat's section bar, full width, and
  *  retracts up under it. */
 function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
   const drawer = useApp((s) => s.drawer)
   const closeDrawer = useApp((s) => s.closeDrawer)
   const label = SECTIONS.find((i) => i.key === drawer)?.label ?? ''
+  // 0 until the user picks a width
+  const [width, setWidth] = useViewMemory('layout.drawer.width', 0, true)
+  const [full, setFull] = useViewMemory('layout.drawer.full', false, true)
   return (
     // non-modal and without pointer dismissal: the rail (or the chat's section
     // bar) stays live, since pressing it must not read as an outside-close; the
@@ -206,13 +213,36 @@ function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
             ? 'data-[side=left]:w-[min(720px,75vw)] data-[side=left]:sm:max-w-none'
             : 'data-[side=top]:bottom-0 data-[side=top]:max-h-none',
         )}
-        // mobile: the section bar's lit icon is the title, and tapping it again closes
-        showCloseButton={isDesktop}
+        // a remembered width never outgrows a window that has since shrunk
+        style={!isDesktop ? undefined : full ? { width: '100%' } : width ? { width, maxWidth: '100%' } : undefined}
+        // desktop closes from the header row; mobile: the section bar's lit
+        // icon is the title, and tapping it again closes
+        showCloseButton={false}
       >
         {isDesktop && (
-          <div className="flex h-11 shrink-0 items-center border-b border-border pr-12 pl-4 text-sm font-medium">
-            {label}
+          <div className="flex h-11 shrink-0 items-center gap-0.5 border-b border-border pr-2 pl-4 text-sm font-medium">
+            <span className="min-w-0 flex-1 truncate">{label}</span>
+            <Button variant="ghost" size="icon-sm" aria-label={full ? 'Restore size' : 'Fill window'} title={full ? 'Restore size' : 'Fill window'} onClick={() => setFull(!full)}>
+              {full ? <ArrowsInSimple aria-hidden="true" /> : <ArrowsOutSimple aria-hidden="true" />}
+            </Button>
+            <SheetClose render={<Button variant="ghost" size="icon-sm" />}>
+              <X aria-hidden="true" />
+              <span className="sr-only">Close</span>
+            </SheetClose>
           </div>
+        )}
+        {isDesktop && (
+          <ResizeHandle
+            label="Resize the panel"
+            min={360}
+            onResize={(next, available) => {
+              // the last stretch to the window's edge fills it
+              if (next > available - 16) { setFull(true); return }
+              setFull(false)
+              setWidth(next)
+            }}
+            onReset={() => { setFull(false); setWidth(0) }}
+          />
         )}
         <div className="min-h-0 flex-1 overflow-hidden">
           {drawer && renderView(drawer)}

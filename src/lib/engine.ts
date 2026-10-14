@@ -52,6 +52,7 @@ export interface EngineCard {
 }
 
 interface EngineGenerationMeta {
+  presetName?: string
   model?: string
   usage?: Swipe['usage']
   genMs?: number
@@ -560,6 +561,7 @@ export function connectStreams(
   onThinking?: (chatId: string, delta: string) => void,
   onTool?: (chatId: string, ev: StreamToolEvent) => void,
   onConnectionsChanged?: () => void,
+  onSpeaker?: (chatId: string, speakerId: string, name: string) => void,
 ): () => void {
   // no trailing colon on either branch — the template supplies '://'.
   // (This used to be 'wss:' vs 'ws', which built 'wss:://' under https —
@@ -574,8 +576,9 @@ export function connectStreams(
     ws.onopen = () => { backoff = 800 }
     ws.onmessage = (ev) => {
       try {
-        const frame = JSON.parse(ev.data) as { type?: string; build?: unknown; payload?: { chatId?: string; name?: string; delta?: string; thinking?: string; tool?: StreamToolEvent; app?: string; paths?: string[] } }
+        const frame = JSON.parse(ev.data) as { type?: string; build?: unknown; payload?: { chatId?: string; name?: string; speakerId?: string; delta?: string; thinking?: string; tool?: StreamToolEvent; app?: string; paths?: string[] } }
         if (frame.type === 'app_stream' && frame.payload?.chatId) {
+          if (frame.payload.speakerId) onSpeaker?.(frame.payload.chatId, frame.payload.speakerId, frame.payload.name ?? '')
           if (frame.payload.thinking != null && onThinking) onThinking(frame.payload.chatId, frame.payload.thinking)
           else if (frame.payload.tool && onTool) onTool(frame.payload.chatId, frame.payload.tool)
           else onDelta(frame.payload.chatId, frame.payload.name ?? '', frame.payload.delta ?? '')
@@ -736,6 +739,7 @@ function toSwipe(content: string, model: string, at: number, genMs = 0, extra?: 
     // reasoning-model thinking) belongs to the swipe that was actually
     // generated — the ACTIVE one
     ...(extra?.usage ? { usage: extra.usage } : {}),
+    ...(extra?.presetName ? { presetName: extra.presetName } : {}),
     ...(extra?.params ? { params: extra.params } : {}),
     ...(extra?.reasoning ? { reasoning: extra.reasoning } : {}),
     hasThinking: !!extra?.reasoning || !!extra?.parts?.some((p) => p.type === 'thinking') ||
