@@ -16,7 +16,7 @@ export const ARCHIVE_CATEGORIES: { id: string; label: string; collections: strin
   { id: 'characters', label: 'Characters', collections: ['characters/'] },
   { id: 'lorebooks', label: 'Lorebooks', collections: ['worlds/', 'lorebooks/'] },
   { id: 'presets', label: 'Presets', collections: ['presets/', 'openai settings/', 'textgen settings/'] },
-  { id: 'templates', label: 'Instruct and context templates', collections: ['instruct/', 'context/'], off: true },
+  { id: 'templates', label: 'Instruct templates', collections: ['instruct/'], off: true },
   { id: 'regex', label: 'Regex scripts', collections: ['extensions/regex/', 'regex/'], settingsFile: true },
   { id: 'personas', label: 'Personas', collections: ['personas/', 'personas.json', 'User Avatars/'], settingsFile: true },
   { id: 'groups', label: 'Groups', collections: ['groups/'] },

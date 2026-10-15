@@ -1512,7 +1512,7 @@ export interface ArchiveImportState {
 /** Archive folders in the order they import: whatever a later folder links
  *  to by name has to exist first. Matching is by prefix, first match wins. */
 export const ARCHIVE_COLLECTIONS = [
-  'characters/', 'worlds/', 'lorebooks/', 'presets/', 'openai settings/', 'textgen settings/', 'instruct/', 'context/',
+  'characters/', 'worlds/', 'lorebooks/', 'presets/', 'openai settings/', 'textgen settings/', 'instruct/',
   'User Settings/', 'settings.json', 'personas.json', 'extensions/regex/', 'regex/', 'personas/', 'User Avatars/',
   'groups/', 'chats/', 'group chats/', 'QuickReplies/', 'themes/', 'databank/', 'library.json', 'variables.json',
 ]

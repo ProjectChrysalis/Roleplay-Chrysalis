@@ -478,10 +478,33 @@ function normalizeRegex(raw) {
   };
 }
 
+/** A timestamp in any shape chat files carry: epoch milliseconds, ISO 8601,
+ *  "June 19, 2023 2:20pm", or a file-name stamp like 2024-07-12@01h31m37s123ms
+ *  (also "2024-6-5 @14h 56m 50s 682ms"). null when it is none of these. */
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+function chatTime(v) {
+  if (typeof v === "number") return Number.isFinite(v) && v >= 0 ? v : null;
+  if (typeof v !== "string" || !v.trim()) return null;
+  if (/^\d+$/.test(v)) return Number(v);
+  const meridiem = /(\w+)\s(\d{1,2}),\s(\d{4})\s(\d{1,2}):(\d{1,2})(am|pm)/i.exec(v);
+  if (meridiem) {
+    const month = MONTHS.indexOf(meridiem[1].slice(0, 3).toLowerCase());
+    if (month < 0) return null;
+    const hour = (Number(meridiem[4]) % 12) + (meridiem[6].toLowerCase() === "pm" ? 12 : 0);
+    return new Date(Number(meridiem[3]), month, Number(meridiem[2]), hour, Number(meridiem[5])).getTime();
+  }
+  const stamp = /(\d{4})-(\d{1,2})-(\d{1,2}) ?@(\d{1,2})h ?(\d{1,2})m ?(\d{1,2})s(?: ?(\d{1,3})ms)?/.exec(v);
+  if (stamp) return Date.UTC(Number(stamp[1]), Number(stamp[2]) - 1, Number(stamp[3]), Number(stamp[4]), Number(stamp[5]), Number(stamp[6]), Number(stamp[7] || 0));
+  const parsed = Date.parse(v);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 function normalizeChatLines(raw) {
   // raw: {character?: string, file?: string, lines: [public chat-line objects]}
   if (!raw || !Array.isArray(raw.lines) || !raw.lines.length) return null;
   const uid = (p) => p + Math.random().toString(36).slice(2, 9);
+  const header = raw.lines[0] && typeof raw.lines[0].mes !== "string" ? raw.lines[0] : null;
+  let last = (header && chatTime(header.create_date)) ?? Date.now();
   const msgs = [];
   for (const l of raw.lines) {
     if (!l || typeof l.mes !== "string") continue;
@@ -489,24 +512,41 @@ function normalizeChatLines(raw) {
     // our own backups tuck the fields the public line shape has no room for
     // into extra.chry — a hidden turn, a bookmark, a generated picture, a
     // translation, and the model/usage/reasoning stamp on the reply
-    const x = l.extra && typeof l.extra === "object" && l.extra.chry && typeof l.extra.chry === "object" ? l.extra.chry : {};
+    const own = l.extra && typeof l.extra === "object" && l.extra.chry && typeof l.extra.chry === "object" ? l.extra.chry : null;
+    const x = own || {};
+    const foreign = !own && l.extra && typeof l.extra === "object" ? l.extra : {};
+    // elsewhere is_system marks a turn hidden from the model, and narration
+    // is its own message type; our backups use is_system for system turns
+    const role = isUser ? "user" : own ? (l.is_system === true ? "system" : "char") : foreign.type === "narrator" ? "system" : "char";
+    const at = chatTime(l.send_date) ?? last;
+    last = at;
+    const swipes = Array.isArray(l.swipes) && l.swipes.length ? l.swipes.map(String) : [l.mes];
+    // thinking rides each swipe; the active swipe's is the message's own
+    const info = Array.isArray(l.swipe_info) ? l.swipe_info : [];
+    const thought = (e) => (e && typeof e.reasoning === "string" && e.reasoning ? { reasoning: e.reasoning } : null);
+    const swipeMeta = swipes.map((_, i) => thought(info[i]?.extra));
+    const active = typeof l.swipe_id === "number" && l.swipe_id >= 0 && l.swipe_id < swipes.length ? l.swipe_id : 0;
+    const reasoning = thought(foreign) ?? swipeMeta[active];
+    const imported = !own && (reasoning || swipeMeta.some(Boolean))
+      ? { ...(reasoning ?? {}), ...(typeof foreign.model === "string" && foreign.model ? { model: foreign.model } : {}), ...(swipes.length > 1 ? { swipeMeta } : {}) }
+      : null;
     msgs.push({
       id: uid("e"), name: typeof l.name === "string" ? l.name : (isUser ? "User" : "Character"),
       charId: (l.extra && typeof l.extra.chry_char_id === "string" && l.extra.chry_char_id) || null,
-      role: isUser ? "user" : l.is_system === true ? "system" : "char",
-      text: l.mes, at: l.send_date && !isNaN(Date.parse(l.send_date)) ? Date.parse(l.send_date) : Date.now(),
-      swipes: Array.isArray(l.swipes) && l.swipes.length ? l.swipes.map(String) : [l.mes],
-      swipe: typeof l.swipe_id === "number" && l.swipe_id >= 0 ? l.swipe_id : 0,
-      ...(x.hidden === true ? { hidden: true } : {}),
-      ...(x.bookmark ? { bookmark: x.bookmark } : {}),
+      role, text: l.mes, at, swipes, swipe: active,
+      ...((own ? x.hidden === true : l.is_system === true) ? { hidden: true } : {}),
+      ...(x.bookmarked === true || x.bookmark ? { bookmarked: true } : {}),
+      ...(typeof x.bookmarkLabel === "string" ? { bookmarkLabel: x.bookmarkLabel } : typeof x.bookmark === "string" ? { bookmarkLabel: x.bookmark } : {}),
+      ...(x.edited === true ? { edited: true } : {}),
+      ...(x.greeting === true ? { greeting: true } : {}),
       ...(x.picture ? { picture: x.picture } : {}),
       ...(typeof x.translation === "string" && x.translation ? { translation: x.translation } : {}),
-      ...(x.extra && typeof x.extra === "object" ? { extra: x.extra } : {}),
+      ...(x.extra && typeof x.extra === "object" ? { extra: x.extra } : imported ? { extra: imported } : {}),
     });
   }
   if (!msgs.length) return null;
   const title = (raw.character ? raw.character + " — " : "") + unslugTitle(raw.file || "imported chat");
-  return { title, msgs };
+  return { title, msgs, header };
 }
 
 // chub's CDN/API rejects default http-client user-agents with a fake
@@ -1144,7 +1184,7 @@ export function handleRoute(req, host) {
   const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], quickReplies: [], chats: [], databank: [], errors: [] };
   let characterNames = null;
   let written = null;
-  let worldLinkMap = null;
+  const localLookups = {};
   const used = new Set();
   // Id collision guard: dedupes within THIS import batch AND against what
   // already exists on disk — re-importing the same card must never silently
@@ -1303,30 +1343,41 @@ export function handleRoute(req, host) {
     }
     // regex scripts a card carries run for that character only
     const embedded = card.extensions && Array.isArray(card.extensions.regex_scripts) ? card.extensions.regex_scripts : [];
+    // scripts on in the source, which the source's settings may allow
+    const enabled = [];
     embedded.forEach((raw, i) => {
       const n = normalizeRegex(raw);
       if (!n) return;
       const rid = uid(slug(n.scriptName), "regex");
       writeJson("regex/" + rid + ".json", { ...n, id: rid, disabled: n.disabled || req.body?.enableEmbeddedRegex !== true, scope: "character", scopeTargetId: id, order: i });
       summary.regex.push(rid);
+      if (!n.disabled) enabled.push(rid);
     });
+    if (enabled.length && req.path === "/import/zip") carried("cardRegex").set(id, enabled);
   }
-  /** World book name → the cards that name it. Hoisted with writeCard; on an
-   *  archive import it outlives the batch, since books arrive after cards. */
-  function worldLinks() {
+  /** A name map that outlives the batch on an archive import (what it links
+   *  to may arrive in a later one). Hoisted with writeCard. */
+  function carried(collection) {
     const id = String(req.body?.importId || "");
-    if (/^[a-f0-9-]{36}$/.test(id) && fsx.lookup) return { get: (key) => fsx.lookup(id + "_worldLinks", key), set: (key, value) => fsx.lookup(id + "_worldLinks", key, value) };
-    return (worldLinkMap ??= new Map());
+    if (/^[a-f0-9-]{36}$/.test(id) && fsx.lookup) return { get: (key) => fsx.lookup(id + "_" + collection, key), set: (key, value) => fsx.lookup(id + "_" + collection, key, value) };
+    return (localLookups[collection] ??= new Map());
   }
+  /** World book name → the cards that name it. */
+  const worldLinks = () => carried("worldLinks");
   /** Cards may embed a lorebook — write it as a book file and link it via
    *  the card's studio bag so the app scopes it to that character. charx
    *  packages also carry assets: the icon/main avatar and emotion sprites
    *  resolve from the package bytes (assetDict) or inline data: URIs. */
-  function writeCardWithBook(card, raw, assetDict, sourceAvatar) {
+  function writeCardWithBook(card, raw, assetDict, sourceAvatar, keepBookInCard = false) {
     if (!card) return null;
     const src = raw && raw.data && typeof raw.data === "object" && raw.data.character_book ? raw.data : raw;
     const book = src && src.character_book && typeof src.character_book === "object" ? src.character_book : null;
-    if (book && embeddedBookToWorld(book) && req.body?.deferEmbeddedLore === true) {
+    if (keepBookInCard) {
+      // a library's active books are its world files, which arrive on their
+      // own; the copy inside the card stays there, importable later
+      if (book) card.character_book = book;
+      card.studio = { ...card.studio, embeddedLorebookId: null, embeddedLorebookPending: false };
+    } else if (book && embeddedBookToWorld(book) && req.body?.deferEmbeddedLore === true) {
       card.character_book = book;
       card.studio = { ...card.studio, embeddedLorebookId: null, embeddedLorebookPending: true };
     } else if (book) importEmbeddedBook(card, book, writeJson, uid, summary);
@@ -1438,6 +1489,10 @@ export function handleRoute(req, host) {
         const byName = charIdByName();
         rest.boundCharacterIds = full._boundNames.map((nm) => byName.get(lower(nm))).filter(Boolean);
       }
+      if (Array.isArray(full._boundIds) && full._boundIds.length) {
+        rest.boundCharacterIds = full._boundIds;
+        rest.binding = "character";
+      }
     }
     writeJson("personas/" + id + ".json", { ...rest, id, name, description: description || "" });
     personaIdByName.set(lower(name), id);
@@ -1448,6 +1503,8 @@ export function handleRoute(req, host) {
    *  summary, memory cutoff, folder, tags, card variant, branch parentage).
    *  Without it every restored chat landed on the default preset and no
    *  persona, which is exactly what a move to a second device looked like. */
+  const AN_POSITION = { 0: "after-system", 1: "in-chat", 2: "before-system" };
+  const AN_ROLE = { 0: "system", 1: "user", 2: "assistant" };
   const writeChat = (n, characterId, groupId, saved) => {
     const id = uid(slug(n.title), "chats");
     // pinned to the persona in use at import, like a chat made in the app
@@ -1487,6 +1544,29 @@ export function handleRoute(req, host) {
       meta.id = id;
       meta.characterId = characterId || null;
       meta.groupId = groupId || null;
+    } else if (n.header && typeof n.header === "object") {
+      // a foreign transcript's first line: who the user was, the author's
+      // note and the chat's own book
+      const pid = typeof n.header.user_name === "string" ? personaIdByName.get(lower(n.header.user_name)) : null;
+      const persona = pid ? readJson("personas/" + pid + ".json", null) : null;
+      if (persona) { meta.personaId = pid; meta.userName = persona.name; }
+      const cm = n.header.chat_metadata && typeof n.header.chat_metadata === "object" ? n.header.chat_metadata : {};
+      if (typeof cm.note_prompt === "string" && cm.note_prompt.trim()) {
+        meta.authorNote = cm.note_prompt;
+        meta.authorNoteObject = {
+          text: cm.note_prompt, position: AN_POSITION[cm.note_position] || "in-chat",
+          depth: Number.isInteger(cm.note_depth) && cm.note_depth >= 0 ? cm.note_depth : 4,
+          role: AN_ROLE[cm.note_role] || "system",
+          frequency: Number.isInteger(cm.note_interval) && cm.note_interval >= 0 ? cm.note_interval : 1,
+          includeInWIScan: false,
+        };
+      }
+      const book = typeof cm.world_info === "string" && cm.world_info ? bookIdByName.get(lower(cm.world_info)) : null;
+      if (book) meta.chatLorebookIds = [book];
+      const started = chatTime(n.header.create_date) ?? n.msgs[0]?.at;
+      if (typeof started === "number") meta.createdAt = started;
+      const latest = n.msgs[n.msgs.length - 1]?.at;
+      if (typeof latest === "number") meta.updatedAt = latest;
     }
     fsx.write("chats/" + id + ".jsonl", n.msgs.map((m) => JSON.stringify(m)).join("\n") + "\n");
     writeJson("chats/" + id + ".meta.json", meta);
@@ -1568,7 +1648,7 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "cardRegex"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
@@ -1635,45 +1715,11 @@ export function handleRoute(req, host) {
         }
       } catch { summary.errors.push("personas failed: " + flat); }
     }
-    // A foreign tool keeps its personas inside its settings file instead: a
-    // map of avatar file → name, plus a parallel map of descriptions. The
-    // avatar file is how the picture finds its persona later in the import.
-    if (!hasFullPersonas && wants("personas/") && isText(entries["settings.json"])) {
-      try {
-        const st = JSON.parse(entries["settings.json"]);
-        const pu = st && typeof st.power_user === "object" && st.power_user ? st.power_user : st;
-        const descs = pu && typeof pu.persona_descriptions === "object" && pu.persona_descriptions ? pu.persona_descriptions : {};
-        const namesMap = pu && typeof pu.personas === "object" && pu.personas ? pu.personas : null;
-        for (const [avatarKey, pname] of Object.entries(namesMap ?? {})) {
-          const d = descs[avatarKey] && typeof descs[avatarKey] === "object" ? descs[avatarKey] : {};
-          writePersona(String(pname || avatarKey), String(d.description || ""), {
-            ...(typeof d.title === "string" && d.title ? { title: d.title } : {}),
-            ...(pu.default_persona === avatarKey ? { isDefault: true } : {}),
-            ...(typeof d.lorebook === "string" && d.lorebook ? { _lorebookNames: [d.lorebook] } : {}),
-          });
-          personaIdByFile.set(lower(avatarKey), summary.personas[summary.personas.length - 1]);
-        }
-      } catch { summary.errors.push("personas failed: settings.json"); }
-    }
-    // Global regex scripts and the quick reply sets on show live in the same
-    // settings file.
-    if (isText(entries["settings.json"])) {
-      try {
-        const ext = JSON.parse(entries["settings.json"])?.extension_settings;
-        if (wants("regex/") && Array.isArray(ext?.regex)) for (const one of ext.regex) writeRegex(normalizeRegex(one));
-        const shown = ext?.quickReplyV2?.config?.setList;
-        if (Array.isArray(shown)) {
-          qrVisible.set("__listed", true);
-          for (const item of shown) if (item && typeof item.set === "string" && item.isVisible !== false) qrVisible.set(lower(item.set), true);
-        }
-      } catch { summary.errors.push("settings failed: settings.json"); }
-    }
-
     // Order matters: a chat resolves its character, group, preset, persona
     // and books by NAME, and a persona resolves its books and bound cards the
     // same way. One pass in whatever order the zip's central directory
     // happened to list things left half of those unresolved.
-    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "instruct/", "context/", "extensions/regex/", "regex/", "user settings/regex/", "personas/", "user avatars/", "groups/", "chats/", "group chats/", "databank/"];
+    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "instruct/", "extensions/regex/", "regex/", "user settings/regex/", "settings.json", "personas/", "user avatars/", "groups/", "chats/", "group chats/", "databank/"];
     const phaseOf = (n) => {
       const l = n.toLowerCase();
       for (let i = 0; i < PHASES.length; i++) if (l.startsWith(PHASES[i])) return i;
@@ -1684,10 +1730,56 @@ export function handleRoute(req, host) {
     const orderedNames = Object.keys(entries).sort((a, b) => phaseOf(a) - phaseOf(b) || depth(a) - depth(b) || (a < b ? -1 : a > b ? 1 : 0));
     for (const name of orderedNames) {
       if (entries[name]?.error) { summary.errors.push(name + ": " + entries[name].error); continue; }
-      // A card PNG lives in characters/, or loose at the root when someone
-      // zipped a pile of cards. Anywhere else (persona and user avatars,
-      // backgrounds, sprites) a .png is just a picture — reading it as a
-      // failed card would bury the real errors in noise.
+      // A foreign tool keeps its personas, global regex scripts and the quick
+      // reply sets on show in its settings file. It runs in order: personas
+      // link books and cards, chats link personas. The avatar file is how a
+      // persona's picture finds it later in the import.
+      if (name === "settings.json" && isText(entries[name])) {
+        let st = null;
+        try { st = JSON.parse(entries[name]); } catch { summary.errors.push("settings failed: settings.json"); }
+        const pu = st && typeof st.power_user === "object" && st.power_user ? st.power_user : st;
+        if (pu && !hasFullPersonas && wants("personas/")) {
+          try {
+            const descs = typeof pu.persona_descriptions === "object" && pu.persona_descriptions ? pu.persona_descriptions : {};
+            const namesMap = typeof pu.personas === "object" && pu.personas ? pu.personas : null;
+            for (const [avatarKey, pname] of Object.entries(namesMap ?? {})) {
+              const d = descs[avatarKey] && typeof descs[avatarKey] === "object" ? descs[avatarKey] : {};
+              // connections name cards by file
+              const bound = (Array.isArray(d.connections) ? d.connections : [])
+                .filter((c) => c && c.type === "character" && typeof c.id === "string")
+                .map((c) => charIdByName().get("file:" + lower(c.id.replace(/\.png$/i, ""))))
+                .filter(Boolean);
+              writePersona(String(pname || avatarKey), String(d.description || ""), {
+                ...(bound.length ? { _boundIds: bound } : {}),
+                ...(typeof d.title === "string" && d.title ? { title: d.title } : {}),
+                ...(pu.default_persona === avatarKey ? { isDefault: true } : {}),
+                ...(typeof d.lorebook === "string" && d.lorebook ? { _lorebookNames: [d.lorebook] } : {}),
+              });
+              personaIdByFile.set(lower(avatarKey), summary.personas[summary.personas.length - 1]);
+            }
+          } catch { summary.errors.push("personas failed: settings.json"); }
+        }
+        const ext = st && typeof st.extension_settings === "object" ? st.extension_settings : null;
+        if (ext) {
+          try {
+            if (wants("regex/") && Array.isArray(ext.regex)) for (const one of ext.regex) writeRegex(normalizeRegex(one));
+            // a card's own scripts run there only for cards the user allowed
+            for (const file of Array.isArray(ext.character_allowed_regex) ? ext.character_allowed_regex : []) {
+              const cid = typeof file === "string" ? charIdByName().get("file:" + lower(file.replace(/\.png$/i, ""))) : null;
+              for (const rid of (cid && carried("cardRegex").get(cid)) || []) {
+                const script = readJson("regex/" + rid + ".json", null);
+                if (script) writeJson("regex/" + rid + ".json", { ...script, disabled: false });
+              }
+            }
+            const shown = ext.quickReplyV2?.config?.setList;
+            if (Array.isArray(shown)) {
+              qrVisible.set("__listed", true);
+              for (const item of shown) if (item && typeof item.set === "string" && item.isVisible !== false) qrVisible.set(lower(item.set), true);
+            }
+          } catch { summary.errors.push("settings failed: settings.json"); }
+        }
+        continue;
+      }
       // characters/<card name>/<expression>.png is that card's sprite set
       const sprite = /^characters\/([^/]+)\/([^/]+)\.(?:png|webp|gif|jpe?g)$/i.exec(name);
       if (sprite) {
@@ -1704,6 +1796,10 @@ export function handleRoute(req, host) {
         } catch (error) { summary.errors.push("sprite failed: " + name + ": " + String(error.message || error)); }
         continue;
       }
+      // A card PNG lives in characters/, or loose at the root when someone
+      // zipped a pile of cards. Anywhere else (persona and user avatars,
+      // backgrounds, sprites) a .png is just a picture — reading it as a
+      // failed card would bury the real errors in noise.
       if (name.endsWith(".png") && (name.startsWith("characters/") || !name.includes("/"))) {
         // chat folders and group member lists name a card by its file
         const fileKey = "file:" + lower(name.split("/").pop().replace(/\.png$/i, ""));
@@ -1718,7 +1814,7 @@ export function handleRoute(req, host) {
               try { rawCard = JSON.parse(payload.trimStart().startsWith("{") ? payload : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)))); break; } catch { /* try the next metadata field */ }
             }
             const card = rawCard && normalizeCard(rawCard);
-            if (card) { card.avatar = image.url; remember(writeCardWithBook(card, rawCard, null, image.url)); }
+            if (card) { card.avatar = image.url; remember(writeCardWithBook(card, rawCard, null, image.url, true)); }
             else if (name.startsWith("characters/")) summary.errors.push("png card without embedded data: " + name);
           } catch (error) { summary.errors.push("png card failed: " + name + ": " + String(error.message || error)); }
           continue;
@@ -1728,7 +1824,7 @@ export function handleRoute(req, host) {
           const rawCard = cardFromPngBase64(b64);
           const n = rawCard && normalizeCard(rawCard);
           // ccdefault: assets point at the card PNG itself
-          if (n) { n.avatar = "data:image/png;base64," + b64; remember(writeCardWithBook(n, rawCard, null, n.avatar)); }
+          if (n) { n.avatar = "data:image/png;base64," + b64; remember(writeCardWithBook(n, rawCard, null, n.avatar, true)); }
           else if (name.startsWith("characters/")) summary.errors.push("png card without embedded data: " + name);
         } else if (name.startsWith("characters/")) {
           summary.errors.push("png card too large to read from the zip — import it directly from the Import button: " + name);
@@ -1738,8 +1834,12 @@ export function handleRoute(req, host) {
       if (name.startsWith("characters/") && name.endsWith(".json") && isText(entries[name])) {
         try {
           const parsed = JSON.parse(entries[name]);
-          const n = normalizeCard(parsed);
-          if (n) writeCardWithBook(n, parsed, null, typeof parsed.avatar === "string" ? parsed.avatar : undefined);
+          // our backups carry the portrait inline, and name chat folders and
+          // group members by this file
+          const art = typeof parsed.avatar === "string" ? parsed.avatar : typeof parsed.data?.avatar === "string" ? parsed.data.avatar : undefined;
+          const n = normalizeCard(parsed, art);
+          const id = n ? writeCardWithBook(n, parsed, null, art, true) : null;
+          if (id) charIdByName().set("file:" + lower(name.split("/").pop().replace(/\.json$/i, "")), id);
         } catch { summary.errors.push("card failed: " + name); }
         continue;
       }
@@ -1787,7 +1887,8 @@ export function handleRoute(req, host) {
           const sourceMembers = g.memberIds || g.members || [];
           const resolvedMembers = sourceMembers.map((mid, i) => {
             if (taken("characters/" + mid + "/card.json")) return mid;
-            const byFile = charIdByName().get("file:" + lower(String(mid).replace(/\.png$/i, "")));
+            const file = (g._memberFiles || [])[i] || String(mid).replace(/\.png$/i, "");
+            const byFile = charIdByName().get("file:" + lower(file));
             if (byFile) return byFile;
             const nm = (g._memberNames || [])[i] || String(mid).replace(/\.png$/i, "");
             return nm ? charIdByName().get(lower(nm)) || charIdByName().get(slug(nm)) || null : null;
@@ -1796,7 +1897,8 @@ export function handleRoute(req, host) {
           const muted = (g.mutedIds || g.disabled_members || []).map((mid) => { const index = sourceMembers.indexOf(mid); return index >= 0 ? resolvedMembers[index] : null; }).filter(Boolean);
           // a foreign group file carries its chat list and per-chat state;
           // the chats arrive as files of their own
-          const { members: _m, disabled_members: _d, chats: groupChats, chat_id: _c, chat_metadata: _cm, past_metadata: _pm, activation_strategy: activation, generation_mode: generation, allow_self_responses: selfResponses, ...rest } = g;
+          const { members: _m, disabled_members: _d, chats: groupChats, chat_id: _c, chat_metadata: _cm, past_metadata: _pm, activation_strategy: activation, generation_mode: generation, allow_self_responses: selfResponses, auto_mode_delay: delay, generation_mode_join_prefix: _jp, generation_mode_join_suffix: _js, ...rest } = g;
+          for (const key of Object.keys(rest)) if (key.startsWith("_")) delete rest[key];
           // the id lands in the write path: slug it like every other collection
           // so a crafted backup cannot climb out of groups/
           const gid = uid(slug(g.name || g.id || "group"), "groups");
@@ -1804,6 +1906,7 @@ export function handleRoute(req, host) {
             ...rest, id: gid, name: g.name || gid, memberIds, mode: g.mode || GROUP_ACTIVATION[activation] || "natural", mutedIds: muted,
             ...(!g.generationMode && GROUP_GENERATION[generation] ? { generationMode: GROUP_GENERATION[generation] } : {}),
             ...(g.allowSelfResponses === undefined && typeof selfResponses === "boolean" ? { allowSelfResponses: selfResponses } : {}),
+            ...(g.autoDelaySec === undefined && typeof delay === "number" && delay > 0 ? { autoDelaySec: delay } : {}),
           });
           for (const key of [g.name, g.id, g.chat_id, gid, ...(Array.isArray(groupChats) ? groupChats : [])]) if (key) { groupIdByName.set(lower(key), gid); groupIdByName.set(slug(key), gid); }
           summary.groups.push(gid);
@@ -1866,9 +1969,10 @@ export function handleRoute(req, host) {
         } catch { summary.errors.push("quick replies failed: " + name); }
         continue;
       }
-      // instruct and context templates become presets of their own: the
-      // turn markers as the prompt format, the story string as the layout
-      if ((name.startsWith("instruct/") || name.startsWith("context/")) && name.endsWith(".json") && isText(entries[name])) {
+      // an instruct template becomes a preset of its own, its turn markers
+      // the prompt format (a context template's story string leans on
+      // variables this app does not have, so those stay behind)
+      if (name.startsWith("instruct/") && name.endsWith(".json") && isText(entries[name])) {
         try {
           const n = normalizePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
           if (n) writePreset(n);
@@ -1918,7 +2022,11 @@ export function handleRoute(req, host) {
             // the slug filename is a lossy echo of the title (no case, no
             // punctuation); the sidecar has the real one, so only fall back
             // to un-slugging when there is no sidecar to read
+            // our backups name transcripts by slug; elsewhere the file name is
+            // the chat's own name, and a bare number is when it started
             if (saved && typeof saved.title === "string" && saved.title.trim()) n.title = saved.title;
+            else if (/^\d{10,}$/.test(file)) n.title = (ownerName ? ownerName + " " : "") + new Date(Number(file)).toISOString().slice(0, 16).replace("T", " ");
+            else if (!/^[a-z0-9-]+$/.test(file)) n.title = file;
             else if (ownerName) n.title = ownerName + ": " + unslugTitle(file);
             // group message attribution: engine ids changed on restore —
             // remap each msg.charId by id, then by the speaker name

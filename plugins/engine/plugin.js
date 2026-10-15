@@ -2911,7 +2911,9 @@ export function handleRoute(req, host) {
         // _memberNames ride along so a restore can remap member ids after
         // characters are re-created under fresh (name-derived) ids
         const memberNames = (g.memberIds || []).map((mid) => idToName.get(mid) ?? null);
-        files.push({ name: "groups/" + file, text: JSON.stringify({ ...g, _file: file.replace(/\.json$/, ""), _memberNames: memberNames }, null, 2) });
+        // two cards can share a name; their files never do
+        const memberFiles = (g.memberIds || []).map((mid) => chars.find((c) => c.id === mid)?.slug ?? null);
+        files.push({ name: "groups/" + file, text: JSON.stringify({ ...g, _file: file.replace(/\.json$/, ""), _memberNames: memberNames, _memberFiles: memberFiles }, null, 2) });
         groups.push({ id: gid.replace(/\.json$/, ""), slug: file.replace(/\.json$/, ""), name: g.name });
       }
     } catch {}
@@ -2922,7 +2924,12 @@ export function handleRoute(req, host) {
         if (preset) {
           const copy = { ...preset, extensions: { ...preset.extensions } };
           delete copy.extensions.regex_scripts;
-          presets[preset.name || f.replace(/\.json$/, "")] = copy;
+          // the map is keyed by name; a second preset of the same name gets
+          // its own key instead of replacing the first
+          const base = preset.name || f.replace(/\.json$/, "");
+          let key = base;
+          for (let n = 2; Object.hasOwn(presets, key); n++) key = base + " (" + n + ")";
+          presets[key] = copy;
         }
       }
     } catch {}
@@ -3078,7 +3085,10 @@ export function handleRoute(req, host) {
             chry: {
               id: msg.id,
               ...(msg.hidden === true ? { hidden: true } : {}),
-              ...(msg.bookmark ? { bookmark: msg.bookmark } : {}),
+              ...(msg.bookmarked === true ? { bookmarked: true } : {}),
+              ...(typeof msg.bookmarkLabel === "string" && msg.bookmarkLabel ? { bookmarkLabel: msg.bookmarkLabel } : {}),
+              ...(msg.edited === true ? { edited: true } : {}),
+              ...(msg.greeting === true ? { greeting: true } : {}),
               ...(msg.picture ? { picture: msg.picture } : {}),
               ...(msg.translation ? { translation: msg.translation } : {}),
               ...(msg.extra && typeof msg.extra === "object" ? { extra: msg.extra } : {}),

@@ -2567,6 +2567,7 @@ describe("rp studio: backup import stays inside its collections", () => {
 });
 
 describe("rp studio: export → import zip round-trip", () => {
+
   it("the exported backup re-imports through /import/zip (text entries)", async () => {
     const m = mockHost();
     // fresh root with one char + chat
@@ -2964,6 +2965,40 @@ describe("rp studio: backup zips survive the trip", () => {
     return entries;
   };
 
+  it("brings back portraits, same-name cards and same-name presets", async () => {
+    const m = mockHost();
+    const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(root, rel), "utf8"));
+    for (const [id, note] of [["twin-a", "first"], ["twin-b", "second"]]) {
+      fs.mkdirSync(path.join(root, "characters", id), { recursive: true });
+      fs.writeFileSync(path.join(root, "characters", id, "card.json"), JSON.stringify({ name: "Twin", description: note, avatar: "data:image/png;base64,QUFB" }));
+    }
+    fs.writeFileSync(path.join(root, "presets", "p1.json"), JSON.stringify({ id: "p1", name: "Same", temperature: 0.5 }));
+    fs.writeFileSync(path.join(root, "presets", "p2.json"), JSON.stringify({ id: "p2", name: "Same", temperature: 0.9 }));
+    for (const [cid, text] of [["twin-a", "to the first"], ["twin-b", "to the second"]]) {
+      const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: cid } }, m);
+      const id = (c.json.meta as { id: string }).id;
+      fs.writeFileSync(path.join(root, "chats", `${id}.jsonl`), JSON.stringify({ id: "e1", name: "You", role: "user", text, at: 1, charId: null }) + "\n");
+    }
+    fs.writeFileSync(path.join(root, "groups", "duo.json"), JSON.stringify({ id: "duo", name: "Duo", memberIds: ["twin-b"] }));
+    const entries = await exportEntries(m);
+    for (const dir of ["characters", "chats", "presets", "groups"]) { fs.rmSync(path.join(root, dir), { recursive: true, force: true }); fs.mkdirSync(path.join(root, dir)); }
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    const cards = Object.fromEntries((r.json.characters as string[]).map((id) => [id, read(`characters/${id}/card.json`)]));
+    expect(Object.values(cards).filter((c) => c.name === "Twin").map((c) => c.avatar)).toEqual(["data:image/png;base64,QUFB", "data:image/png;base64,QUFB"]);
+    for (const id of r.json.chats as string[]) {
+      const meta = read(`chats/${id}.meta.json`);
+      const said = JSON.parse(fs.readFileSync(path.join(root, "chats", `${id}.jsonl`), "utf8").trim().split("\n")[0]!).text;
+      expect(`to the ${cards[meta.characterId].description}`).toBe(said);
+    }
+    const group = read(`groups/${(r.json.groups as string[])[0]}.json`);
+    expect(cards[group.memberIds[0]].description).toBe("second");
+    expect(Object.keys(group).some((k) => k.startsWith("_"))).toBe(false);
+    const temps = (r.json.presets as string[]).map((id) => read(`presets/${id}.json`)).filter((p) => p.name === "Same").map((p) => p.temperature).sort();
+    expect(temps).toEqual([0.5, 0.9]);
+  }, 30_000);
+
   it("restores chat lore bindings with new IDs and keeps them on branches", async () => {
     fs.writeFileSync(path.join(root, "lorebooks", "local.json"), JSON.stringify({ id: "local", name: "Local lore", entries: [{ uid: 0, content: "A local secret.", keys: ["secret"], enabled: true }] }));
     const m = mockHost();
@@ -3057,7 +3092,8 @@ describe("rp studio: backup zips survive the trip", () => {
     await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi", model: "mock/model" } }, m);
     const lines = fs.readFileSync(path.join(root, "chats", `${id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     lines[0]!.hidden = true;
-    lines[0]!.bookmark = "opening";
+    lines[0]!.bookmarked = true;
+    lines[0]!.bookmarkLabel = "opening";
     fs.writeFileSync(path.join(root, "chats", `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
 
     const entries = await exportEntries(m);
@@ -3067,7 +3103,8 @@ describe("rp studio: backup zips survive the trip", () => {
     const chatId = (r.json.chats as string[])[0]!;
     const back = fs.readFileSync(path.join(root, "chats", `${chatId}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
     expect(back[0]!.hidden).toBe(true);
-    expect(back[0]!.bookmark).toBe("opening");
+    expect(back[0]!.bookmarked).toBe(true);
+    expect(back[0]!.bookmarkLabel).toBe("opening");
     // the reply keeps which model wrote it
     const reply = back.find((x) => x.role === "char" && (x.extra as { model?: string } | undefined)?.model);
     expect((reply!.extra as { model: string }).model).toBe("mock/model");
@@ -3759,6 +3796,57 @@ describe("rp studio: a foreign user folder imports linked up", () => {
     const again = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
     expect(again.json.quickReplies).toEqual([]);
     expect(read("library.json").themes).toHaveLength(1);
+  }, 30_000);
+
+  it("reads a foreign transcript the way its app wrote it", async () => {
+    const m = mockHost();
+    const lines = jsonl(
+      { user_name: "Alex", character_name: "Seraphina", create_date: "2023-6-19 @14h 20m 00s 000ms", chat_metadata: { note_prompt: "Stay tense.", note_depth: 2, note_position: 2, note_role: 1 } },
+      { name: "Seraphina", is_user: false, send_date: "June 19, 2023 2:20pm", mes: "Old hello." },
+      { name: "Alex", is_user: true, send_date: "2023-06-19@14h21m05s", mes: "Hidden aside.", is_system: true },
+      { name: "System", is_user: false, send_date: 1687184500000, mes: "The sun sets.", extra: { type: "narrator" } },
+      { name: "Seraphina", is_user: false, send_date: "2023-06-19T14:22:00.000Z", mes: "Two", swipe_id: 1, swipes: ["One", "Two"], swipe_info: [{ extra: { reasoning: "first" } }, { extra: { reasoning: "second" } }], extra: { reasoning: "second" } },
+    );
+    const all: Record<string, unknown> = {
+      "default-user/settings.json": settings,
+      "default-user/characters/sera_v2.png": { __b64__: true, base64: cardPng({ spec: "chara_card_v2", data: { name: "Seraphina", extensions: { world: "Eldoria" }, character_book: { entries: [{ keys: ["forest"], content: "A forest", enabled: true }] } } }) },
+      "default-user/worlds/Eldoria.json": JSON.stringify({ entries: { 0: { uid: 0, key: ["forest"], content: "A forest" } } }),
+      "default-user/chats/sera_v2/Seraphina - 2023-6-19 @14h 20m 00s 000ms.jsonl": lines,
+    };
+    (m.host as { zip: unknown }).zip = { entries: () => all, list: () => 4 };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(r.json.errors).toEqual([]);
+    // the card's copy of its linked world stays in the card: one book, not two
+    expect(r.json.lorebooks).toHaveLength(1);
+    const card = read(`characters/${(r.json.characters as string[])[0]}/card.json`);
+    expect(card.character_book).toBeDefined();
+    expect(card.studio.embeddedLorebookPending).toBe(false);
+    const meta = read(`chats/${(r.json.chats as string[])[0]}.meta.json`);
+    expect(meta.title).toBe("Seraphina - 2023-6-19 @14h 20m 00s 000ms");
+    expect(meta.userName).toBe("Alex");
+    expect(meta.authorNoteObject).toMatchObject({ text: "Stay tense.", depth: 2, position: "before-system", role: "user" });
+    expect(meta.createdAt).toBe(Date.UTC(2023, 5, 19, 14, 20));
+    const msgs = fs.readFileSync(path.join(root, "chats", `${meta.id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(msgs[0].at).toBe(new Date(2023, 5, 19, 14, 20).getTime());
+    expect(msgs[1]).toMatchObject({ role: "user", hidden: true, at: Date.UTC(2023, 5, 19, 14, 21, 5) });
+    expect(msgs[2]).toMatchObject({ role: "system", at: 1687184500000 });
+    expect(msgs[3].extra).toEqual({ reasoning: "second", swipeMeta: [{ reasoning: "first" }, { reasoning: "second" }] });
+  }, 30_000);
+
+  it("turns on a card's own regex only where the settings file allowed it", async () => {
+    const m = mockHost();
+    const script = { scriptName: "Card script", findRegex: "/a/g", replaceString: "b", placement: [2] };
+    const withAllow = JSON.stringify({ extension_settings: { character_allowed_regex: ["kept.png"] } });
+    const all: Record<string, unknown> = {
+      "default-user/settings.json": withAllow,
+      "default-user/characters/kept.png": { __b64__: true, base64: cardPng({ spec: "chara_card_v2", data: { name: "Kept", extensions: { regex_scripts: [script] } } }) },
+      "default-user/characters/other.png": { __b64__: true, base64: cardPng({ spec: "chara_card_v2", data: { name: "Other", extensions: { regex_scripts: [script] } } }) },
+    };
+    (m.host as { zip: unknown }).zip = { entries: () => all, list: () => 3 };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    const scripts = (r.json.regex as string[]).map((id) => read(`regex/${id}.json`));
+    const byCard = Object.fromEntries(scripts.map((s) => [read(`characters/${s.scopeTargetId}/card.json`).name, s.disabled]));
+    expect(byCard).toEqual({ Kept: false, Other: true });
   }, 30_000);
 
   it("leaves settings-file personas and regex out when those collections were not chosen", async () => {
