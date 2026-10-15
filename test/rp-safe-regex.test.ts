@@ -4,7 +4,7 @@
  *  $n/$<name>, trim strings and {{user}}/{{char}} macros. */
 import { describe, it, expect } from "bun:test";
 import vm from "node:vm";
-import { WORKER_SRC } from "../src/lib/safe-regex.js";
+import { isBadPattern, runRegexSafe, WORKER_SRC } from "../src/lib/safe-regex.js";
 
 interface Job {
   find: string;
@@ -58,5 +58,59 @@ describe("regex worker semantics", () => {
     const r = runJob({ find: "a*", replace: "_", input: "ba" });
     expect(r.ok).toBe(true);
     expect(r.output).toContain("_");
+  });
+});
+
+/** Stands in for the browser Worker: answers each job after `delay(find)` ms
+ *  (null never answers) and records the order jobs arrive in. */
+const posted: string[] = [];
+let delay: (find: string) => number | null = () => 0;
+class FakeWorker {
+  onmessage: ((ev: { data: unknown }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  private dead = false;
+  postMessage(m: { id: number; find: string; input: string }) {
+    posted.push(m.find);
+    const ms = delay(m.find);
+    if (ms === null) return;
+    setTimeout(() => { if (!this.dead) this.onmessage?.({ data: { id: m.id, ok: true, output: m.input.toUpperCase() } }); }, ms);
+  }
+  terminate() { this.dead = true; }
+}
+(globalThis as { Worker?: unknown }).Worker = FakeWorker;
+
+describe("regex worker queue", () => {
+  it("does not time out a job whose answer waited behind a busy page", async () => {
+    delay = () => 60;
+    const run = runRegexSafe("busy", "g", "", "abc", { timeoutMs: 50 });
+    const until = performance.now() + 200;
+    while (performance.now() < until) { /* the page is busy rendering */ }
+    const r = await run;
+    expect(r.timedOut).toBeUndefined();
+    expect(r.output).toBe("ABC");
+  });
+
+  it("times out a job that never answers and skips it only on text as long", async () => {
+    delay = (find) => (find === "hang" ? null : 0);
+    const r = await runRegexSafe("hang", "g", "", "x".repeat(100), { timeoutMs: 30 });
+    expect(r.timedOut).toBe(true);
+    expect(isBadPattern("hang", "g", 100)).toBe(true);
+    expect(isBadPattern("hang", "g", 500)).toBe(true);
+    expect(isBadPattern("hang", "g", 99)).toBe(false);
+    expect(isBadPattern("other", "g", 100)).toBe(false);
+  });
+
+  it("runs lower priority numbers first", async () => {
+    delay = () => 5;
+    posted.length = 0;
+    const jobs = [
+      runRegexSafe("first", "", "", "a"),
+      runRegexSafe("old", "", "", "a", { priority: 9 }),
+      runRegexSafe("new", "", "", "a", { priority: 0 }),
+      runRegexSafe("middle", "", "", "a", { priority: 4 }),
+      runRegexSafe("new2", "", "", "a", { priority: 0 }),
+    ];
+    await Promise.all(jobs);
+    expect(posted).toEqual(["first", "new", "new2", "middle", "old"]);
   });
 });

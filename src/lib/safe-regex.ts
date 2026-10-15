@@ -2,12 +2,13 @@
  * Native RegExp cannot be interrupted: a catastrophic-backtracking pattern
  * (`(a+)+b` against 40 a's) freezes the tab's main thread until the renderer
  * dies — the blank-screen class. User-authored regex therefore runs in a
- * Worker with a hard timeout; patterns that time out are remembered and
- * skipped afterwards, and the wedged worker is thrown away and recreated.
+ * Worker with a hard timeout; a pattern that times out is skipped afterwards
+ * on text at least that long, and the wedged worker is thrown away and
+ * recreated.
  *
  * Nothing runs a user pattern on the render path. The worker is a single
  * serialized job queue: one pattern at a time, so a timeout blames exactly
- * the pattern that wedged it.
+ * the pattern that wedged it. Jobs with a lower priority number run first.
  */
 
 export interface SafeRegexResult {
@@ -66,7 +67,8 @@ self.onmessage = (e) => {
 };
 `
 
-const badPatterns = new Set<string>()
+/** pattern key -> shortest input it timed out on */
+const badPatterns = new Map<string, number>()
 let workerUrl: string | null = null
 let sharedWorker: RegexWorker | null = null
 let seq = 0
@@ -97,6 +99,7 @@ interface PendingJob {
   id: number
   message: Record<string, unknown>
   timeoutMs: number
+  priority: number
   resolve: (r: SafeRegexResult) => void
   timer?: ReturnType<typeof setTimeout>
 }
@@ -137,6 +140,24 @@ function ensureWorker(): RegexWorker | null {
   return w
 }
 
+/** A timer that fires well after its deadline means the page itself was
+ *  busy (rendering, layout), and the worker's answer may be waiting behind
+ *  it. Only a timer that fires on time while the job still runs is a real
+ *  timeout. */
+const LATE_MS = 50
+
+function arm(job: PendingJob, ms: number): void {
+  const due = performance.now() + ms
+  job.timer = setTimeout(() => {
+    if (active !== job) return
+    if (performance.now() - due > LATE_MS) { arm(job, job.timeoutMs); return }
+    // only the one in-flight pattern can have wedged the worker
+    try { sharedWorker?.terminate() } catch { /* already gone */ }
+    sharedWorker = null
+    finishActive({ ok: false, timedOut: true, error: `timed out (${job.timeoutMs}ms), likely catastrophic backtracking` })
+  }, ms)
+}
+
 function pump(): void {
   if (active || queue.length === 0) return
   const job = queue.shift()
@@ -148,12 +169,7 @@ function pump(): void {
     return
   }
   active = job
-  job.timer = setTimeout(() => {
-    // only the one in-flight pattern can have wedged the worker
-    try { sharedWorker?.terminate() } catch { /* already gone */ }
-    sharedWorker = null
-    finishActive({ ok: false, timedOut: true, error: `timed out (${job.timeoutMs}ms), likely catastrophic backtracking` })
-  }, job.timeoutMs)
+  arm(job, job.timeoutMs)
   try {
     w.postMessage(job.message)
   } catch {
@@ -168,25 +184,36 @@ export function runRegexSafe(
   flags: string,
   replace: string,
   input: string,
-  opts: { trims?: string[]; timeoutMs?: number; macros?: Record<string, string> } = {},
+  opts: { trims?: string[]; timeoutMs?: number; macros?: Record<string, string>; priority?: number } = {},
 ): Promise<SafeRegexResult> {
   return new Promise((resolve) => {
     if (!find) { resolve({ ok: true, output: input, matches: [] }); return }
     const id = ++seq
-    queue.push({
+    const priority = opts.priority ?? 0
+    const job: PendingJob = {
       id,
+      priority,
       timeoutMs: opts.timeoutMs ?? 400,
       message: { id, find, flags: flags || "", replace, trims: opts.trims ?? [], macros: opts.macros, input },
       resolve: (r) => {
-        if (r.timedOut) badPatterns.add(key(find, flags))
+        if (r.timedOut) {
+          const k = key(find, flags)
+          badPatterns.set(k, Math.min(badPatterns.get(k) ?? Infinity, input.length))
+        }
         resolve(r)
       },
-    })
+    }
+    const at = queue.findIndex((q) => q.priority > priority)
+    if (at < 0) queue.push(job)
+    else queue.splice(at, 0, job)
     pump()
   })
 }
 
-/** Sync check for render-path decisions: skip patterns that already timed out once. */
-export function isBadPattern(find: string, flags: string): boolean {
-  return badPatterns.has(key(find, flags))
+/** Sync check for render-path decisions: skip a pattern on text at least as
+ *  long as text it already timed out on. Slow patterns usually slow down
+ *  with length, so shorter text still gets its chance. */
+export function isBadPattern(find: string, flags: string, inputLength: number): boolean {
+  const shortest = badPatterns.get(key(find, flags))
+  return shortest !== undefined && inputLength >= shortest
 }

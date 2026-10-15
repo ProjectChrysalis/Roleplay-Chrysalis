@@ -423,6 +423,14 @@ export const MessageRow = memo(function MessageRow({
   // Scoped scripts fire only in their scope: this chat, this character
   // (group members count), or the chat's active preset.
   const regexScripts = useApp((s) => s.regexScripts)
+  // depth = distance from the chat's end, measured when this row's text was
+  // rendered. A reply keeps the look it had while newer messages arrive (a
+  // swipe, an edit or reopening the chat measures again), so a script bound
+  // to a depth window behaves as on a page that renders each message once.
+  const liveDepth = chat.messages.length - 1 - index
+  const depthAt = useRef<{ text: string; depth: number } | null>(null)
+  if (depthAt.current?.text !== rawContent) depthAt.current = { text: rawContent, depth: liveDepth }
+  const depth = depthAt.current.depth
   const displayScripts = useMemo<DisplayScript[]>(() => {
     // Regex scripts arrive from arbitrary import zips — a hostile pattern
     // ((a+)+b) backtracks catastrophically, and RegExp can't be interrupted.
@@ -437,9 +445,8 @@ export const MessageRow = memo(function MessageRow({
       if (r.scope === 'preset') return r.scopeTargetId === chatPresetId({ presets }, chat)
       return true
     }
-    // depth = distance from the chat's end; scripts bound to a window only
-    // apply inside it (same count the engine uses at assembly)
-    const depth = chat.messages.length - 1 - index
+    // scripts bound to a depth window only apply inside it (same count the
+    // engine uses at assembly)
     // global first, then preset-bound, then scoped — same order the engine runs
     const rank = (r: RegexScript) => (r.scope === 'global' ? 0 : r.scope === 'preset' ? 1 : 2)
     const persona = personas.find((p) => p.id === chatPersonaId({ personas }, chat))
@@ -469,11 +476,11 @@ export const MessageRow = memo(function MessageRow({
       resolved.push({ find, flags: r.flags ?? 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
     }
     return resolved
-  }, [regexScripts, message.role, personas, presets, chat, character, index])
+  }, [regexScripts, message.role, personas, presets, chat, character, depth])
   // while streaming, unclosed emphasis/fence markers get synthetic closers
   // so each tick renders as finished markdown (never committed)
   const rawDisplayed = isStreamingThis ? balanceStreamingMarkdown(rawContent) : rawContent
-  const content = useDisplayTexts([rawDisplayed], displayScripts)[0] ?? rawDisplayed
+  const content = useDisplayTexts([rawDisplayed], displayScripts, liveDepth)[0] ?? rawDisplayed
   const activeSwipeData = message.swipes[shownSwipe]
   // committed segments: messages whose generation used tools render thinking,
   // text and tool rows interleaved (same message, same id, agent-style top to
@@ -500,8 +507,8 @@ export const MessageRow = memo(function MessageRow({
     return nodes
   }, [isStreamingThis, streamingMarks, streamingShown, streamingFull])
   // text segments of both timelines run through the same worker-backed pass
-  const partTexts = useDisplayTexts(parts ? parts.filter((p) => p.type === 'text').map((p) => p.text) : [], displayScripts)
-  const liveTexts = useDisplayTexts(liveTimeline ? liveTimeline.filter((n) => n.type === 'text').map((n) => n.text) : [], displayScripts)
+  const partTexts = useDisplayTexts(parts ? parts.filter((p) => p.type === 'text').map((p) => p.text) : [], displayScripts, liveDepth)
+  const liveTexts = useDisplayTexts(liveTimeline ? liveTimeline.filter((n) => n.type === 'text').map((n) => n.text) : [], displayScripts, liveDepth)
   const isUser = message.role === 'user'
   // per-message <style> blocks are rewritten under this row's own boundary,
   // so one message cannot restyle another's text
