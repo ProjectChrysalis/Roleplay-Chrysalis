@@ -43,6 +43,15 @@ export function balanceStreamingMarkdown(text: string): string {
   return out
 }
 
+/** Card authors hide notes in greetings as an empty link whose title sits
+ *  right against the URL, `[](#'note')`, which renders as nothing. Strict
+ *  markdown wants a space before the title and shows the whole thing as
+ *  text without it, so the space goes in. */
+const GLUED_TITLE_RE = /\]\(([^\s()<>'"]+)(['"])([^\n]*?)\2\)/g
+export function separateLinkTitles(text: string): string {
+  return text.replace(GLUED_TITLE_RE, (_, url: string, quote: string, title: string) => `](${url} ${quote}${title.replaceAll(quote, `\\${quote}`)}${quote})`)
+}
+
 /** JSON payload → display rows; arrays of pairs and {label,value} work too. */
 function rowsFromJson(raw: string): [string, string][] | null {
   const text = raw.trim()

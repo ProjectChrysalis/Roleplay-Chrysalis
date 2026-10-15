@@ -10,6 +10,7 @@ import rehypeRaw from 'rehype-raw'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import { cn } from '@/lib/utils'
 import { scopeCss } from '@/lib/scope-css'
+import { separateLinkTitles } from '@/lib/rich-parts'
 import 'katex/dist/katex.min.css'
 import 'highlight.js/styles/github-dark.css'
 
@@ -189,7 +190,7 @@ export const Markdown = memo(function Markdown({ content, className, scope, allo
           ]}
           components={imageComponent ? { ...mdComponents, img: imageComponent } : imageUrl ? { ...mdComponents, img: ({ src, alt }) => <img src={typeof src === 'string' ? imageUrl(src) : undefined} alt={alt ?? ''} loading="lazy" /> } : mdComponents}
         >
-          {content}
+          {separateLinkTitles(content)}
         </ReactMarkdown>
       </StyleScope.Provider>
     </div>

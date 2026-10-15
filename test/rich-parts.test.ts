@@ -3,7 +3,7 @@
  * split that message rendering runs on every body (and every stream frame).
  */
 import { describe, it, expect } from "bun:test";
-import { splitRichBlocks, balanceStreamingMarkdown } from "../src/lib/rich-parts.js";
+import { splitRichBlocks, balanceStreamingMarkdown, separateLinkTitles } from "../src/lib/rich-parts.js";
 
 describe("rich parts: typed blocks", () => {
   it("plain text stays one markdown run", () => {
@@ -168,5 +168,18 @@ describe("rich parts: streaming markdown balancing", () => {
 
   it("empty text stays empty", () => {
     expect(balanceStreamingMarkdown("")).toBe("");
+  });
+});
+
+describe("rich parts: hidden link notes", () => {
+  it("puts a space between a URL and the title written against it", () => {
+    expect(separateLinkTitles("[](#'Scenario: she can't win.') It was night.")).toBe("[](# 'Scenario: she can\\'t win.') It was night.");
+    expect(separateLinkTitles('[](#"a note") hi')).toBe('[](# "a note") hi');
+  });
+
+  it("leaves ordinary links alone", () => {
+    for (const text of ["[a](https://e.com) 'b'", '[a](https://e.com "t")', "see [x](#y)'s end", "plain 'quoted' text"]) {
+      expect(separateLinkTitles(text)).toBe(text);
+    }
   });
 });
