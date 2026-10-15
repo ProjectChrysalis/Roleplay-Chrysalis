@@ -43,6 +43,9 @@ test('types, areas and master switch filter producers using the latest preferenc
   expect(active(chat.success('Saved'))).toBeUndefined()
   expect(active(chat.error('Save failed'))).toMatchObject({ type: 'error' })
   settings = { memory: false }
+  expect(active(memory.error('Compaction failed'))).toMatchObject({ type: 'error' })
+  expect(active(memory.success('Compacted'))).toBeUndefined()
+  settings = { memory: false, error: false }
   expect(active(memory.error('Compaction failed'))).toBeUndefined()
   expect(active(chat.success('Saved'))).toMatchObject({ type: 'success' })
   settings = { enabled: false }

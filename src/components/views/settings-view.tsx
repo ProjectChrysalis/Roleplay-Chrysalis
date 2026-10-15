@@ -218,7 +218,7 @@ export function SettingsView() {
   const renderSection = (s: SectionDef) => (
     <div key={s.id} className="flex flex-col gap-1">
       <h3 className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{s.label}</h3>
-      {s.id === "notifications" && <p className="text-xs text-muted-foreground">Choose popup types and areas. Both must be on.</p>}
+      {s.id === "notifications" && <p className="text-xs text-muted-foreground">Areas filter other popups. Errors follow the Errors switch.</p>}
       {s.id === "notifications" ? (
         <>
           <div className="rounded-lg border border-border px-3 py-1.5">{s.controls.filter((c) => (c.key === "notifications.enabled" || c.key === "notificationPosition")).map(renderControl)}</div>

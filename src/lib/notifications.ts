@@ -48,7 +48,7 @@ export function configureNotifications(reader: typeof readSettings) {
 }
 
 export function notificationAllowed(settings: Partial<NotificationSettings> | undefined, area: NotificationArea, type: NotificationType) {
-  return settings?.enabled !== false && settings?.[area] !== false && settings?.[type] !== false
+  return settings?.enabled !== false && settings?.[type] !== false && (type === 'error' || settings?.[area] !== false)
 }
 
 export function createToast(area: NotificationArea) {
