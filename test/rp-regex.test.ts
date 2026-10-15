@@ -39,7 +39,7 @@ afterEach(() => {
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* watcher races */ }
 });
 
-function mockHost() {
+function baseMockHost() {
   const results: Record<string, unknown> = {};
   const requests: { key: string; req: Record<string, unknown> }[] = [];
   const resolve = () => {
@@ -72,6 +72,7 @@ function mockHost() {
   };
   return { host, requests, resolve };
 }
+const mockHost = baseMockHost;
 
 async function drive(
   req: { method: string; path: string; body?: unknown },
@@ -119,7 +120,24 @@ async function sendAndCapture(mock: ReturnType<typeof mockHost>, chatId: string,
   return (req.messages ?? []).map((m) => m.content).join("\n");
 }
 
-describe("regex replace semantics", () => {
+/** The engine's regex service, as the sandbox hands it to the plugin. */
+function hostMatches(source: string, flags: string, text: string) {
+  const re = new RegExp(source, flags);
+  const found = re.global ? [...text.matchAll(re)] : [re.exec(text)].filter((m): m is RegExpExecArray => !!m);
+  return found.map((m) => ({
+    index: m.index,
+    match: m[0],
+    groups: m.slice(1).map((g) => g ?? null),
+    named: m.groups ? Object.fromEntries(Object.entries(m.groups).map(([k, v]) => [k, v ?? null])) : null,
+  }));
+}
+
+for (const engineRegex of [false, true]) describe(`regex replace semantics${engineRegex ? " (engine regex)" : ""}`, () => {
+  const mockHost = () => {
+    const m = baseMockHost();
+    if (engineRegex) Object.assign(m.host, { regex: { matches: hostMatches } });
+    return m;
+  };
   it("empty flags rewrite only the first saved match", async () => {
     const m = mockHost();
     const chatId = await newChat(m);

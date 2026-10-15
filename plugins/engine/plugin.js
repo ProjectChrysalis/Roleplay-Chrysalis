@@ -543,19 +543,38 @@ function loadRegexScripts(fsx) {
  *  trimmed of the script's trim strings, a missing group vanishes — and
  *  macros substitute in the replacement. The FIND side substitutes macros
  *  per the script's macroMode (none / raw / escaped). */
+// The engine's regex service when it has one: patterns run in the host's
+// compiled regex engine instead of this interpreter, which is tens of times
+// slower on a pattern that rescans long replies. Set per call.
+let hostRegex = null;
+
+/** text.replace(re, fn) with the matching done by hostRegex. */
+function replaceWithHost(text, find, flags, fn) {
+  let out = "";
+  let last = 0;
+  for (const m of hostRegex.matches(find, flags, text)) {
+    const groups = m.groups.map((g) => (g === null ? undefined : g));
+    out += text.slice(last, m.index) + fn(m.match, ...groups, m.index, text, ...(m.named ? [m.named] : []));
+    last = m.index + m.match.length;
+  }
+  return out + text.slice(last);
+}
+
 function applyRegexScript(s, input, mc) {
   let find = String(s.findRegex ?? "");
   if (!find || find.length > 500) return String(input);
   if (s.macroMode === "raw") find = expandMacros(find, mc);
   else if (s.macroMode === "escaped") find = expandMacros(find, macroEscapedContext(mc));
+  const flags = s.flags ?? "g";
   let re;
-  try { re = new RegExp(find, s.flags ?? "g"); } catch { return String(input); }
+  try { re = new RegExp(find, flags); } catch { return String(input); }
   const trims = (Array.isArray(s.trimStrings) ? s.trimStrings : [])
     .map((t) => expandMacros(String(t), mc)).filter(Boolean);
   const trim = (v) => { let out = v; for (const t of trims) out = out.split(t).join(""); return out; };
   const replace = String(s.replaceString ?? "");
+  const text = String(input).slice(0, 20000);
   try {
-    return String(input).slice(0, 20000).replace(re, (...args) => {
+    const replacer = (...args) => {
       // (match, p1..pn, offset, string[, named-groups object]) — a $n beyond
       // the capture count would read the offset and leak it; those vanish
       const last = args[args.length - 1];
@@ -570,7 +589,8 @@ function applyRegexScript(s, input, mc) {
       });
       out = out.split("\u0000").join(trim(String(args[0] ?? "")));
       return expandMacros(out, mc);
-    });
+    };
+    return hostRegex ? replaceWithHost(text, find, flags, replacer) : text.replace(re, replacer);
   } catch { return String(input); }
 }
 
@@ -2557,6 +2577,7 @@ function searchChatLibrary(fsx, options) {
 }
 
 export function handleRoute(req, host) {
+  hostRegex = host.regex && typeof host.regex.matches === "function" ? host.regex : null;
   const fsx = host.fs;
   // a host that keeps the module loaded between calls must not hand one
   // call's shared variables to the next
