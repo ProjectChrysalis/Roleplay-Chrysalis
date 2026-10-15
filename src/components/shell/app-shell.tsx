@@ -7,6 +7,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useApp, DRAWER_VIEWS, type ViewKey } from '@/lib/store'
 import { takeReloadReason } from '@/lib/engine'
+import { loadArchiveImports } from '@/lib/archive-import'
 import { useIsDesktop } from '@/hooks/use-mobile'
 import { useBackClose } from '@/hooks/use-back-close'
 import { cn } from '@/lib/utils'
@@ -71,6 +72,9 @@ export function AppShell() {
 
   // engine hydrate — characters/chats/personas/presets/lorebooks/regex/models
   useEffect(() => { void hydrate() }, [hydrate])
+
+  // an archive import keeps running engine-side through reloads; show it
+  useEffect(() => { void loadArchiveImports() }, [])
 
   // A reload the app asked for explains itself once it lands. Nothing shown
   // here means the reload came from the browser, not from the app.

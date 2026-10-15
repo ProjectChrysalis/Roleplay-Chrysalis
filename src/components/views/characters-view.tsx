@@ -25,7 +25,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useApp } from '@/lib/store'
 import { estimateTokens, formatTokens } from '@/lib/tokens'
 import { DEFAULT_AVATAR, cn, readableNameColor } from '@/lib/utils'
-import { j, extractCardFromPng, fileToDataUrl, downscaleRemoteImage, characterToCard } from '@/lib/engine'
+import { j, importCardFiles, downscaleRemoteImage, characterToCard } from '@/lib/engine'
 import { buildCardPng, downloadCardPng } from '@/lib/png-card'
 import { downloadJson } from '@/lib/interop'
 import { CharacterEditor } from '@/components/views/character-editor'
@@ -118,34 +118,16 @@ export function CharactersView() {
    *  through the studio-import plugin route. */
   const importFiles = async (files: FileList | null) => {
     if (!files?.length) return
-    const cards: unknown[] = []
-    const errors: string[] = []
-    for (const f of Array.from(files)) {
-      try {
-        if (f.name.toLowerCase().endsWith('.png')) {
-          const card = await extractCardFromPng(f)
-          if (!card) { errors.push(`${f.name}: no embedded card data`); continue }
-          let avatar: string | undefined
-          try { avatar = await fileToDataUrl(f, 512) } catch { /* keep card without avatar */ }
-          cards.push({ card, ...(avatar ? { avatar } : {}) })
-        } else {
-          cards.push(JSON.parse(await f.text()))
-        }
-      } catch { errors.push(`${f.name}: could not parse`) }
-    }
-    if (cards.length) {
-      try {
-        const r = await j<CardImportResult>('/import/batch', {
-          method: 'POST', body: JSON.stringify({ cards, deferEmbeddedLore: true, enableEmbeddedRegex }),
-        })
-        if (r.characters.length) toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? '' : 's'}`, { description: cardImportDetails(r, enableEmbeddedRegex) })
-        errors.push(...(r.errors ?? []))
+    try {
+      const r = await importCardFiles(Array.from(files), { fullSize: useApp.getState().settings.importFullSizeArt === true, enableEmbeddedRegex })
+      if (r.characters.length) {
+        toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? '' : 's'}`, { description: cardImportDetails(r, enableEmbeddedRegex) })
         await hydrate()
-      } catch (e) {
-        toast.error(String((e as Error).message ?? e))
       }
+      for (const e of r.errors) toast.error(e)
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
     }
-    for (const e of errors) toast.error(e)
   }
 
   /** Real export: V2 PNG card with the JSON spliced into a tEXt chunk. */

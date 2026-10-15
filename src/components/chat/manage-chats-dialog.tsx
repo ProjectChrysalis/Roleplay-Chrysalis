@@ -335,14 +335,8 @@ export function ManageChatsDialog({
   const importBackup = async (files: FileList | null) => {
     const f = files?.[0]
     if (!f) return
-    try {
-      const r = await importArchiveWithProgress(f)
-      const parts = Object.entries(r.counts ?? r)
-        .filter(([key, v]) => key !== "errors" && ((typeof v === "number" && v > 0) || (Array.isArray(v) && v.length)))
-        .map(([k, v]) => `${typeof v === "number" ? v : (v as unknown[]).length} ${k}`)
-      toast.success(parts.length ? `Imported ${parts.join(", ")}` : "Nothing recognized in that zip")
-      await hydrate()
-    } catch (e) { if ((e as Error).name !== "AbortError") toast.error(String((e as Error).message ?? e)) }
+    try { await importArchiveWithProgress(f) }
+    catch (e) { if ((e as Error).name !== "AbortError") toast.error(String((e as Error).message ?? e)) }
   }
 
   // Build root list + fork tree for this character

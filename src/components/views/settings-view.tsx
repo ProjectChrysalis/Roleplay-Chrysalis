@@ -23,8 +23,9 @@ import { useApp } from "@/lib/store"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { MasterDetail } from "@/components/shell/master-detail"
 import type { AppSettings } from "@/lib/types"
-import { extractCharaFromPng, regexImport } from "@/lib/interop"
-import { downloadBlob, importLorebookFiles, j } from "@/lib/engine"
+import { regexImport } from "@/lib/interop"
+import { downloadBlob, importCardFiles, importLorebookFiles, j } from "@/lib/engine"
+import { ArchiveImportPanel, useArchiveChooser } from "@/components/settings/archive-import-panel"
 import { cn } from "@/lib/utils"
 
 const toast = createToast('imports')
@@ -405,44 +406,23 @@ function STImportSection() {
 
   const handleCharacters = async (files: FileList | null) => {
     if (!files) return
-    const cards: unknown[] = []
-    for (const file of Array.from(files)) {
-      try {
-        const lower = file.name.toLowerCase()
-        if (lower.endsWith(".png")) {
-          const json = await extractCharaFromPng(file)
-          if (!json) { toast.error(`${file.name}: no embedded character data found`); continue }
-          cards.push(json)
-        } else if (lower.endsWith(".charx")) {
-          // a charx package IS a zip with card.json — the plugin unpacks it
-          const r = await importArchiveWithProgress(file)
-          const got = (r.characters as string[] | undefined)?.length ?? 0
-          if (got) toast.success(`${file.name}: card imported`)
-          else toast.error(`${file.name}: no card.json in package`)
-          continue
-        } else {
-          let json = JSON.parse(await file.text()) as Record<string, unknown>
-          // native wrappers: unwrap the first card-shaped value
-          if (!json || typeof json.name !== "string") {
-            for (const key of ["character", "card", "data"]) {
-              const inner = (json as Record<string, unknown>)?.[key]
-              if (inner && typeof inner === "object" && typeof (inner as { name?: unknown }).name === "string") { json = inner as Record<string, unknown>; break }
-            }
-          }
-          cards.push(json)
-        }
-      } catch (e) { if ((e as Error).name !== "AbortError") toast.error(`${file.name}: could not parse`) }
+    const all = Array.from(files)
+    // a charx package IS a zip with card.json — the plugin unpacks it
+    for (const file of all.filter((f) => f.name.toLowerCase().endsWith(".charx"))) {
+      try { await importArchiveWithProgress(file) } catch (e) { if ((e as Error).name !== "AbortError") toast.error(`${file.name}: ${(e as Error).message ?? e}`) }
     }
-    if (cards.length) {
-      try {
-        // the studio-import plugin normalizes raw card JSON into card.json files
-        const r = await j<{ characters: string[]; regex: string[] }>("/import/batch", { method: "POST", body: JSON.stringify({ cards, deferEmbeddedLore: true }) })
-        // regex scripts a card carries arrive as that character's scripts
-        const nScripts = r.regex?.length ?? 0
+    const cards = all.filter((f) => !f.name.toLowerCase().endsWith(".charx"))
+    if (!cards.length) return
+    try {
+      const r = await importCardFiles(cards, { fullSize: useApp.getState().settings.importFullSizeArt === true })
+      // regex scripts a card carries arrive as that character's scripts
+      const nScripts = r.regex.length
+      if (r.characters.length) {
         toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? "" : "s"}${nScripts ? `, ${nScripts} regex script${nScripts === 1 ? "" : "s"}` : ""}`)
         await useApp.getState().hydrate()
-      } catch (e) { if ((e as Error).name !== "AbortError") toast.error(String((e as Error).message ?? e)) }
-    }
+      }
+      for (const e of r.errors) toast.error(e)
+    } catch (e) { toast.error(String((e as Error).message ?? e)) }
   }
 
   const handleRegex = async (files: FileList | null) => {
@@ -504,31 +484,26 @@ function STImportSection() {
   ]
 
   const backupInput = useRef<HTMLInputElement>(null)
+  const { choose, dialog } = useArchiveChooser()
+  const fullSizeArt = useApp((s) => s.settings.importFullSizeArt === true)
   const handleBackupZip = async (files: FileList | null) => {
     const f = files?.[0]
     if (!f) return
-    try {
-      const r = await importArchiveWithProgress(f)
-      const parts = Object.entries(r.counts ?? r)
-        .filter(([key, v]) => key !== "errors" && ((typeof v === "number" && v > 0) || (Array.isArray(v) && v.length)))
-        .map(([k, v]) => `${typeof v === "number" ? v : (v as unknown[]).length} ${k}`)
-      toast.success(parts.length ? `Imported ${parts.join(", ")}` : "Nothing recognized in that zip")
-      await useApp.getState().hydrate()
-    } catch (e) {
-      if ((e as Error).name === "AbortError") return
-      toast.error(String((e as Error).message ?? e))
-    }
+    try { await importArchiveWithProgress(f, choose) }
+    catch (e) { if ((e as Error).name !== "AbortError") toast.error(String((e as Error).message ?? e)) }
   }
 
   return (
     <div className="flex flex-col gap-3">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Import</h3>
+      {dialog}
+      <ArchiveImportPanel choose={choose} />
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-3 rounded-lg border border-border p-3">
           <Archive className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium">Backup zip</p>
-            <p className="truncate text-xs text-muted-foreground">Everything at once: characters, chats, personas, presets, worlds, regex</p>
+            <p className="truncate text-xs text-muted-foreground">A backup or a zipped data folder. Pick what to import.</p>
           </div>
           <input
             ref={backupInput}
@@ -563,6 +538,11 @@ function STImportSection() {
             </Button>
           </div>
         ))}
+        <label className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border border-border p-3">
+          <FileImage className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="flex-1 text-sm font-medium">Keep full-size card art</span>
+          <Switch checked={fullSizeArt} onCheckedChange={(v) => useApp.getState().updateSettings({ importFullSizeArt: v })} aria-label="Keep full-size card art" />
+        </label>
       </div>
     </div>
   )
@@ -570,8 +550,8 @@ function STImportSection() {
 
 function DataSection() {
   const resetAll = useApp((s) => s.resetAll)
-  const hydrate = useApp((s) => s.hydrate)
   const importInput = useRef<HTMLInputElement>(null)
+  const { choose, dialog } = useArchiveChooser()
   const [resetOpen, setResetOpen] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -595,10 +575,7 @@ function DataSection() {
     if (!file) return
     setBusy(true)
     try {
-      const summary = await importArchiveWithProgress(file)
-      const n = summary.counts ? Object.entries(summary.counts).reduce((total, [key, value]) => total + (key === "errors" ? 0 : value), 0) : summary.characters.length + summary.lorebooks.length + summary.presets.length + summary.regex.length + summary.personas.length + summary.chats.length + summary.databank.length
-      toast.success(`Restored ${n} items`, { description: summary.errors.length ? `${summary.errors.length} skipped` : undefined })
-      await hydrate()
+      await importArchiveWithProgress(file, choose)
     } catch (e) {
       if ((e as Error).name === "AbortError") return
       toast.error(String((e as Error).message ?? e))
@@ -608,6 +585,7 @@ function DataSection() {
   return (
     <div className="flex flex-col gap-3">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Data</h3>
+      {dialog}
       <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
         <Button variant="outline" className="justify-start gap-2 bg-transparent" disabled={busy} onClick={() => void handleExport()}>
           <DownloadSimple className="size-4" aria-hidden /> Export backup (zip)

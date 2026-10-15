@@ -678,6 +678,9 @@ export interface AppSettings {
   expandMessageActions: boolean
   /** floating expression sprite for the latest speaker (when they have sprites) */
   showExpressionSprites: boolean
+  /** card files imported from disk keep their image as is instead of a
+   *  512px copy */
+  importFullSizeArt: boolean
   reducedMotion: boolean
   autoScroll: boolean
   confirmDeletions: boolean

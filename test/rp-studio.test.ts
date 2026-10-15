@@ -3693,3 +3693,79 @@ describe('marketplace current catalogs', () => {
     expect((await drive(stUrl, { method: 'POST', path: '/marketplace/search', body: { source: 'tavern' } }, invalid)).status).toBe(502)
   })
 })
+
+describe("rp studio: a foreign user folder imports linked up", () => {
+  const chunk = (type: string, body: Buffer) => { const length = Buffer.alloc(4); length.writeUInt32BE(body.length); return Buffer.concat([length, Buffer.from(type), body, Buffer.alloc(4)]); };
+  const cardPng = (card: object) => Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("tEXt", Buffer.from("chara\0" + Buffer.from(JSON.stringify(card)).toString("base64"))), chunk("IEND", Buffer.alloc(0))]).toString("base64");
+  const settings = JSON.stringify({
+    power_user: { personas: { "user-default.png": "Alex" }, persona_descriptions: { "user-default.png": { description: "Me", title: "Traveler" } }, default_persona: "user-default.png" },
+    extension_settings: {
+      regex: [{ scriptName: "Strip stars", findRegex: "/\\*/g", replaceString: "", placement: [2] }],
+      quickReplyV2: { config: { setList: [{ set: "Main", isVisible: true }] } },
+    },
+  });
+  const jsonl = (...lines: object[]) => lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+  const entries = (): Record<string, unknown> => ({
+    "default-user/settings.json": settings,
+    "default-user/characters/sera_v2.png": { __b64__: true, base64: cardPng({ spec: "chara_card_v2", data: { name: "Seraphina", description: "Guardian", extensions: { world: "Eldoria" } } }) },
+    "default-user/characters/Seraphina/joy.png": { __b64__: true, base64: "QUFB" },
+    "default-user/worlds/Eldoria.json": JSON.stringify({ entries: { 0: { uid: 0, key: ["forest"], content: "A forest" } } }),
+    "default-user/chats/sera_v2/2024-01-01.jsonl": jsonl({ user_name: "Alex", character_name: "Seraphina", chat_metadata: {} }, { name: "Seraphina", is_user: false, mes: "Hello" }),
+    "default-user/groups/1700.json": JSON.stringify({ id: "1700", name: "Party", members: ["sera_v2.png"], disabled_members: ["sera_v2.png"], chats: ["Party - old", "Party - new"], chat_id: "Party - new", activation_strategy: 1, generation_mode: 1, past_metadata: { big: "x" } }),
+    "default-user/group chats/Party - old.jsonl": jsonl({ chat_metadata: {} }, { name: "Sera", is_user: false, mes: "Hi all", original_avatar: "sera_v2.png" }),
+    "default-user/User Avatars/user-default.png": { __b64__: true, base64: "QkJC" },
+    "default-user/QuickReplies/Main.json": JSON.stringify({ name: "Main", disableSend: true, qrList: [{ label: "Wave", message: "*waves*", executeOnAi: true }, { label: "helper", message: "/echo", isHidden: true }] }),
+    "default-user/QuickReplies/Other.json": JSON.stringify({ name: "Other", qrList: [{ label: "Nod", message: "*nods*" }] }),
+    "default-user/themes/Dark Lilac.json": JSON.stringify({ name: "Dark Lilac", main_text_color: "rgba(220, 220, 210, 1)", chat_tint_color: "rgba(23, 23, 23, 1)", quote_text_color: "#c8f" }),
+    "default-user/instruct/ChatML.json": JSON.stringify({ name: "ChatML", input_sequence: "<|im_start|>user", output_sequence: "<|im_start|>assistant", wrap: true }),
+  });
+  const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(root, rel), "utf8"));
+
+  it("links chats, groups, sprites, books and personas by the files the folder names", async () => {
+    fs.writeFileSync(path.join(root, "library.json"), JSON.stringify({ themes: [], qrSets: [] }));
+    const m = mockHost();
+    const all = entries();
+    (m.host as { zip: unknown }).zip = { entries: () => all, list: () => Object.keys(all).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(r.json.errors).toEqual([]);
+    const seraId = (r.json.characters as string[])[0]!;
+    const sera = read(`characters/${seraId}/card.json`);
+    expect(sera.avatar).toStartWith("data:image/png;base64,");
+    expect(sera.studio.expressions).toEqual([{ name: "joy", url: "data:image/png;base64,QUFB" }]);
+    expect(read(`lorebooks/${(r.json.lorebooks as string[])[0]}.json`).linkedCharacterIds).toEqual([seraId]);
+
+    const metas = (r.json.chats as string[]).map((id) => read(`chats/${id}.meta.json`));
+    const group = read(`groups/${(r.json.groups as string[])[0]}.json`);
+    expect(group).toMatchObject({ name: "Party", memberIds: [seraId], mutedIds: [seraId], mode: "list", generationMode: "append" });
+    expect(group.past_metadata).toBeUndefined();
+    expect(metas.find((c) => c.characterId === seraId)).toBeDefined();
+    const groupChat = metas.find((c) => c.groupId === group.id)!;
+    expect(groupChat).toBeDefined();
+    const said = fs.readFileSync(path.join(root, "chats", `${groupChat.id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(said[0].charId).toBe(seraId);
+
+    const persona = read(`personas/${(r.json.personas as string[])[0]}.json`);
+    expect(persona).toMatchObject({ name: "Alex", description: "Me", title: "Traveler", isDefault: true, avatar: "data:image/png;base64,QkJC" });
+    expect(r.json.regex).toHaveLength(1);
+
+    const lib = read("library.json");
+    expect(lib.qrSets.map((s: { name: string; enabled: boolean }) => [s.name, s.enabled])).toEqual([["Main", true], ["Other", false]]);
+    expect(lib.qrSets[0].replies).toEqual([expect.objectContaining({ label: "Wave", message: "*waves*", mode: "insert", autoExecute: { onStartup: false, onUser: false, onAi: false, onChatChange: false } })]);
+    expect(lib.themes[0]).toMatchObject({ name: "Dark Lilac", colors: { mainText: "#dcdcd2", chatBg: "#171717", quotes: "#cc88ff" } });
+    const chatml = (r.json.presets as string[]).map((id) => read(`presets/${id}.json`)).find((p) => p.name === "ChatML");
+    expect(chatml.studio.promptFormat.custom.userPrefix).toBe("<|im_start|>user\n");
+
+    // a second run adds no duplicate sets or themes
+    const again = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(again.json.quickReplies).toEqual([]);
+    expect(read("library.json").themes).toHaveLength(1);
+  }, 30_000);
+
+  it("leaves settings-file personas and regex out when those collections were not chosen", async () => {
+    const m = mockHost();
+    (m.host as { zip: unknown }).zip = { entries: () => ({ "default-user/settings.json": settings }), list: () => 1 };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { include: ["characters/", "settings.json"] } }, m);
+    expect(r.json.personas).toEqual([]);
+    expect(r.json.regex).toEqual([]);
+  }, 30_000);
+});

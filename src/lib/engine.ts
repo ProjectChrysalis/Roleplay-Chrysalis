@@ -1449,46 +1449,141 @@ export async function extractCardFromPng(file: File): Promise<object | null> {
   return card && typeof card === 'object' ? card as object : null
 }
 
+/** Card files (PNG or JSON) through the import route, a bounded batch per
+ *  request so a whole library never rides one body. A PNG's own image
+ *  becomes the portrait, shrunk to 512px unless `fullSize`. */
+export async function importCardFiles(files: File[], opts: { fullSize: boolean; enableEmbeddedRegex?: boolean }): Promise<{ characters: string[]; lorebooks: string[]; regex: string[]; errors: string[] }> {
+  const out = { characters: [] as string[], lorebooks: [] as string[], regex: [] as string[], errors: [] as string[] }
+  let cards: unknown[] = []
+  let bytes = 0
+  const flush = async () => {
+    if (!cards.length) return
+    const r = await j<{ characters: string[]; lorebooks?: string[]; regex?: string[]; errors?: string[] }>('/import/batch', {
+      method: 'POST', body: JSON.stringify({ cards, deferEmbeddedLore: true, enableEmbeddedRegex: opts.enableEmbeddedRegex === true }),
+    })
+    out.characters.push(...r.characters); out.lorebooks.push(...(r.lorebooks ?? [])); out.regex.push(...(r.regex ?? [])); out.errors.push(...(r.errors ?? []))
+    cards = []; bytes = 0
+  }
+  for (const f of files) {
+    try {
+      if (f.name.toLowerCase().endsWith('.png')) {
+        const card = await extractCardFromPng(f)
+        if (!card) { out.errors.push(`${f.name}: no embedded card data`); continue }
+        let avatar: string | undefined
+        try { avatar = opts.fullSize ? await fileToRawDataUrl(f) : await fileToDataUrl(f, 512) } catch { /* keep card without avatar */ }
+        cards.push({ card, ...(avatar ? { avatar } : {}) })
+        bytes += avatar?.length ?? 0
+      } else {
+        let json = JSON.parse(await f.text()) as Record<string, unknown>
+        // native wrappers: unwrap the first card-shaped value (the import
+        // route reads a spec card's `data` itself)
+        if (!json || typeof json.name !== 'string') {
+          for (const key of ['character', 'card']) {
+            const inner = json?.[key]
+            if (inner && typeof inner === 'object' && typeof (inner as { name?: unknown }).name === 'string') { json = inner as Record<string, unknown>; break }
+          }
+        }
+        cards.push(json)
+      }
+    } catch { out.errors.push(`${f.name}: could not parse`) }
+    if (cards.length >= 50 || bytes > 24 * 1024 * 1024) await flush()
+  }
+  await flush()
+  return out
+}
+
 export interface ArchiveSummary {
   characters: string[]; groups: string[]; lorebooks: string[]; presets: string[]; regex: string[];
   personas: string[]; themes: string[]; chats: string[]; databank: string[]; errors: string[];
   counts?: Record<string, number>;
 }
 
-/** The selected File stays on disk; only one upload chunk and one import batch are in flight. */
-export async function importArchive(file: File, progress?: (stage: string, done: number, total: number) => void, signal?: AbortSignal): Promise<ArchiveSummary> {
-  const chunkBytes = 8 * 1024 * 1024
+/** An archive import as the engine keeps it. `selected` and `processed`
+ *  count the files inside the collections chosen for import. */
+export interface ArchiveImportState {
+  id: string; name: string; size: number; uploaded: number
+  status: 'uploading' | 'indexing' | 'ready' | 'failed' | 'done'
+  files: number; cursor: number; error?: string
+  collections: string[]; collectionCounts?: Record<string, number>; include?: string[]
+  selected?: number; processed?: number; running?: boolean; runError?: string
+  counts?: Record<string, number>; errors?: string[]
+}
+
+/** Archive folders in the order they import: whatever a later folder links
+ *  to by name has to exist first. Matching is by prefix, first match wins. */
+export const ARCHIVE_COLLECTIONS = [
+  'characters/', 'worlds/', 'lorebooks/', 'presets/', 'openai settings/', 'textgen settings/', 'instruct/', 'context/',
+  'User Settings/', 'settings.json', 'personas.json', 'extensions/regex/', 'regex/', 'personas/', 'User Avatars/',
+  'groups/', 'chats/', 'group chats/', 'QuickReplies/', 'themes/', 'databank/', 'library.json', 'variables.json',
+]
+
+const importKey = async (file: File) => {
   const samples = await Promise.all([file.slice(0, 65536), file.slice(Math.max(0, file.size - 65536))].map(async (part) => new Uint8Array(await part.arrayBuffer())))
   const fingerprint = samples.map((bytes) => { let hash = 2166136261; for (const byte of bytes) hash = Math.imul(hash ^ byte, 16777619); return (hash >>> 0).toString(16) }).join(':')
-  const key = `archive-import:${file.name}:${file.size}:${file.lastModified}:${fingerprint}`
-  type State = { id: string; uploaded: number; size: number; status: string; cursor: number; files: number; error?: string; errors?: string[]; counts?: Record<string, number> }
-  let state: State | null = null
-  try { const id = localStorage.getItem(key); if (id) state = await j<State>(`/__imports/${id}`) } catch { /* expired upload */ }
-  if (!state || state.status === 'failed') {
+  return `archive-import:${file.name}:${file.size}:${file.lastModified}:${fingerprint}`
+}
+
+/** Sends the archive to the engine, picking up where an earlier upload of
+ *  the same file stopped. The selected File stays on disk; one chunk is in
+ *  flight at a time. An engine without staged imports takes small archives
+ *  whole and answers with the result. */
+export async function uploadArchive(file: File, progress?: (stage: string, done: number, total: number) => void, signal?: AbortSignal): Promise<{ state: ArchiveImportState } | { summary: ArchiveSummary }> {
+  const chunkBytes = 8 * 1024 * 1024
+  const key = await importKey(file)
+  let state: ArchiveImportState | null = null
+  try { const id = localStorage.getItem(key); if (id) state = await j<ArchiveImportState>(`/__imports/${id}`) } catch { /* expired upload */ }
+  if (!state || state.status === 'failed' || state.status === 'done') {
     try {
-      state = await j<State>('/__imports/new', { method: 'POST', body: JSON.stringify({ name: file.name, size: file.size, collections: ['characters/', 'worlds/', 'lorebooks/', 'presets/', 'openai settings/', 'textgen settings/', 'User Settings/', 'settings.json', 'personas.json', 'extensions/regex/', 'regex/', 'personas/', 'groups/', 'chats/', 'group chats/', 'databank/', 'library.json'] }) })
+      const create = (collections: string[]) => j<ArchiveImportState>('/__imports/new', { method: 'POST', body: JSON.stringify({ name: file.name, size: file.size, collections }) })
+      // older engines accept folder names only; root files then import last
+      state = await create(ARCHIVE_COLLECTIONS).catch((error) => {
+        if (error instanceof ApiError && error.status === 400 && /invalid collection order/.test(error.message)) return create(ARCHIVE_COLLECTIONS.filter((name) => !name.includes('.')))
+        throw error
+      })
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) throw error;
       if (file.size > 16 * 1024 * 1024) throw new Error('Update the engine to import large archives');
-      return j<ArchiveSummary>('/import/zip', { method: 'POST', body: JSON.stringify({ zipBase64: await fileToRawBase64(file) }) });
+      return { summary: await j<ArchiveSummary>('/import/zip', { method: 'POST', body: JSON.stringify({ zipBase64: await fileToRawBase64(file) }) }) };
     }
   }
   try { localStorage.setItem(key, state.id) } catch { /* resume unavailable */ }
-  const summary: ArchiveSummary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], databank: [], errors: state.errors ?? [] }
   const check = () => { if (signal?.aborted) throw new DOMException('Import cancelled', 'AbortError') }
   while (state.uploaded < file.size) {
     check()
     progress?.('Uploading', state.uploaded, file.size)
     const part = file.slice(state.uploaded, state.uploaded + chunkBytes)
-    state = await j<State>(`/__imports/${state.id}?offset=${state.uploaded}`, { method: 'PUT', body: part, headers: { 'Content-Type': 'application/octet-stream' } })
+    state = await j<ArchiveImportState>(`/__imports/${state.id}?offset=${state.uploaded}`, { method: 'PUT', body: part, headers: { 'Content-Type': 'application/octet-stream' } })
   }
   while (state.status === 'indexing') {
     check()
     progress?.('Indexing', state.files, 0)
     await new Promise((resolve) => setTimeout(resolve, 300))
-    state = await j<State>(`/__imports/${state.id}`)
+    state = await j<ArchiveImportState>(`/__imports/${state.id}`)
   }
   if (state.status !== 'ready') throw new Error(state.error || 'Archive is not ready')
+  return { state }
+}
+
+/** Hands the import to the engine, which keeps going with the page closed.
+ *  null: this engine cannot run imports itself. */
+export async function runArchiveImport(id: string, include?: string[]): Promise<ArchiveImportState | null> {
+  try {
+    return await j<ArchiveImportState>(`/__imports/${id}/run`, { method: 'POST', body: JSON.stringify({ route: '/import/zip', finish: '/import/finish', ...(include ? { include } : {}) }) })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+}
+
+export const archiveImportState = (id: string) => j<ArchiveImportState>(`/__imports/${id}`)
+export const listArchiveImports = () => j<{ imports: ArchiveImportState[] }>('/__imports/').then((r) => r.imports)
+export const stopArchiveImport = (id: string) => j<ArchiveImportState>(`/__imports/${id}/stop`, { method: 'POST', body: '{}' })
+export const removeArchiveImport = (id: string) => j(`/__imports/${id}`, { method: 'DELETE' })
+
+/** The batches driven from the page, for an engine that cannot run them. */
+export async function importArchiveBatches(state: ArchiveImportState, progress?: (stage: string, done: number, total: number) => void, signal?: AbortSignal): Promise<ArchiveSummary> {
+  const summary: ArchiveSummary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], databank: [], errors: state.errors ?? [] }
+  const check = () => { if (signal?.aborted) throw new DOMException('Import cancelled', 'AbortError') }
   while (state.cursor < state.files) {
     check()
     progress?.('Importing', state.cursor, state.files)
@@ -1502,11 +1597,9 @@ export async function importArchive(file: File, progress?: (stage: string, done:
     }
   }
   summary.counts ??= state.counts
-  progress?.('Imported', state.files, state.files)
   progress?.('Saving history', state.files, state.files)
   await j(`/__imports/${state.id}/finish`, { method: 'POST', body: JSON.stringify({ route: '/import/finish' }) })
-  await j(`/__imports/${state.id}`, { method: 'DELETE' })
-  try { localStorage.removeItem(key) } catch { /* storage unavailable */ }
+  await removeArchiveImport(state.id)
   return summary
 }
 

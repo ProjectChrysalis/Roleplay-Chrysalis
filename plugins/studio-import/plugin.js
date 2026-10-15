@@ -885,6 +885,59 @@ function tavernRoute(req, host) {
   } };
 }
 
+/** A foreign color ("#rgb", "#rrggbb", "rgb(…)", "rgba(…)") as "#rrggbb",
+ *  alpha dropped; null when it is none of those. */
+function hexColor(value) {
+  const v = String(value ?? "").trim();
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})([0-9a-f]{2})?$/i.exec(v);
+  if (hex) return "#" + (hex[1].length === 3 ? hex[1].replace(/./g, (c) => c + c) : hex[1]).toLowerCase();
+  const rgb = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/i.exec(v);
+  if (!rgb) return null;
+  return "#" + rgb.slice(1, 4).map((n) => Math.min(255, Number(n)).toString(16).padStart(2, "0")).join("");
+}
+
+/** Colors a theme file leaves out come from the default dark palette. */
+const BASE_THEME = { mainText: "#e4e4e4", italics: "#8f8f8f", quotes: "#54d17d", shadow: "#000000", chatBg: "#0b0b0b", uiBg: "#101010", borders: "#212121", userTint: "#171717", charTint: "#101010", accent: "#54d17d" };
+
+/** A theme file of the public UI-theme shape as a theme preset (colors
+ *  only; layout and custom CSS have no place in a preset). */
+function themeFromForeign(t) {
+  if (!t || typeof t !== "object" || typeof t.name !== "string" || !t.name.trim()) return null;
+  const pick = (...keys) => { for (const k of keys) { const c = hexColor(t[k]); if (c) return c; } return null; };
+  const colors = {
+    mainText: pick("main_text_color"), italics: pick("italics_text_color"), quotes: pick("quote_text_color"),
+    shadow: pick("shadow_color"), chatBg: pick("chat_tint_color", "blur_tint_color"), uiBg: pick("blur_tint_color"),
+    borders: pick("border_color"), userTint: pick("user_mes_blur_tint_color"), charTint: pick("bot_mes_blur_tint_color"),
+    accent: pick("quote_text_color", "underline_text_color"),
+  };
+  if (!Object.values(colors).some(Boolean)) return null;
+  for (const k of Object.keys(colors)) colors[k] = colors[k] || BASE_THEME[k];
+  return { id: "theme_" + slug(t.name) + "-" + Math.random().toString(36).slice(2, 7), name: t.name.trim(), builtin: false, colors };
+}
+
+/** A quick reply set file as a set of buttons. Automation flags are left
+ *  off: a reply that fired on every message elsewhere would send text here,
+ *  and hidden replies only exist to be called by other scripts. */
+function quickReplySetFromForeign(raw, enabled) {
+  if (!raw || typeof raw !== "object" || typeof raw.name !== "string" || !raw.name.trim() || !Array.isArray(raw.qrList)) return null;
+  const replies = raw.qrList
+    .filter((qr) => qr && typeof qr.message === "string" && qr.message.trim() && qr.isHidden !== true)
+    .map((qr) => ({
+      id: "qr_" + Math.random().toString(36).slice(2, 10),
+      label: String(qr.label || qr.title || qr.message).slice(0, 80),
+      message: qr.message,
+      color: typeof raw.color === "string" ? raw.color : "",
+      mode: raw.disableSend === true ? "insert" : "send",
+      autoExecute: { onStartup: false, onUser: false, onAi: false, onChatChange: false },
+    }));
+  if (!replies.length) return null;
+  return { id: "qrs_" + Math.random().toString(36).slice(2, 10), name: raw.name.trim(), scope: "global", replies, enabled };
+}
+
+/** Group settings a foreign group file spells numerically. */
+const GROUP_ACTIVATION = { 0: "natural", 1: "list", 2: "manual", 3: "natural" };
+const GROUP_GENERATION = { 0: "swap", 1: "append", 2: "append" };
+
 function importEmbeddedBook(card, book, writeJson, uid, summary) {
   const world = book ? embeddedBookToWorld(book) : null;
   if (world) {
@@ -1088,8 +1141,10 @@ export function handleRoute(req, host) {
   const fsx = host.fs;
   const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(storeMedia(v, fsx), null, 2) + "\n");
   const readJson = (rel, fb) => { try { return JSON.parse(fsx.read(rel)); } catch { return fb; } };
-  const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], chats: [], databank: [], errors: [] };
+  const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], quickReplies: [], chats: [], databank: [], errors: [] };
   let characterNames = null;
+  let written = null;
+  let worldLinkMap = null;
   const used = new Set();
   // Id collision guard: dedupes within THIS import batch AND against what
   // already exists on disk — re-importing the same card must never silently
@@ -1234,10 +1289,18 @@ export function handleRoute(req, host) {
     card.studio = { ...card.studio, createdAt: card.studio?.createdAt || importedAt, importedAt };
     writeJson("characters/" + id + "/card.json", card);
     summary.characters.push(id);
+    written = id;
     if (req.body?.importId && fsx.lookup) { fsx.lookup(req.body.importId + "_characters", String(card.name).toLowerCase(), id); fsx.lookup(req.body.importId + "_characters", slug(card.name), id); }
     if (!characterNames) characterNames = new Map();
     characterNames.set(String(card.name).toLowerCase(), id);
     characterNames.set(slug(card.name), id);
+    // a card can name the world book it uses; the book may arrive later
+    const world = card.extensions && typeof card.extensions.world === "string" ? card.extensions.world.trim().toLowerCase() : "";
+    if (world) {
+      const ids = [...(worldLinks().get(world) || []), id];
+      while (JSON.stringify(ids).length > 4000) ids.shift();
+      worldLinks().set(world, ids);
+    }
     // regex scripts a card carries run for that character only
     const embedded = card.extensions && Array.isArray(card.extensions.regex_scripts) ? card.extensions.regex_scripts : [];
     embedded.forEach((raw, i) => {
@@ -1248,12 +1311,19 @@ export function handleRoute(req, host) {
       summary.regex.push(rid);
     });
   }
+  /** World book name → the cards that name it. Hoisted with writeCard; on an
+   *  archive import it outlives the batch, since books arrive after cards. */
+  function worldLinks() {
+    const id = String(req.body?.importId || "");
+    if (/^[a-f0-9-]{36}$/.test(id) && fsx.lookup) return { get: (key) => fsx.lookup(id + "_worldLinks", key), set: (key, value) => fsx.lookup(id + "_worldLinks", key, value) };
+    return (worldLinkMap ??= new Map());
+  }
   /** Cards may embed a lorebook — write it as a book file and link it via
    *  the card's studio bag so the app scopes it to that character. charx
    *  packages also carry assets: the icon/main avatar and emotion sprites
    *  resolve from the package bytes (assetDict) or inline data: URIs. */
   function writeCardWithBook(card, raw, assetDict, sourceAvatar) {
-    if (!card) return;
+    if (!card) return null;
     const src = raw && raw.data && typeof raw.data === "object" && raw.data.character_book ? raw.data : raw;
     const book = src && src.character_book && typeof src.character_book === "object" ? src.character_book : null;
     if (book && embeddedBookToWorld(book) && req.body?.deferEmbeddedLore === true) {
@@ -1268,6 +1338,7 @@ export function handleRoute(req, host) {
       }
     }
     writeCard(card);
+    return written;
   }
   // Ids are re-minted on the way in, so anything that pointed at an id in the
   // backup has to be re-pointed by NAME. These record what each name became.
@@ -1277,6 +1348,11 @@ export function handleRoute(req, host) {
   const presetIdByName = lookup("presets");
   const personaIdByName = lookup("personas");
   const groupIdByName = lookup("groups");
+  const personaIdByFile = lookup("personaFiles");
+  const qrVisible = lookup("quickReplies");
+  /** What the run asked for: collections left out of `include` are not
+   *  imported from settings.json either. */
+  const wants = (collection) => !Array.isArray(req.body?.include) || req.body.include.includes(collection);
 
   const charIdByName = () => {
     if (importId && fsx.lookup) return lookup("characters");
@@ -1309,6 +1385,8 @@ export function handleRoute(req, host) {
             : {}),
         }
       : {};
+    const linked = worldLinks().get(lower(n.name || fallback)) || (fallback ? worldLinks().get(lower(fallback)) : null);
+    if (!extra.linkedCharacterIds && Array.isArray(linked) && linked.length) extra.linkedCharacterIds = linked;
     writeJson("lorebooks/" + id + ".json", { ...n, ...extra, id });
     bookIdByName.set(lower(n.name || fallback), id);
     summary.lorebooks.push(id);
@@ -1428,6 +1506,20 @@ export function handleRoute(req, host) {
     return id;
   };
 
+  /** Themes and quick reply sets join the collections already there. A name
+   *  that exists is left alone, so running an import twice adds nothing. */
+  const mergeLibrary = (adds) => {
+    if (!adds.themes.length && !adds.qrSets.length) return;
+    const lib = readJson("library.json", {});
+    for (const key of ["themes", "qrSets"]) {
+      const current = Array.isArray(lib[key]) ? lib[key] : [];
+      const fresh = adds[key].filter((item, i, all) => !current.some((c) => lower(c?.name) === lower(item.name)) && all.findIndex((x) => lower(x.name) === lower(item.name)) === i);
+      lib[key] = [...current, ...fresh];
+      summary[key === "themes" ? "themes" : "quickReplies"].push(...fresh.map((item) => item.id));
+    }
+    writeJson("library.json", lib);
+  };
+
   // ---------- browser-driven batch (can include PNG-extracted cards) ----------
   if (req.path === "/import/batch") {
     const b = req.body && typeof req.body === "object" ? req.body : {};
@@ -1460,35 +1552,14 @@ export function handleRoute(req, host) {
     for (const per of b.personas || []) {
       try { if (per && per.name) writePersona(per.name, per.description); } catch { summary.errors.push("persona failed"); }
     }
-    for (const t of b.themes || []) {
-      try {
-        if (!t || typeof t.name !== "string") continue;
-        const id = uid(slug(t.name), "themes");
-        writeJson("themes/" + id + ".json", {
-          id, name: t.name,
-          colors: {
-            text: typeof t.main_text_color === "string" ? t.main_text_color : undefined,
-            background: typeof t.chat_tint_color === "string" ? t.chat_tint_color : undefined,
-            panel: typeof t.main_color === "string" ? t.main_color : undefined,
-            accent: typeof t.theme_color === "string" ? t.theme_color : undefined,
-          },
-        });
-        summary.themes.push(id);
-      } catch { summary.errors.push("theme failed"); }
-    }
+    try { mergeLibrary({ themes: (b.themes || []).map(themeFromForeign).filter(Boolean), qrSets: (b.quickReplies || []).map((set) => quickReplySetFromForeign(set, true)).filter(Boolean) }); }
+    catch { summary.errors.push("themes failed"); }
     for (const c of b.chats || []) {
       try {
         const n = normalizeChatLines(c);
         if (!n) continue;
         // link to a character by name when one matches
-        let characterId = null;
-        try {
-          for (const cid of fsx.list("characters")) {
-            const card = readJson("characters/" + cid + "/card.json", null);
-            if (card && c.character && card.name.toLowerCase() === String(c.character).toLowerCase()) { characterId = cid; break; }
-          }
-        } catch {}
-        writeChat(n, characterId);
+        writeChat(n, (c.character && charIdByName().get(lower(c.character))) || null);
       } catch { summary.errors.push("chat failed"); }
     }
     return { status: 200, json: summary };
@@ -1497,13 +1568,14 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "books", "presets", "personas", "groups"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
   // ---------- bounded archive entries ----------
   if (req.path === "/import/zip") {
     const rawEntries = host.zip.entries();
+    const libraryAdds = { themes: [], qrSets: [] };
     const entries = {};
     const names = Object.keys(rawEntries);
     const originalNames = {};
@@ -1564,37 +1636,78 @@ export function handleRoute(req, host) {
       } catch { summary.errors.push("personas failed: " + flat); }
     }
     // A foreign tool keeps its personas inside its settings file instead: a
-    // map of avatar file → name, plus a parallel map of descriptions.
-    if (!hasFullPersonas && isText(entries["settings.json"])) {
+    // map of avatar file → name, plus a parallel map of descriptions. The
+    // avatar file is how the picture finds its persona later in the import.
+    if (!hasFullPersonas && wants("personas/") && isText(entries["settings.json"])) {
       try {
         const st = JSON.parse(entries["settings.json"]);
-        const descs = st && typeof st.persona_descriptions === "object" && st.persona_descriptions ? st.persona_descriptions : {};
-        const namesMap = st && typeof st.personas === "object" && st.personas ? st.personas : null;
+        const pu = st && typeof st.power_user === "object" && st.power_user ? st.power_user : st;
+        const descs = pu && typeof pu.persona_descriptions === "object" && pu.persona_descriptions ? pu.persona_descriptions : {};
+        const namesMap = pu && typeof pu.personas === "object" && pu.personas ? pu.personas : null;
         for (const [avatarKey, pname] of Object.entries(namesMap ?? {})) {
-          const d = descs[avatarKey];
-          writePersona(String(pname || avatarKey), String((d && d.description) || ""));
+          const d = descs[avatarKey] && typeof descs[avatarKey] === "object" ? descs[avatarKey] : {};
+          writePersona(String(pname || avatarKey), String(d.description || ""), {
+            ...(typeof d.title === "string" && d.title ? { title: d.title } : {}),
+            ...(pu.default_persona === avatarKey ? { isDefault: true } : {}),
+            ...(typeof d.lorebook === "string" && d.lorebook ? { _lorebookNames: [d.lorebook] } : {}),
+          });
+          personaIdByFile.set(lower(avatarKey), summary.personas[summary.personas.length - 1]);
         }
       } catch { summary.errors.push("personas failed: settings.json"); }
+    }
+    // Global regex scripts and the quick reply sets on show live in the same
+    // settings file.
+    if (isText(entries["settings.json"])) {
+      try {
+        const ext = JSON.parse(entries["settings.json"])?.extension_settings;
+        if (wants("regex/") && Array.isArray(ext?.regex)) for (const one of ext.regex) writeRegex(normalizeRegex(one));
+        const shown = ext?.quickReplyV2?.config?.setList;
+        if (Array.isArray(shown)) {
+          qrVisible.set("__listed", true);
+          for (const item of shown) if (item && typeof item.set === "string" && item.isVisible !== false) qrVisible.set(lower(item.set), true);
+        }
+      } catch { summary.errors.push("settings failed: settings.json"); }
     }
 
     // Order matters: a chat resolves its character, group, preset, persona
     // and books by NAME, and a persona resolves its books and bound cards the
     // same way. One pass in whatever order the zip's central directory
     // happened to list things left half of those unresolved.
-    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "extensions/regex/", "regex/", "user settings/regex/", "personas/", "groups/", "chats/", "databank/"];
+    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "instruct/", "context/", "extensions/regex/", "regex/", "user settings/regex/", "personas/", "user avatars/", "groups/", "chats/", "group chats/", "databank/"];
     const phaseOf = (n) => {
       const l = n.toLowerCase();
       for (let i = 0; i < PHASES.length; i++) if (l.startsWith(PHASES[i])) return i;
       return PHASES.length;
     };
-    const orderedNames = Object.keys(entries).sort((a, b) => phaseOf(a) - phaseOf(b) || (a < b ? -1 : a > b ? 1 : 0));
+    // a folder's own files before its subfolders: cards before sprite sets
+    const depth = (n) => n.split("/").length;
+    const orderedNames = Object.keys(entries).sort((a, b) => phaseOf(a) - phaseOf(b) || depth(a) - depth(b) || (a < b ? -1 : a > b ? 1 : 0));
     for (const name of orderedNames) {
       if (entries[name]?.error) { summary.errors.push(name + ": " + entries[name].error); continue; }
       // A card PNG lives in characters/, or loose at the root when someone
       // zipped a pile of cards. Anywhere else (persona and user avatars,
       // backgrounds, sprites) a .png is just a picture — reading it as a
       // failed card would bury the real errors in noise.
+      // characters/<card name>/<expression>.png is that card's sprite set
+      const sprite = /^characters\/([^/]+)\/([^/]+)\.(?:png|webp|gif|jpe?g)$/i.exec(name);
+      if (sprite) {
+        try {
+          const id = charIdByName().get(lower(sprite[1])) || charIdByName().get("file:" + lower(sprite[1]));
+          const card = id ? readJson("characters/" + id + "/card.json", null) : null;
+          const url = entries[name]?.__image__ && host.zip.image ? host.zip.image(originalNames[name]).url
+            : entryBase64(entries[name]) ? "data:image/" + (/\.webp$/i.test(name) ? "webp" : /\.gif$/i.test(name) ? "gif" : /\.jpe?g$/i.test(name) ? "jpeg" : "png") + ";base64," + entryBase64(entries[name]) : null;
+          if (card && url) {
+            const expressions = (card.studio?.expressions || []).filter((e) => e && e.name !== sprite[2]);
+            card.studio = { ...card.studio, expressions: [...expressions, { name: sprite[2], url }] };
+            writeJson("characters/" + id + "/card.json", card);
+          }
+        } catch (error) { summary.errors.push("sprite failed: " + name + ": " + String(error.message || error)); }
+        continue;
+      }
       if (name.endsWith(".png") && (name.startsWith("characters/") || !name.includes("/"))) {
+        // chat folders and group member lists name a card by its file
+        const fileKey = "file:" + lower(name.split("/").pop().replace(/\.png$/i, ""));
+        const remember = (id) => { if (id) charIdByName().set(fileKey, id); };
         if (entries[name]?.__image__ && host.zip.image) {
           try {
             const image = host.zip.image(originalNames[name]);
@@ -1605,7 +1718,7 @@ export function handleRoute(req, host) {
               try { rawCard = JSON.parse(payload.trimStart().startsWith("{") ? payload : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)))); break; } catch { /* try the next metadata field */ }
             }
             const card = rawCard && normalizeCard(rawCard);
-            if (card) { card.avatar = image.url; writeCardWithBook(card, rawCard, null, image.url); }
+            if (card) { card.avatar = image.url; remember(writeCardWithBook(card, rawCard, null, image.url)); }
             else if (name.startsWith("characters/")) summary.errors.push("png card without embedded data: " + name);
           } catch (error) { summary.errors.push("png card failed: " + name + ": " + String(error.message || error)); }
           continue;
@@ -1615,7 +1728,7 @@ export function handleRoute(req, host) {
           const rawCard = cardFromPngBase64(b64);
           const n = rawCard && normalizeCard(rawCard);
           // ccdefault: assets point at the card PNG itself
-          if (n) writeCardWithBook(n, rawCard, null, "data:image/png;base64," + b64);
+          if (n) { n.avatar = "data:image/png;base64," + b64; remember(writeCardWithBook(n, rawCard, null, n.avatar)); }
           else if (name.startsWith("characters/")) summary.errors.push("png card without embedded data: " + name);
         } else if (name.startsWith("characters/")) {
           summary.errors.push("png card too large to read from the zip — import it directly from the Import button: " + name);
@@ -1669,18 +1782,30 @@ export function handleRoute(req, host) {
         try {
           const g = JSON.parse(entries[name]);
           // characters were re-created under name-derived ids — remap each
-          // member by original id first, then by the exported _memberNames
-          const resolvedMembers = (g.memberIds || g.members || []).map((mid, i) => {
+          // member by original id first, then by the card file a foreign
+          // group lists, then by the exported _memberNames
+          const sourceMembers = g.memberIds || g.members || [];
+          const resolvedMembers = sourceMembers.map((mid, i) => {
             if (taken("characters/" + mid + "/card.json")) return mid;
+            const byFile = charIdByName().get("file:" + lower(String(mid).replace(/\.png$/i, "")));
+            if (byFile) return byFile;
             const nm = (g._memberNames || [])[i] || String(mid).replace(/\.png$/i, "");
             return nm ? charIdByName().get(lower(nm)) || charIdByName().get(slug(nm)) || null : null;
           });
           const memberIds = resolvedMembers.filter(Boolean);
+          const muted = (g.mutedIds || g.disabled_members || []).map((mid) => { const index = sourceMembers.indexOf(mid); return index >= 0 ? resolvedMembers[index] : null; }).filter(Boolean);
+          // a foreign group file carries its chat list and per-chat state;
+          // the chats arrive as files of their own
+          const { members: _m, disabled_members: _d, chats: groupChats, chat_id: _c, chat_metadata: _cm, past_metadata: _pm, activation_strategy: activation, generation_mode: generation, allow_self_responses: selfResponses, ...rest } = g;
           // the id lands in the write path: slug it like every other collection
           // so a crafted backup cannot climb out of groups/
           const gid = uid(slug(g.name || g.id || "group"), "groups");
-          writeJson("groups/" + gid + ".json", { ...g, id: gid, name: g.name || gid, memberIds, mode: g.mode || "natural", mutedIds: (g.mutedIds || []).map((mid) => { const index = (g.memberIds || g.members || []).indexOf(mid); return index >= 0 ? resolvedMembers[index] : null; }).filter(Boolean) });
-          for (const key of [g.name, g.id, g.chat_id, gid]) if (key) { groupIdByName.set(lower(key), gid); groupIdByName.set(slug(key), gid); }
+          writeJson("groups/" + gid + ".json", {
+            ...rest, id: gid, name: g.name || gid, memberIds, mode: g.mode || GROUP_ACTIVATION[activation] || "natural", mutedIds: muted,
+            ...(!g.generationMode && GROUP_GENERATION[generation] ? { generationMode: GROUP_GENERATION[generation] } : {}),
+            ...(g.allowSelfResponses === undefined && typeof selfResponses === "boolean" ? { allowSelfResponses: selfResponses } : {}),
+          });
+          for (const key of [g.name, g.id, g.chat_id, gid, ...(Array.isArray(groupChats) ? groupChats : [])]) if (key) { groupIdByName.set(lower(key), gid); groupIdByName.set(slug(key), gid); }
           summary.groups.push(gid);
         } catch { summary.errors.push("group failed: " + name); }
         continue;
@@ -1714,6 +1839,42 @@ export function handleRoute(req, host) {
         } catch { summary.errors.push("preset failed: " + name); }
         continue;
       }
+      // a persona's picture, filed under the name its settings entry gave it
+      if (name.startsWith("user avatars/") && /\.(png|webp|gif|jpe?g)$/i.test(name)) {
+        try {
+          const pid = personaIdByFile.get(lower(name.slice("user avatars/".length)));
+          const persona = pid ? readJson("personas/" + pid + ".json", null) : null;
+          const b64 = entryBase64(entries[name]);
+          const url = entries[name]?.__image__ && host.zip.image ? host.zip.image(originalNames[name]).url
+            : b64 ? "data:image/" + (/\.webp$/i.test(name) ? "webp" : /\.gif$/i.test(name) ? "gif" : /\.jpe?g$/i.test(name) ? "jpeg" : "png") + ";base64," + b64 : null;
+          if (persona && url) writeJson("personas/" + pid + ".json", { ...persona, avatar: url });
+        } catch (error) { summary.errors.push("persona avatar failed: " + name + ": " + String(error.message || error)); }
+        continue;
+      }
+      if (name.startsWith("themes/") && name.endsWith(".json") && isText(entries[name])) {
+        try {
+          const theme = themeFromForeign(JSON.parse(entries[name]));
+          if (theme) libraryAdds.themes.push(theme);
+        } catch { summary.errors.push("theme failed: " + name); }
+        continue;
+      }
+      if (name.startsWith("quickreplies/") && name.endsWith(".json") && isText(entries[name])) {
+        try {
+          const raw = JSON.parse(entries[name]);
+          const set = quickReplySetFromForeign(raw, !qrVisible.get("__listed") || qrVisible.get(lower(raw?.name)) === true);
+          if (set) libraryAdds.qrSets.push(set);
+        } catch { summary.errors.push("quick replies failed: " + name); }
+        continue;
+      }
+      // instruct and context templates become presets of their own: the
+      // turn markers as the prompt format, the story string as the layout
+      if ((name.startsWith("instruct/") || name.startsWith("context/")) && name.endsWith(".json") && isText(entries[name])) {
+        try {
+          const n = normalizePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
+          if (n) writePreset(n);
+        } catch { summary.errors.push("template failed: " + name); }
+        continue;
+      }
       if ((name.startsWith("chats/") || name.startsWith("group chats/")) && name.endsWith(".jsonl") && isText(entries[name])) {
         try {
           const parts = name.split("/");
@@ -1733,7 +1894,12 @@ export function handleRoute(req, host) {
             } catch { /* a bad vault is not worth failing the chat over */ }
           }
           if (n) {
-            const characterId = charIdByName().get(lower(character)) || null;
+            // a foreign chat folder is named for the card FILE, and the
+            // transcript's first line may name the character outright
+            const header = lines[0] && typeof lines[0].mes !== "string" ? lines[0] : null;
+            const headerName = header && typeof header.character_name === "string" && header.character_name !== "unused" ? header.character_name : "";
+            const characterId = name.startsWith("group chats/") ? null
+              : charIdByName().get("file:" + lower(character)) || charIdByName().get(lower(character)) || (headerName && charIdByName().get(lower(headerName))) || null;
             // folder didn't match a card → it's a group chat (folder is the
             // group name slug, or the group id slug from older exports)
             let groupId = groupIdByName.get(lower(character)) || groupIdByName.get(slug(character)) || null;
@@ -1758,10 +1924,13 @@ export function handleRoute(req, host) {
             // remap each msg.charId by id, then by the speaker name
             if (groupId) {
               const byName = charIdByName();
-              for (const m of n.msgs) {
-                if (m.charId && taken("characters/" + m.charId + "/card.json")) continue;
-                m.charId = (m.name && byName.get(String(m.name).toLowerCase())) || null;
-              }
+              // messages map one to one onto the lines that carry text
+              const said = lines.filter((l) => l && typeof l.mes === "string");
+              n.msgs.forEach((m, i) => {
+                if (m.charId && taken("characters/" + m.charId + "/card.json")) return;
+                const file = said[i] && typeof said[i].original_avatar === "string" ? said[i].original_avatar.replace(/\.png$/i, "") : "";
+                m.charId = (file && byName.get("file:" + lower(file))) || (m.name && byName.get(String(m.name).toLowerCase())) || null;
+              });
             }
             writeChat(n, characterId, groupId, saved);
           }
@@ -1769,6 +1938,8 @@ export function handleRoute(req, host) {
         continue;
       }
     }
+
+    mergeLibrary(libraryAdds);
 
     // App settings and the local collections (quick replies, themes,
     // backgrounds, tags, folders, connection profiles) are part of a backup

@@ -1,7 +1,7 @@
 {
   "name": "Studio Import",
-  "version": "1.18.6",
-  "description": "Clean-room import: character cards (PNG v2/v3 + JSON + catalog URLs), world info, presets, regex, personas, themes, chats; full backup zips (text entries plugin-side, PNG cards via the browser path); Chub, Datacat, Wyvern and Character Tavern marketplace discovery. Public data formats only.",
+  "version": "1.19.0",
+  "description": "Clean-room import: character cards (PNG v2/v3 + JSON + catalog URLs), world info, presets, instruct and context templates, regex, personas, groups, themes, quick replies, chats; full backup zips (text entries plugin-side, PNG cards via the browser path); Chub, Datacat, Wyvern and Character Tavern marketplace discovery. Public data formats only.",
   "origin": "local",
   "permissions": [
     "routes",

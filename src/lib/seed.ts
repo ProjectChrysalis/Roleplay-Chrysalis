@@ -198,7 +198,7 @@ export function defaultSettings(): AppSettings {
     chatWidth: 'comfortable', chatWidthCustom: 760, fontScale: 100, lineSpacing: 136, paragraphSpacing: 10, proseFont: 'noto', uiScale: 100,
     avatarScale: 100, streamingFps: 30,
     avatarShape: 'rounded', avatarStyle: 'thumb', messageSpacing: 'roomy', hideAvatars: false,
-    showTimestamps: true, showMessageIds: false, showEdited: false, showTokens: true, showCost: true, reasoningAutoExpand: false, italicNarration: false, showModelIcons: true, showGenTimer: true, showExpressionSprites: true, showCache: true,
+    showTimestamps: true, showMessageIds: false, showEdited: false, showTokens: true, showCost: true, reasoningAutoExpand: false, italicNarration: false, showModelIcons: true, showGenTimer: true, showExpressionSprites: true, showCache: true, importFullSizeArt: false,
     expandMessageActions: false, reducedMotion: false,
     autoScroll: true, confirmDeletions: true, dayDividers: true, messageTint: true, swipeCountAllMessages: false,
     sendOnEnter: true, upArrowEditLast: true, messagesToLoad: 50,
