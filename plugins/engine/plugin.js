@@ -2819,7 +2819,8 @@ export function handleRoute(req, host) {
     // set) when the caller asks for them — host.siblingTools is absent on
     // engine builds without that contract
     const toolDefs = host && Array.isArray(host.siblingTools) ? host.siblingTools : null;
-    return ok({
+    return { __llmPreview: "reply", ...ok({
+      sessionId: b.chatId,
       systemPrompt: a.systemPrompt, messages: a.messages, presetParams: a.presetParams, presetName: a.presetName,
       // the rest of the exact request envelope a generation would send
       // (chat profile model, else the global engine model — same resolution
@@ -2832,7 +2833,7 @@ export function handleRoute(req, host) {
       ...(a.assistantPrefill ? { assistantPrefill: a.assistantPrefill } : {}),
       ...(a.cache ? { cache: a.cache } : {}),
       ...(toolDefs && toolDefs.length ? { tools: toolDefs } : {}),
-    });
+    }) };
   }
 
   // ---------- world info status: what ACTUALLY fires for a chat ----------
