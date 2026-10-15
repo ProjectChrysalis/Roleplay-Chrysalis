@@ -1521,12 +1521,13 @@ export function handleRoute(req, host) {
   const AN_ROLE = { 0: "system", 1: "user", 2: "assistant" };
   const writeChat = (n, characterId, groupId, saved) => {
     const id = uid(slug(n.title), "chats");
-    // pinned to the persona in use at import, like a chat made in the app
+    // unlocked, like a chat made in the app: it follows the current preset
+    // and persona, and starts under the current persona's name
     const personaId = readJson("settings.json", {}).personaId || null;
     const persona = personaId ? readJson("personas/" + personaId + ".json", null) : null;
     const meta = {
       id, title: n.title, characterId: characterId || null, groupId: groupId || null,
-      presetId: "default", personaId: persona ? personaId : null, model: null, userName: (persona && persona.name) || "User",
+      presetId: null, personaId: null, model: null, userName: (persona && persona.name) || "User",
       authorNote: null, lorebookIds: [], createdAt: Date.now(), updatedAt: Date.now(), tainted: true,
     };
     if (saved && typeof saved === "object") {
@@ -1542,7 +1543,7 @@ export function handleRoute(req, host) {
       const wantPersona = personaIdByName.get(lower(saved._personaName));
       if (wantPersona) {
         meta.personaId = wantPersona;
-        const p = readJson("personas/" + wantPersona + ".json", null);
+        const p = saved.personaLocked === true ? readJson("personas/" + wantPersona + ".json", null) : null;
         if (p && p.name) meta.userName = p.name;
       }
       if (Array.isArray(saved._lorebookNames)) {

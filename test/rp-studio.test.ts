@@ -3104,6 +3104,23 @@ describe("rp studio: backup zips survive the trip", () => {
     expect(card.description).not.toContain("?");
   }, 30_000);
 
+  it("restores an unlocked chat unlocked, under the name it was written with", async () => {
+    const m = mockHost();
+    fs.writeFileSync(path.join(root, "personas", "robin.json"), JSON.stringify({ id: "robin", name: "Robin", isDefault: true }));
+    const c = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", userName: "Sam" } }, m);
+    const id = (c.json.meta as { id: string }).id;
+    fs.writeFileSync(path.join(root, "chats", `${id}.jsonl`), JSON.stringify({ id: "e1", name: "Sam", role: "user", text: "hi", at: 1, charId: null }) + "\n");
+    const entries = await exportEntries(m);
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    const meta = (r.json.chats as string[]).map((cid) => JSON.parse(fs.readFileSync(path.join(root, "chats", `${cid}.meta.json`), "utf8"))).find((x) => x.userName === "Sam");
+    expect(meta).toBeDefined();
+    expect(meta.personaLocked).toBeFalsy();
+    expect(meta.presetLocked).toBeFalsy();
+    expect(meta.personaId ?? null).toBeNull();
+  }, 30_000);
+
   it("carries the chat's preset, persona, model and notes, not just its lines", async () => {
     const m = mockHost();
     fs.writeFileSync(path.join(root, "presets", "mine.json"), JSON.stringify({ id: "mine", name: "My Preset", prompts: [], prompt_order: [], temperature: 0.4 }));
@@ -3357,11 +3374,11 @@ describe("rp studio: backups from older versions still import", () => {
     expect(r.json.presets).toHaveLength(1);
     expect(r.json.lorebooks).toHaveLength(1);
     expect(r.json.chats).toHaveLength(1);
-    // no sidecar: the chat falls back to the old behaviour (default preset,
-    // title recovered from the filename) rather than failing
+    // no sidecar: the chat follows the current preset, with its title
+    // recovered from the filename, rather than failing
     const chatId = (r.json.chats as string[])[0]!;
     const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", `${chatId}.meta.json`), "utf8")) as Record<string, unknown>;
-    expect(meta.presetId).toBe("default");
+    expect(meta.presetLocked).toBeFalsy();
     expect(String(meta.title)).toContain("A Quiet Word");
     // a v1 settings stamp carries no `settings` key — it must not wipe ours
     const settings = JSON.parse(fs.readFileSync(path.join(root, "settings.json"), "utf8")) as { personaId: string };

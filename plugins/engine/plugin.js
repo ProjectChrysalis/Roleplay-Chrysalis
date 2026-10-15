@@ -3134,9 +3134,11 @@ export function handleRoute(req, host) {
           text: JSON.stringify({
             ...m,
             title: m.title || "",
-            _presetName: presetNames.get(m.presetId) ?? null,
+            // only a lock travels: an unlocked chat follows whatever is
+            // current on the machine that restores it
+            _presetName: m.presetLocked === true ? presetNames.get(m.presetId) ?? null : null,
             _personaName: (() => {
-              const p = m.personaId ? readJson("personas/" + m.personaId + ".json", null) : null;
+              const p = m.personaLocked === true && m.personaId ? readJson("personas/" + m.personaId + ".json", null) : null;
               return p ? p.name || null : null;
             })(),
             _lorebookNames: namesOf(m.lorebookIds, bookNames),
