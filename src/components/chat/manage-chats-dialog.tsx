@@ -12,7 +12,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { useApp } from "@/lib/store"
+import { useApp, chatPersonaId } from "@/lib/store"
 import { saveFile } from "@/lib/export"
 import { j } from "@/lib/engine"
 import type { Chat, ID } from "@/lib/types"
@@ -108,7 +108,7 @@ function ChatRow({
   const characters = useApp((s) => s.characters)
   const personas = useApp((s) => s.personas)
   const personaName =
-    personas.find((p) => p.id === chat.personaId)?.name ?? personas.find((p) => p.isDefault)?.name ?? "You"
+    personas.find((p) => p.id === chatPersonaId({ personas }, chat))?.name ?? "You"
   const charName = characters.find((c) => c.id === chat.characterId)?.name ?? "Character"
   const [renaming, setRenaming] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)

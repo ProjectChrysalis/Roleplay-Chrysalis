@@ -16,10 +16,18 @@ export function ChatLorebooks({ chatId, open, onOpenChange }: {
   const chat = useApp((s) => s.chats.find((c) => c.id === chatId))
   const books = useApp((s) => s.lorebooks)
   const save = useApp((s) => s.setChatLorebooks)
+  const focusLorebook = useApp((s) => s.focusLorebook)
+  // books the chat's character (or each group member) brings along
+  const characters = useApp((s) => s.characters)
+  const owner = characters.find((c) => c.id === chat?.characterId)
+  const cards = owner?.members ? characters.filter((c) => owner.members!.includes(c.id)) : owner ? [owner] : []
+  const ownIds = new Set(cards.flatMap((c) => [...(c.embeddedLorebookId ? [c.embeddedLorebookId] : []), ...c.linkedLorebookIds]))
+  const characterBooks = books.filter((b) => ownIds.has(b.id))
   const [query, setQuery] = useState('')
   const [saving, setSaving] = useState(false)
   const busy = useRef(false)
   const selected = chat?.chatLorebookIds ?? []
+  const linked = new Set([...selected, ...characterBooks.map((b) => b.id)]).size
   const matches = books.filter((book) => book.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const visible = matches.slice(0, 60)
   const toggle = async (id: ID) => {
@@ -35,9 +43,9 @@ export function ChatLorebooks({ chatId, open, onOpenChange }: {
   return (
     <>
       <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 px-2 text-[11px]"
-        aria-label={`Chat lorebooks, ${selected.length} selected`} onClick={() => onOpenChange(true)}>
+        aria-label={`Chat lorebooks, ${linked} linked`} onClick={() => onOpenChange(true)}>
         <BookOpenText className="size-3.5" aria-hidden="true" />
-        Lore{selected.length > 0 && <span className="tabular-nums">{selected.length}</span>}
+        Lore{linked > 0 && <span className="tabular-nums">{linked}</span>}
       </Button>
       <Dialog open={open} onOpenChange={(value) => { onOpenChange(value); if (!value) setQuery('') }}>
         <DialogContent className="min-w-0 overflow-hidden sm:max-w-md">
@@ -45,6 +53,15 @@ export function ChatLorebooks({ chatId, open, onOpenChange }: {
             <DialogTitle>Chat lorebooks</DialogTitle>
             <DialogDescription>Extra lore for this chat. Character, persona and global lore still apply.</DialogDescription>
           </DialogHeader>
+          {characterBooks.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5" aria-label="Character lorebooks">
+              <span className="text-xs text-muted-foreground">From the character:</span>
+              {characterBooks.map((book) => <Button key={book.id} variant="outline" size="sm" className="h-7 max-w-full text-xs"
+                onClick={() => { onOpenChange(false); focusLorebook(book.id) }}>
+                <span className="min-w-0 truncate">{book.name}</span>
+              </Button>)}
+            </div>
+          )}
           {selected.length > 0 && (
             <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto" aria-label="Selected lorebooks">
               {selected.map((id) => {

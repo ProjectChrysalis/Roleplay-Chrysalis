@@ -170,8 +170,12 @@ export interface Chat {
   branches: ChatBranch[]
   parentChatId: ID | null
   parentMessageId: ID | null
+  /** Only used while the matching lock is on; otherwise the chat follows
+   *  the current persona and preset (see chatPersonaId/chatPresetId). */
   personaId: ID | null
   presetId: ID | null
+  personaLocked: boolean
+  presetLocked: boolean
   authorNote: {
     text: string
     position: 'before-system' | 'after-system' | 'in-chat'

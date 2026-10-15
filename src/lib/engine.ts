@@ -92,6 +92,8 @@ export interface EngineChatMeta {
   groupId: string | null
   presetId?: string | null
   personaId?: string | null
+  presetLocked?: boolean
+  personaLocked?: boolean
   model?: string | null
   userName?: string
   authorNote?: string | null
@@ -804,6 +806,8 @@ export function engineChatToUI(meta: EngineChatMeta, msgs: EngineMessage[]): Cha
     parentMessageId: meta.parentMessageId ?? null,
     personaId: meta.personaId ?? null,
     presetId: meta.presetId ?? null,
+    personaLocked: meta.personaLocked === true,
+    presetLocked: meta.presetLocked === true,
     authorNote: meta.authorNoteObject ?? { ...DEFAULT_AUTHOR_NOTE, text: meta.authorNote ?? '' },
     memoryCutoffMessageId: meta.memoryCutoffMessageId ?? null,
     summary: meta.summary ?? '',
@@ -838,6 +842,8 @@ export function chatPatchOf(p: Partial<Chat>): Record<string, unknown> {
   if ('title' in p) out.title = p.title
   if ('personaId' in p) out.personaId = p.personaId
   if ('presetId' in p) out.presetId = p.presetId
+  if ('personaLocked' in p) out.personaLocked = p.personaLocked
+  if ('presetLocked' in p) out.presetLocked = p.presetLocked
   if ('authorNote' in p && p.authorNote) { out.authorNote = p.authorNote.text; out.authorNoteObject = p.authorNote }
   if ('memoryCutoffMessageId' in p) out.memoryCutoffMessageId = p.memoryCutoffMessageId
   // the parts are the summary: the engine joins them, so the flat text is

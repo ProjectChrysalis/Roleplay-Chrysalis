@@ -1335,12 +1335,8 @@ export function handleRoute(req, host) {
     characterNames.set(String(card.name).toLowerCase(), id);
     characterNames.set(slug(card.name), id);
     // a card can name the world book it uses; the book may arrive later
-    const world = card.extensions && typeof card.extensions.world === "string" ? card.extensions.world.trim().toLowerCase() : "";
-    if (world) {
-      const ids = [...(worldLinks().get(world) || []), id];
-      while (JSON.stringify(ids).length > 4000) ids.shift();
-      worldLinks().set(world, ids);
-    }
+    const world = card.extensions && typeof card.extensions.world === "string" ? card.extensions.world.trim() : "";
+    if (world) addBookLink("worldLinks", world, id);
     // regex scripts a card carries run for that character only
     const embedded = card.extensions && Array.isArray(card.extensions.regex_scripts) ? card.extensions.regex_scripts : [];
     // scripts on in the source, which the source's settings may allow
@@ -1364,6 +1360,14 @@ export function handleRoute(req, host) {
   }
   /** World book name → the cards that name it. */
   const worldLinks = () => carried("worldLinks");
+  /** Book name → cards waiting for it, as a linked book or as their own
+   *  embedded one ("embeddedLinks"). */
+  function addBookLink(collection, bookName, cardId) {
+    const key = String(bookName).trim().toLowerCase();
+    const ids = [...(carried(collection).get(key) || []), cardId];
+    while (JSON.stringify(ids).length > 4000) ids.shift();
+    carried(collection).set(key, ids);
+  }
   /** Cards may embed a lorebook — write it as a book file and link it via
    *  the card's studio bag so the app scopes it to that character. charx
    *  packages also carry assets: the icon/main avatar and emotion sprites
@@ -1436,9 +1440,19 @@ export function handleRoute(req, host) {
             : {}),
         }
       : {};
-    const linked = worldLinks().get(lower(n.name || fallback)) || (fallback ? worldLinks().get(lower(fallback)) : null);
-    if (!extra.linkedCharacterIds && Array.isArray(linked) && linked.length) extra.linkedCharacterIds = linked;
+    const waiting = (collection) => carried(collection).get(lower(n.name || fallback)) || (fallback ? carried(collection).get(lower(fallback)) : null) || [];
+    const linked = waiting("worldLinks");
+    if (!extra.linkedCharacterIds && linked.length) extra.linkedCharacterIds = linked;
     writeJson("lorebooks/" + id + ".json", { ...n, ...extra, id });
+    // a chat reads a card's books from the card, so the link lives there
+    for (const [cid, field] of [...linked.map((c) => [c, "linked"]), ...waiting("embeddedLinks").map((c) => [c, "embedded"])]) {
+      const card = readJson("characters/" + cid + "/card.json", null);
+      if (!card) continue;
+      const studio = { ...card.studio };
+      if (field === "embedded") studio.embeddedLorebookId = id;
+      else if (!(studio.linkedLorebookIds || []).includes(id)) studio.linkedLorebookIds = [...(studio.linkedLorebookIds || []), id];
+      writeJson("characters/" + cid + "/card.json", { ...card, studio });
+    }
     bookIdByName.set(lower(n.name || fallback), id);
     summary.lorebooks.push(id);
   };
@@ -1545,12 +1559,13 @@ export function handleRoute(req, host) {
       meta.characterId = characterId || null;
       meta.groupId = groupId || null;
     } else if (n.header && typeof n.header === "object") {
-      // a foreign transcript's first line: who the user was, the author's
-      // note and the chat's own book
-      const pid = typeof n.header.user_name === "string" ? personaIdByName.get(lower(n.header.user_name)) : null;
-      const persona = pid ? readJson("personas/" + pid + ".json", null) : null;
-      if (persona) { meta.personaId = pid; meta.userName = persona.name; }
+      // a foreign transcript's first line: who the user was, a persona
+      // locked to the chat, the author's note and the chat's own book
       const cm = n.header.chat_metadata && typeof n.header.chat_metadata === "object" ? n.header.chat_metadata : {};
+      const locked = typeof cm.persona === "string" && cm.persona ? personaIdByFile.get(lower(cm.persona)) : null;
+      if (locked) { meta.personaId = locked; meta.personaLocked = true; }
+      const named = locked ? readJson("personas/" + locked + ".json", null)?.name : typeof n.header.user_name === "string" && n.header.user_name ? n.header.user_name : null;
+      if (named) meta.userName = named;
       if (typeof cm.note_prompt === "string" && cm.note_prompt.trim()) {
         meta.authorNote = cm.note_prompt;
         meta.authorNoteObject = {
@@ -1648,7 +1663,7 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "cardRegex"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
@@ -1838,8 +1853,16 @@ export function handleRoute(req, host) {
           // group members by this file
           const art = typeof parsed.avatar === "string" ? parsed.avatar : typeof parsed.data?.avatar === "string" ? parsed.data.avatar : undefined;
           const n = normalizeCard(parsed, art);
+          // book links are ids from the other install; they come back by name
+          // when the books arrive
+          const books = parsed._lorebookNames && typeof parsed._lorebookNames === "object" ? parsed._lorebookNames : null;
+          if (n) { delete n._lorebookNames; n.studio = { ...n.studio, linkedLorebookIds: [] }; }
           const id = n ? writeCardWithBook(n, parsed, null, art, true) : null;
           if (id) charIdByName().set("file:" + lower(name.split("/").pop().replace(/\.json$/i, "")), id);
+          if (id && books) {
+            for (const book of Array.isArray(books.linked) ? books.linked : []) if (typeof book === "string") addBookLink("worldLinks", book, id);
+            if (typeof books.embedded === "string" && books.embedded) addBookLink("embeddedLinks", books.embedded, id);
+          }
         } catch { summary.errors.push("card failed: " + name); }
         continue;
       }

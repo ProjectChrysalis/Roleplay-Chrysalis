@@ -221,6 +221,11 @@ interface AppState {
   updatePersona: (id: ID, patch: Partial<Persona>) => void
   usePersona: (id: ID) => void
   usePreset: (id: ID) => void
+  /** Lock the chat to the preset it runs with now, or let it follow again. */
+  lockChatPreset: (chatId: ID, locked: boolean) => void
+  /** Lock the persona a chat runs with to that chat or to its character, or
+   *  release the lock (both kinds). */
+  lockChatPersona: (chatId: ID, to: 'chat' | 'character' | null) => void
   addPersona: (init?: Partial<Persona> & { id?: ID }) => ID
   duplicatePersona: (id: ID) => ID
   deletePersona: (id: ID) => void
@@ -320,7 +325,6 @@ let sweepDone = false
 /** The unpinned-chat persona migration, once per page load. On every hydrate
  *  it re-applied a persona switch to every chat that had not pinned one, so
  *  the switch leaked out of the chat it was made in. */
-let personaPinDone = false
 /** reentrancy guard for quick-reply automation hooks */
 let autoExecDepth = 0
 /** last-issued swipe request per message id (see setSwipe) */
@@ -329,6 +333,25 @@ const swipeReqs = new Map<ID, number>()
  *  snapshot every keystroke — one per 10 minutes at most) */
 const lastVersionSnap = new Map<ID, number>()
 const SNAP_FIELDS = ['description', 'personality', 'scenario', 'firstMessage', 'exampleDialogue', 'systemPromptOverride', 'postHistoryInstructions'] as const
+
+/** The preset a chat runs with: its own while locked, else the current one. */
+export function chatPresetId(s: Pick<AppState, 'presets'>, chat: Pick<Chat, 'presetId' | 'presetLocked'> | null | undefined): ID | null {
+  if (chat?.presetLocked && chat.presetId && s.presets.some((p) => p.id === chat.presetId)) return chat.presetId
+  return (s.presets.find((p) => p.isDefault) ?? s.presets[0])?.id ?? null
+}
+
+/** The persona a chat runs with and what put it there: a lock on the chat,
+ *  one on its character (or group), else the current persona. The engine
+ *  resolves it the same way. */
+export function chatPersonaLock(s: Pick<AppState, 'personas'>, chat: Pick<Chat, 'personaId' | 'personaLocked' | 'characterId'> | null | undefined): { id: ID | null; kind: 'chat' | 'character' | null } {
+  if (chat?.personaLocked && chat.personaId && s.personas.some((p) => p.id === chat.personaId)) return { id: chat.personaId, kind: 'chat' }
+  const owner = chat?.characterId
+  const bound = owner ? s.personas.filter((p) => p.boundCharacterIds.includes(owner)) : []
+  const locked = bound.find((p) => p.autoLock) ?? bound[0]
+  if (locked) return { id: locked.id, kind: 'character' }
+  return { id: s.personas.find((p) => p.isDefault)?.id ?? null, kind: null }
+}
+export const chatPersonaId = (s: Pick<AppState, 'personas'>, chat: Pick<Chat, 'personaId' | 'personaLocked' | 'characterId'> | null | undefined) => chatPersonaLock(s, chat).id
 
 export const useApp = create<AppState>()(
   persist(
@@ -501,25 +524,6 @@ export const useApp = create<AppState>()(
               }
             }
           }
-          // chats that never stored a persona rode the default, so picking a
-          // persona anywhere swapped them all — pin each to the persona it
-          // shows right now; from here only an explicit switch changes it.
-          // Once per load: a switch made while the app is open pins the
-          // chats it leaves behind itself (see updatePersona), and a heal
-          // running again afterwards would drag them onto the new default.
-          if (!personaPinDone) {
-            personaPinDone = true
-            const defId = personas.find((p) => p.isDefault)?.id
-            if (defId) {
-              for (const c of withBranches) {
-                if (!c.personaId) {
-                  c.personaId = defId
-                  void j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ personaId: defId }) })
-                    .catch(() => undefined)
-                }
-              }
-            }
-          }
           // group settings hydrate from the group entity so activation, mutes,
           // card mode, self responses and auto delay survive reloads (a group
           // chat's characterId IS the group id)
@@ -677,7 +681,7 @@ export const useApp = create<AppState>()(
             // the chat's preset can turn live rendering OFF (Samplers tab):
             // deltas still accumulate but nothing is revealed until commit
             const chat = get().chats.find((c) => c.id === chatId)
-            const preset = chat ? get().presets.find((p) => p.id === chat.presetId) : null
+            const preset = chat ? get().presets.find((p) => p.id === chatPresetId(get(), chat)) : null
             const reveal = preset?.samplers?.streaming !== false
             const full = st.full + delta
             // first text token ends the thinking phase — freeze its span so the
@@ -833,8 +837,19 @@ export const useApp = create<AppState>()(
       setComposerDraft: (text) => set({ composerDraft: text }),
       openChat: (chatId, messageId) => {
         sessionOpenedChats.add(chatId)
-        const chat = get().chats.find((c) => c.id === chatId)
+        const state = get()
+        const chat = state.chats.find((c) => c.id === chatId)
         set({ view: 'chat', activeChatId: chatId, activeCharacterId: chat?.characterId ?? null, drawer: null, focusChatMessage: messageId ? { chatId, messageId } : null })
+        // a lock that switches what this chat runs with says so once on open
+        if (chat && chatId !== state.activeChatId) {
+          const persona = chatPersonaLock(state, chat)
+          const name = state.personas.find((p) => p.id === persona.id)?.name
+          if (persona.kind && name && !state.personas.find((p) => p.id === persona.id)?.isDefault) {
+            toast.info(`Persona: ${name}`, { description: persona.kind === 'chat' ? 'Locked to this chat' : 'Locked to this character' })
+          }
+          const preset = state.presets.find((p) => p.id === chatPresetId(state, chat))
+          if (chat.presetLocked && preset && !preset.isDefault) toast.info(`Preset: ${preset.name}`, { description: 'Locked to this chat' })
+        }
         void get().ensureChatMessages(chatId).then(() => get().runAutoExecutes('onChatChange', chatId))
       },
       ensureChatMessages: async (chatId) => {
@@ -893,7 +908,7 @@ export const useApp = create<AppState>()(
         const chat = chats.find((c) => c.id === chatId)
         if (!chat || get().streaming?.chatId === chatId) return
         const activePreset =
-          presets.find((p) => p.id === chat.presetId) ?? presets.find((p) => p.isDefault) ?? presets[0]
+          presets.find((p) => p.id === chatPresetId(get(), chat)) ?? presets[0]
         // `send_if_empty`: an empty box is replaced by this
         // text; when the replacement is also blank, NO user turn is added and
         // the model just continues (engine: allowEmpty send).
@@ -945,7 +960,7 @@ export const useApp = create<AppState>()(
         if (!st) return
         if (st.shown >= st.full.length) return
         const chat = get().chats.find((c) => c.id === st.chatId)
-        if (get().presets.find((p) => p.id === chat?.presetId)?.samplers.streaming === false) return
+        if (get().presets.find((p) => p.id === chatPresetId(get(), chat))?.samplers.streaming === false) return
         set({ streaming: { ...st, shown: Math.min(st.full.length, st.shown + 3) } })
       },
       regenerate: (chatId, messageId) => {
@@ -970,7 +985,7 @@ export const useApp = create<AppState>()(
         // correctly at once; the engine POST below is authoritative and
         // reconciles the exact text when it lands (single round trip, no
         // full-chat refetch — that trio of awaits was the swipe lag)
-        const persona = get().personas.find((p) => p.id === chat.personaId)
+        const persona = get().personas.find((p) => p.id === chatPersonaId(get(), chat))
         const char = get().characters.find((c) => c.id === msg.characterId)
         const text = swipe.content
           .replace(/\{\{user\}\}/gi, persona?.name ?? 'User')
@@ -1227,18 +1242,14 @@ export const useApp = create<AppState>()(
         })()
       },
       newChat: async (charId, greetingIndex = 0) => {
-        const { personas, model } = get()
+        const { model } = get()
         const char = get().characters.find((c) => c.id === charId)
-        // a persona bound to THIS character wins over the default; an
-        // auto-locked persona wins even when another persona is also bound
-        const bound = personas.filter((p) => p.binding === 'character' && p.boundCharacterIds.includes(charId))
-        const persona = bound.find((p) => p.autoLock) ?? bound[0] ?? personas.find((p) => p.isDefault)
-        const personaId = persona?.id ?? null
+        // the chat follows the current preset and persona (and any persona
+        // locked to this character) until it is locked itself
         const r = await j<{ meta: EngineChatMeta; messages: EngineMessage[] }>('/chats', {
           method: 'POST',
           body: JSON.stringify({
             ...(char?.isGroup ? { groupId: charId } : { characterId: charId }),
-            ...(personaId ? { personaId } : {}),
             ...(model ? { model } : {}),
           }),
         })
@@ -1519,22 +1530,6 @@ export const useApp = create<AppState>()(
       },
       updatePersona: (id, patch) => {
         bumpMutate()
-        // A chat that never pinned a persona reads the default, so promoting
-        // one rewrote {{user}} in all of them — switching persona in one chat
-        // changed every other. Pin them to the persona they speak as now,
-        // BEFORE the default moves. (Presets follow the same rule.)
-        if (patch.isDefault) {
-          const prevDefault = get().personas.find((p) => p.id !== id && p.isDefault)
-          if (prevDefault) {
-            const riders = get().chats.filter((c) => !c.personaId)
-            if (riders.length) {
-              set((s2) => ({ chats: s2.chats.map((c) => (c.personaId ? c : { ...c, personaId: prevDefault.id })) }))
-              for (const c of riders) {
-                writeThrough('personas', 'the chats that rode the old persona', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ personaId: prevDefault.id }) }))
-              }
-            }
-          }
-        }
         set((s) => ({
           personas: s.personas.map((p) => {
             if (p.id === id) return { ...p, ...patch }
@@ -1548,25 +1543,50 @@ export const useApp = create<AppState>()(
         if (patch.isDefault) writeThrough('personas', 'the default persona', j('/settings', { method: 'PUT', body: JSON.stringify({ personaId: id }) }))
       },
       usePersona: (id) => {
-        const { personas, chats, activeChatId } = get()
-        const persona = personas.find((x) => x.id === id)
-        if (!persona) return
-        // speaking as this persona from now on: new chats start with it and
-        // the open chat swaps to it on the spot
-        if (!persona.isDefault) get().updatePersona(id, { isDefault: true })
-        const chat = activeChatId ? chats.find((c) => c.id === activeChatId) : null
-        if (chat && chat.personaId !== id) get().updateChat(chat.id, { personaId: id })
+        const state = get()
+        if (!state.personas.some((x) => x.id === id)) return
+        // what the open chat speaks as is what changes: its own lock, the
+        // lock on its character, or the current persona everywhere else
+        const chat = state.activeChatId ? state.chats.find((c) => c.id === state.activeChatId) : null
+        const lock = chat ? chatPersonaLock(state, chat) : null
+        if (chat && lock?.kind === 'chat') { if (chat.personaId !== id) get().updateChat(chat.id, { personaId: id }); return }
+        if (chat && lock?.kind === 'character' && lock.id !== id) {
+          const owner = chat.characterId!
+          const from = state.personas.find((p) => p.id === lock.id)
+          if (from) get().updatePersona(from.id, { boundCharacterIds: from.boundCharacterIds.filter((x) => x !== owner) })
+          const to = get().personas.find((p) => p.id === id)!
+          get().updatePersona(id, { binding: 'character', boundCharacterIds: [...new Set([...to.boundCharacterIds, owner])] })
+          return
+        }
+        if (!state.personas.find((x) => x.id === id)?.isDefault) get().updatePersona(id, { isDefault: true })
       },
       usePreset: (id) => {
-        const { presets, chats, activeChatId } = get()
-        const preset = presets.find((x) => x.id === id)
-        if (!preset) return
-        // same rule as personas: new chats start with it and the open chat
-        // swaps to it on the spot (every chat stores its own preset, so the
-        // default alone would leave the open one where it was)
-        if (!preset.isDefault) get().updatePreset(id, { isDefault: true })
-        const chat = activeChatId ? chats.find((c) => c.id === activeChatId) : null
-        if (chat && chat.presetId !== id) get().updateChat(chat.id, { presetId: id })
+        const state = get()
+        if (!state.presets.some((x) => x.id === id)) return
+        const chat = state.activeChatId ? state.chats.find((c) => c.id === state.activeChatId) : null
+        if (chat?.presetLocked) { if (chat.presetId !== id) get().updateChat(chat.id, { presetId: id }); return }
+        if (!state.presets.find((x) => x.id === id)?.isDefault) get().updatePreset(id, { isDefault: true })
+      },
+      lockChatPreset: (chatId, locked) => {
+        const chat = get().chats.find((c) => c.id === chatId)
+        if (!chat) return
+        get().updateChat(chatId, locked ? { presetId: chatPresetId(get(), chat), presetLocked: true } : { presetLocked: false })
+      },
+      lockChatPersona: (chatId, to) => {
+        const state = get()
+        const chat = state.chats.find((c) => c.id === chatId)
+        if (!chat) return
+        const current = chatPersonaLock(state, chat)
+        if (current.kind === 'character' && to !== 'character') {
+          const p = state.personas.find((x) => x.id === current.id)
+          if (p) get().updatePersona(p.id, { boundCharacterIds: p.boundCharacterIds.filter((x) => x !== chat.characterId) })
+        }
+        if (to === 'chat') { get().updateChat(chatId, { personaId: current.id, personaLocked: true }); return }
+        if (chat.personaLocked) get().updateChat(chatId, { personaLocked: false })
+        if (to === 'character' && chat.characterId && current.id) {
+          const p = get().personas.find((x) => x.id === current.id)
+          if (p) get().updatePersona(p.id, { binding: 'character', boundCharacterIds: [...new Set([...p.boundCharacterIds, chat.characterId])] })
+        }
       },
       addPersona: (init) => {
         bumpMutate()
@@ -1608,20 +1628,6 @@ export const useApp = create<AppState>()(
         bumpMutate()
         // default is exclusive — remember which others to clear so their files persist too
         const prevDefaults = patch.isDefault ? get().presets.filter((x) => x.id !== id && x.isDefault) : []
-        // chats pinned to the OLD default follow the switch: a default that
-        // only applies to chats created after it is a trap (every shaping
-        // setting silently ignores the copy the user just made). Chats the
-        // user explicitly pointed elsewhere keep theirs.
-        if (patch.isDefault && prevDefaults.length) {
-          const oldIds = new Set<string | null>(prevDefaults.map((x) => x.id))
-          const riders = get().chats.filter((c) => oldIds.has(c.presetId))
-          if (riders.length) {
-            set((s2) => ({ chats: s2.chats.map((c) => (oldIds.has(c.presetId) ? { ...c, presetId: id } : c)) }))
-            for (const c of riders) {
-              writeThrough('presets', 'the chats that rode the old default', j(`/chats/${encodeURIComponent(c.id)}`, { method: 'PATCH', body: JSON.stringify({ presetId: id as string }) }))
-            }
-          }
-        }
         set((s) => ({
           presets: s.presets.map((p) => {
             if (p.id === id) return { ...p, ...patch }
@@ -2033,7 +2039,7 @@ async function runGeneration(
   const chat = get().chats.find((c) => c.id === chatId)
   if (!chat) return false
 
-  const presetName = get().presets.find((p) => p.id === (chat.presetId || 'default'))?.name
+  const presetName = get().presets.find((p) => p.id === chatPresetId(get(), chat))?.name
 
   // world-info scope for this generation (studio semantics)
   const bookIds = scopeBookIds(get().lorebooks, chat, get().characters)
@@ -2056,10 +2062,8 @@ async function runGeneration(
         swipes: [{ id: uid('sw'), content: opts.userText, model: 'user', genTimeMs: 0, timestamp: Date.now() }],
         activeSwipe: 0, timestamp: Date.now(), edited: false, hidden: false, bookmarked: false,
         // staged under the persona active at send time (matches the engine commit)
-        authorName: get().personas.find((p) => p.id === chat.personaId)?.name
-          ?? get().personas.find((p) => p.isDefault)?.name,
-        personaId: get().personas.find((p) => p.id === chat.personaId)?.id
-          ?? get().personas.find((p) => p.isDefault)?.id,
+        authorName: get().personas.find((p) => p.id === chatPersonaId(get(), chat))?.name,
+        personaId: chatPersonaId(get(), chat) ?? undefined,
         ...(opts.attachments?.length ? { attachments: opts.attachments } : {}) }
     : null
   const pendingMsg: Message = {

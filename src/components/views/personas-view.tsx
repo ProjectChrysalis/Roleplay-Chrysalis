@@ -1,7 +1,7 @@
 import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
 import { useEffect, useRef, useState } from 'react'
-import { Plus, Trash, Copy, UploadSimple, DownloadSimple, SealCheck, ChartBar, CheckCircle } from '@phosphor-icons/react'
+import { Plus, Trash, Copy, UploadSimple, DownloadSimple, SealCheck, ChartBar, CheckCircle, Lock, X } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -12,11 +12,12 @@ import { Switch } from '@/components/ui/switch'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Pager, clampPage } from '@/components/ui/pager'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useConfirm } from '@/components/ui/confirm'
 import { MasterDetail } from '@/components/shell/master-detail'
-import { useApp } from '@/lib/store'
+import { useApp, chatPersonaId } from '@/lib/store'
 import { estimateTokens, formatTokens } from '@/lib/tokens'
 import { downloadTextFile } from '@/lib/export'
 import { fileToDataUrl } from '@/lib/engine'
@@ -44,13 +45,10 @@ export function PersonasView() {
   const importInput = useRef<HTMLInputElement>(null)
   const avatarInput = useRef<HTMLInputElement>(null)
   const p = personas.find((x) => x.id === selectedId) ?? personas[0]
-  // the persona being spoken as right now: the open chat's own, else the
-  // selection new chats start with
+  // the persona being spoken as right now: the open chat's (its lock, its
+  // character's lock, else the current one)
   const activeChatId = useApp((s) => s.activeChatId)
-  const chatPersonaId = chats.find((c) => c.id === activeChatId)?.personaId ?? null
-  const activeId = personas.some((x) => x.id === chatPersonaId)
-    ? chatPersonaId
-    : (personas.find((x) => x.isDefault)?.id ?? null)
+  const activeId = chatPersonaId({ personas }, chats.find((c) => c.id === activeChatId))
 
   /** Import: our backup shape (array of personas) or the common
    *  { name: description } personas object. */
@@ -218,39 +216,43 @@ export function PersonasView() {
             </div>
 
             <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
-              <h2 className="text-xs font-semibold uppercase text-muted-foreground">Bindings</h2>
-              <div className="flex items-center gap-3">
-                <Label className="w-28 text-xs">Binding mode</Label>
-                <Select value={p.binding} onValueChange={(v) => updatePersona(p.id, { binding: v as never })}>
-                  <SelectTrigger className="w-48" aria-label="Binding mode"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">Default</SelectItem>
-                    <SelectItem value="character">Lock to character</SelectItem>
-                    <SelectItem value="chat">Lock to chat</SelectItem>
-                  </SelectContent>
-                </Select>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Switch checked={p.autoLock} onCheckedChange={(v) => updatePersona(p.id, { autoLock: v })} aria-label="Auto-lock" />
-                  Auto-lock
-                </label>
+              <h2 className="text-xs font-semibold uppercase text-muted-foreground">Locked to characters</h2>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {p.boundCharacterIds.map((id) => characters.find((c) => c.id === id)).filter((c) => !!c).map((c) => (
+                  <span key={c.id} className="flex items-center gap-1 rounded-full border border-primary bg-primary/15 py-0.5 pl-2 pr-1 text-xs text-primary">
+                    <Lock className="size-3" aria-hidden="true" />
+                    {c.name}
+                    <button
+                      type="button"
+                      className="rounded-full p-0.5 hover:bg-primary/20"
+                      aria-label={`Unlock from ${c.name}`}
+                      onClick={() => updatePersona(p.id, { boundCharacterIds: p.boundCharacterIds.filter((x) => x !== c.id) })}
+                    >
+                      <X className="size-3" aria-hidden="true" />
+                    </button>
+                  </span>
+                ))}
+                <Popover>
+                  <PopoverTrigger className="rounded-full border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
+                    Add character
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-64 p-0">
+                    <Command>
+                      <CommandInput placeholder="Search characters…" />
+                      <CommandList>
+                        <CommandEmpty>Nothing matches.</CommandEmpty>
+                        <CommandGroup>
+                          {characters.filter((c) => !p.boundCharacterIds.includes(c.id)).slice(0, 60).map((c) => (
+                            <CommandItem key={c.id} value={`${c.name} ${c.id}`} onSelect={() => updatePersona(p.id, { binding: 'character', boundCharacterIds: [...p.boundCharacterIds, c.id] })}>
+                              <span className="min-w-0 flex-1 truncate">{c.name}</span>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
               </div>
-              {p.binding === 'character' && (
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">Bound characters</Label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {characters.filter((c) => !c.isGroup).map((c) => (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => updatePersona(p.id, { boundCharacterIds: p.boundCharacterIds.includes(c.id) ? p.boundCharacterIds.filter((x) => x !== c.id) : [...p.boundCharacterIds, c.id] })}
-                        className={cn('rounded-full border px-2 py-0.5 text-xs', p.boundCharacterIds.includes(c.id) ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground')}
-                      >
-                        {c.name}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
 
             <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
@@ -276,7 +278,7 @@ export function PersonasView() {
         <DialogContent className="sm:max-w-sm">
           <DialogHeader><DialogTitle>Usage: {p?.name}</DialogTitle></DialogHeader>
           {p && (() => {
-            const using = chats.filter((ch) => ch.personaId === p.id)
+            const using = chats.filter((ch) => chatPersonaId({ personas }, ch) === p.id)
             const msgs = using.flatMap((ch) => ch.messages.filter((m) => m.role === 'user'))
             const words = msgs.reduce((n, m) => n + (m.swipes[m.activeSwipe]?.content.trim().split(/\s+/).filter(Boolean).length ?? 0), 0)
             const pairs = new Map<string, number>()

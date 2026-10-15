@@ -1,4 +1,4 @@
-import { useApp } from './store'
+import { chatPersonaId, chatPresetId, useApp } from './store'
 
 let focus: { kind: 'preset' | 'message'; id: string; chatId?: string } | null = null
 let previous = ''
@@ -13,7 +13,7 @@ export function publishAgentContext(): void {
   const chat = state.chats.find(item => item.id === state.activeChatId)
   if (focus?.kind === 'message' && focus.chatId !== chat?.id) focus = null
   const message = focus?.kind === 'message' ? chat?.messages.find(item => item.id === focus?.id) : undefined
-  const preset = state.presets.find(item => item.id === (focus?.kind === 'preset' ? focus.id : chat?.presetId))
+  const preset = state.presets.find(item => item.id === (focus?.kind === 'preset' ? focus.id : chatPresetId(state, chat)))
   const character = state.characters.find(item => item.id === state.activeCharacterId)
   const selection = {
     label: message ? `Message: ${message.swipes[message.activeSwipe]?.content.slice(0, 80) ?? message.authorName ?? message.id}` : focus?.kind === 'preset' && preset ? `Preset: ${preset.name}` : chat ? `Chat: ${chat.title}` : character ? `Character: ${character.name}` : undefined,
@@ -21,7 +21,7 @@ export function publishAgentContext(): void {
     chatId: chat?.id,
     characterId: character?.id,
     presetId: preset?.id,
-    personaId: chat?.personaId,
+    personaId: chat ? chatPersonaId(state, chat) ?? undefined : undefined,
     messageId: message?.id,
     swipeIndex: message?.activeSwipe,
   }

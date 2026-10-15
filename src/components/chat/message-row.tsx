@@ -21,7 +21,7 @@ import { PromptPeekDialog } from '@/components/chat/prompt-peek-dialog'
 import { SaveSceneDialog } from '@/components/chat/save-scene-dialog'
 import { ModelMark } from '@/components/model-mark'
 import { useTouchUi } from '@/hooks/use-touch-ui'
-import { useApp } from '@/lib/store'
+import { useApp, chatPresetId, chatPersonaId } from '@/lib/store'
 import { useDisplayTexts, type DisplayScript } from '@/hooks/use-display-texts'
 import { cssAttrValue } from '@/lib/scope-css'
 import { balanceStreamingMarkdown } from '@/lib/rich-parts'
@@ -275,7 +275,7 @@ export const MessageRow = memo(function MessageRow({
   const setView = useApp((s) => s.setView)
   const presets = useApp((s) => s.presets)
   const setMessageTranslation = useApp((s) => s.setMessageTranslation)
-  const presetSamplers = (presets.find((p) => p.id === chat.presetId) ?? presets.find((p) => p.isDefault) ?? presets[0])!.samplers
+  const presetSamplers = (presets.find((p) => p.id === chatPresetId({ presets }, chat)) ?? presets[0])!.samplers
 
   /** The translation renders INLINE under the original text and
    *  persists on the message. */
@@ -434,7 +434,7 @@ export const MessageRow = memo(function MessageRow({
       if (!r.scopeTargetId) return false
       if (r.scope === 'chat') return r.scopeTargetId === chat.id
       if (r.scope === 'character') return r.scopeTargetId === chat.characterId || (!!character.isGroup && (character.members ?? []).includes(r.scopeTargetId))
-      if (r.scope === 'preset') return r.scopeTargetId === chat.presetId
+      if (r.scope === 'preset') return r.scopeTargetId === chatPresetId({ presets }, chat)
       return true
     }
     // depth = distance from the chat's end; scripts bound to a window only
@@ -442,7 +442,7 @@ export const MessageRow = memo(function MessageRow({
     const depth = chat.messages.length - 1 - index
     // global first, then preset-bound, then scoped — same order the engine runs
     const rank = (r: RegexScript) => (r.scope === 'global' ? 0 : r.scope === 'preset' ? 1 : 2)
-    const persona = personas.find((p) => p.id === chat.personaId) ?? personas.find((p) => p.isDefault)
+    const persona = personas.find((p) => p.id === chatPersonaId({ personas }, chat))
     const userName = persona?.name ?? 'User'
     // replacement macros use the chat's global names — only the trim pass is
     // speaker-aware in the source format, keep the same split here
@@ -469,7 +469,7 @@ export const MessageRow = memo(function MessageRow({
       resolved.push({ find, flags: r.flags ?? 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
     }
     return resolved
-  }, [regexScripts, message.role, personas, chat, character, index])
+  }, [regexScripts, message.role, personas, presets, chat, character, index])
   // while streaming, unclosed emphasis/fence markers get synthetic closers
   // so each tick renders as finished markdown (never committed)
   const rawDisplayed = isStreamingThis ? balanceStreamingMarkdown(rawContent) : rawContent
@@ -508,7 +508,7 @@ export const MessageRow = memo(function MessageRow({
   const cssScope = `[data-message-id="${cssAttrValue(message.id)}"]`
   // user messages keep the persona they were SENT under: match the stored
   // author name first so mid-chat persona switches never repaint history
-  const currentPersona = personas.find((p) => p.id === chat.personaId) ?? personas.find((p) => p.isDefault)
+  const currentPersona = personas.find((p) => p.id === chatPersonaId({ personas }, chat))
   const authorPersona = !isUser ? null
     : (message.personaId ? personas.find((p) => p.id === message.personaId) : undefined)
       ?? (message.authorName ? personas.find((p) => p.name === message.authorName) : undefined)

@@ -1,6 +1,6 @@
 
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Star, Chats, Copy, DownloadSimple, Plus, Trash, ClockCounterClockwise, Palette, Image as ImageIcon, CaretLeft, CaretRight, X } from '@phosphor-icons/react'
+import { ArrowLeft, Star, Chats, Copy, DownloadSimple, Plus, Trash, ClockCounterClockwise, Palette, Image as ImageIcon, CaretLeft, CaretRight, X, Lock } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -68,6 +68,10 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
   const [tab, setTab] = useState('core')
   const characterScripts = regexScripts.filter((r) => r.scope === 'character' && r.scopeTargetId === c.id)
   const embeddedBook = lorebooks.find((b) => b.id === c.embeddedLorebookId)
+  const linkedBooks = lorebooks.filter((b) => c.linkedLorebookIds.includes(b.id))
+  const lockedPersonas = useApp((s) => s.personas).filter((p) => p.boundCharacterIds.includes(c.id))
+  const lockedPersona = lockedPersonas.find((p) => p.autoLock) ?? lockedPersonas[0]
+  const focusPersona = useApp((s) => s.focusPersona)
   const chats = useApp((s) => s.chats)
   const startChatAndOpen = useApp((s) => s.startChatAndOpen)
   const [tokenReportOpen, setTokenReportOpen] = useState(false)
@@ -195,8 +199,10 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
           </Button>
         </div>
       </header>
-      {(c.embeddedLorebookId || retainedBook || characterScripts.length > 0) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+      {(c.embeddedLorebookId || retainedBook || linkedBooks.length > 0 || lockedPersona || characterScripts.length > 0) && <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
         {(c.embeddedLorebookId || retainedBook) && <Button variant="outline" size="sm" onClick={() => setTab('lorebook')}>{embeddedBook ? `${embeddedBook.name}: ${embeddedBook.entries.length} entries, linked` : c.embeddedLorebookId ? 'Embedded lorebook missing' : 'Embedded lorebook: not imported'}</Button>}
+        {linkedBooks.length > 0 && <Button variant="outline" size="sm" onClick={() => setTab('lorebook')}>{linkedBooks.length === 1 ? `Lorebook: ${linkedBooks[0]!.name}` : `${linkedBooks.length} lorebooks linked`}</Button>}
+        {lockedPersona && <Button variant="outline" size="sm" onClick={() => focusPersona(lockedPersona.id)}><Lock className="size-3.5" aria-hidden="true" />Persona: {lockedPersona.name}</Button>}
         {characterScripts.length > 0 && <Button variant="outline" size="sm" onClick={() => setTab('regex')}>Regex: {characterScripts.filter((r) => r.enabled).length}/{characterScripts.length} enabled</Button>}
       </div>}
         <div

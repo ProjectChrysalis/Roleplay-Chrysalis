@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useConfirm } from '@/components/ui/confirm'
-import { useApp } from '@/lib/store'
+import { useApp, chatPresetId } from '@/lib/store'
 import { useDragList } from '@/lib/drag-list'
 import { presetExport, downloadJson, regexImport } from '@/lib/interop'
 import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
@@ -77,12 +77,9 @@ export function PresetsView() {
   const chats = useApp((s) => s.chats)
   const composerDraft = useApp((s) => s.composerDraft)
   const __focus = useApp((s) => s.focusPresetId)
-  // the preset in use right now: the open chat's own, else the one new chats
-  // start with. The view opens on it, since that's the one you're about to tweak.
-  const activePresetId = chats.find((c) => c.id === activeChatId)?.presetId
-  const activeId = activePresetId && presets.some((p) => p.id === activePresetId)
-    ? activePresetId
-    : (presets.find((p) => p.isDefault)?.id ?? null)
+  // the preset in use right now (the open chat's lock, else the current
+  // one). The view opens on it, since that's the one you're about to tweak.
+  const activeId = chatPresetId({ presets }, chats.find((c) => c.id === activeChatId))
   const [selectedId, setSelectedId] = useViewMemory<string | null>('presets.selected', __focus ?? activeId ?? presets[0]?.id ?? null)
   useEffect(() => { if (selectedId) focusAgentContext({ kind: 'preset', id: selectedId }); return () => focusAgentContext(null) }, [selectedId])
   const [detailOpen, setDetailOpen] = useViewMemory('presets.detail', false)

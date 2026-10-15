@@ -18,7 +18,7 @@ import {
   AutocompletePopup, detectTrigger, fuzzy, getSlashCommands, MACROS,
   type AcItem, type Trigger,
 } from "@/components/chat/composer-autocomplete"
-import { useApp } from "@/lib/store"
+import { useApp, chatPersonaId } from "@/lib/store"
 import { useFinePointer, useLastPointer, useTouchUi } from "@/hooks/use-touch-ui"
 import { uid } from "@/lib/tokens"
 import { fileToRawDataUrl } from "@/lib/engine"
@@ -92,7 +92,7 @@ export function Composer({ chatId }: { chatId: ID }) {
   const chatModel = useApp((s) => s.model)
   const chat = useApp((s) => s.chats.find((c) => c.id === chatId))
   const characterId = chat?.characterId ?? null
-  const activePersonaId = chat?.personaId ?? personas.find((p) => p.isDefault)?.id ?? null
+  const activePersonaId = chatPersonaId({ personas }, chat)
   const character = characters.find((c) => c.id === characterId)
   const isGroup = !!character?.isGroup
 
@@ -514,7 +514,7 @@ export function Composer({ chatId }: { chatId: ID }) {
                   <DropdownMenuItem
                     key={p.id}
                     onClick={() => {
-                      updateChat(chatId, { personaId: p.id })
+                      useApp.getState().usePersona(p.id)
                       personasToast.success(`Speaking as ${p.name}`)
                     }}
                   >

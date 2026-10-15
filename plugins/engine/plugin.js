@@ -11,8 +11,9 @@
  * Messages are a FLAT list with per-message swipes (classic studio shape):
  *   {id, name, charId, role: "user"|"char", text, at, swipes:[], swipe,
  *    extra?: {model, usage}}
- * Chat meta: {id, title, characterId, groupId, presetId, personaId, model,
- *   authorNote, lorebookIds, createdAt, updatedAt, tainted}
+ * Chat meta: {id, title, characterId, groupId, presetId, presetLocked,
+ *   personaId, personaLocked, model, authorNote, lorebookIds, createdAt,
+ *   updatedAt, tainted}. presetId/personaId only count while locked.
  *
  * Presets keep the import/export shape users already have: prompts[] +
  * prompt_order[] with markers (main, charDescription, chatHistory, ...) and
@@ -1274,9 +1275,33 @@ function activateWorldInfo(fsx, meta, dialogue, extraBookIds, budgetChars, opts)
 }
 
 // ---------- chat file helpers ----------
+/** One preset and one persona are current everywhere. A chat locked to its
+ *  own keeps it; otherwise a persona locked to the chat's character wins,
+ *  then the current one. */
+function chatPresetId(fsx, meta) {
+  return meta.presetLocked === true && meta.presetId ? meta.presetId : defaultPresetId(fsx);
+}
+function chatPersonaId(fsx, meta) {
+  if (meta.personaLocked === true && meta.personaId) return meta.personaId;
+  // a group chat's members share the group's lock
+  const owner = meta.characterId || meta.groupId;
+  if (owner) {
+    let bound = [];
+    try {
+      bound = fsx.list("personas").filter((f) => f.endsWith(".json")).map((f) => { try { return JSON.parse(fsx.read("personas/" + f)); } catch { return null; } })
+        .filter((p) => p && p.id && Array.isArray(p.boundCharacterIds) && p.boundCharacterIds.includes(owner));
+    } catch {}
+    const pick = bound.find((p) => p.autoLock) || bound[0];
+    if (pick) return pick.id;
+  }
+  try { return JSON.parse(fsx.read("settings.json")).personaId || null; } catch { return null; }
+}
+
 function loadChat(fsx, id) {
   const meta = (() => { try { return JSON.parse(fsx.read("chats/" + id + ".meta.json")); } catch { return null; } })();
   if (!meta) return null;
+  meta.presetId = chatPresetId(fsx, meta);
+  meta.personaId = chatPersonaId(fsx, meta);
   let msgs = [];
   try {
     msgs = fsx.read("chats/" + id + ".jsonl").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
@@ -1322,14 +1347,12 @@ function orderedPrompts(preset) {
   return MARKER_ORDER_FALLBACK.map((id) => ({ p: { identifier: id, marker: true, role: "system" }, enabled: true }));
 }
 
-/** The chat's persona as it is NOW: the chat's own pick, else the user's
- *  default. Its current name is {{user}} for every new turn, so renaming or
+/** The chat's persona as it is NOW (see chatPersonaId). Its current name is {{user}} for every new turn, so renaming or
  *  editing a persona reaches every chat that uses it; past user messages keep
  *  the name they were sent under. meta.userName only covers a chat whose
  *  persona file is gone. */
 function chatPersona(fsx, meta) {
-  let pid = meta.personaId || null;
-  if (!pid) { try { pid = JSON.parse(fsx.read("settings.json")).personaId || null; } catch {} }
+  const pid = chatPersonaId(fsx, meta);
   let persona = null;
   if (pid) { try { persona = JSON.parse(fsx.read("personas/" + pid + ".json")); } catch {} }
   // NEVER call chatUserName from here: it is this function's own accessor, so
@@ -2886,12 +2909,25 @@ export function handleRoute(req, host) {
     };
     const uname = (base, ext) => unameIn("characters", base, ext);
     const chars = [];
+    // anything that points at a book travels by its name: ids are minted
+    // again on the machine that restores
+    const bookNames = new Map();
+    try {
+      for (const f of fsx.list("lorebooks").filter((x) => x.endsWith(".json"))) {
+        const b = readJson("lorebooks/" + f, null);
+        if (b) bookNames.set(b.id || f.replace(/\.json$/, ""), b.name || f.replace(/\.json$/, ""));
+      }
+    } catch {}
     try {
       for (const cid of fsx.list("characters")) {
         const card = readJson("characters/" + cid + "/card.json", null);
         if (!card) continue;
         const file = uname(slug(card.name || cid), ".json");
         const backupCard = portableMedia(card, fsx);
+        backupCard._lorebookNames = {
+          embedded: (card.studio?.embeddedLorebookId && bookNames.get(card.studio.embeddedLorebookId)) || null,
+          linked: (card.studio?.linkedLorebookIds || []).map((id) => bookNames.get(id)).filter(Boolean),
+        };
         if (backupCard.extensions?.regex_scripts) {
           backupCard.extensions = { ...backupCard.extensions };
           delete backupCard.extensions.regex_scripts;
@@ -2959,16 +2995,6 @@ export function handleRoute(req, host) {
             minDepth: s.minDepth ?? null, maxDepth: s.maxDepth ?? null,
           }, null, 2),
         });
-      }
-    } catch {}
-    // book names, so anything that points at a book can travel by name: ids
-    // are re-minted on the machine that restores, so an id reference is a
-    // dangling one the moment it leaves this install
-    const bookNames = new Map();
-    try {
-      for (const f of fsx.list("lorebooks").filter((x) => x.endsWith(".json"))) {
-        const b = readJson("lorebooks/" + f, null);
-        if (b) bookNames.set(b.id || f.replace(/\.json$/, ""), b.name || f.replace(/\.json$/, ""));
       }
     } catch {}
     const presetNames = new Map();
@@ -3314,26 +3340,24 @@ export function handleRoute(req, host) {
     if (req.method === "POST" && !id) {
       const b = body();
       const cid = uid("c");
-      // the persona is pinned at creation: a chat keeps the one it started
-      // with until someone switches it, so changing the default later never
-      // swaps the persona of chats that already exist
-      const personaId = b.personaId || readJson("settings.json", {}).personaId || null;
-      const persona = personaId ? readJson("personas/" + personaId + ".json", null) : null;
-      const userName = typeof b.userName === "string" && b.userName ? b.userName : (persona && persona.name) || "User";
+      // a new chat follows the current preset and persona; a caller that
+      // names one locks the chat to it
       const meta = {
         id: cid,
         title: b.title || "New chat",
         characterId: b.characterId || null,
         groupId: b.groupId || null,
-        // a new chat starts on the user's default preset, not the stock one
-        presetId: b.presetId || defaultPresetId(fsx),
-        personaId: persona ? personaId : null,
+        presetId: b.presetId || null,
+        presetLocked: !!b.presetId && b.presetLocked !== false,
+        personaId: b.personaId || null,
+        personaLocked: !!b.personaId && b.personaLocked !== false,
         model: b.model || null,
-        userName,
+        userName: "User",
         authorNote: null,
         lorebookIds: [],
         createdAt: Date.now(), updatedAt: Date.now(),
       };
+      meta.userName = typeof b.userName === "string" && b.userName ? b.userName : chatUserName(fsx, meta);
       // seed the greeting (all greetings as swipes → swipe chevrons rotate them)
       const msgs = [];
       if (meta.characterId) {
@@ -3366,13 +3390,14 @@ export function handleRoute(req, host) {
             const list = gg.map(String).filter((t) => t.trim()).map((t) => regexOnSave(fsx, meta, [who], t, "ai_output", saveMacros(fsx, meta, [], who)));
             if (!list.length) continue;
             const pick = Math.floor(Math.random() * list.length);
-            const text = list[pick].split("{{user}}").join(userName).split("{{char}}").join(card.name);
+            const text = list[pick].split("{{user}}").join(meta.userName).split("{{char}}").join(card.name);
             msgs.push({ id: uid(), name: card.name, charId: mid, role: "char", text, at: Date.now(), swipes: list, swipe: pick, greeting: true });
           }
         }
       }
       saveChat(fsx, cid, meta, msgs);
-      return ok({ meta, messages: msgs }, 201);
+      // the answer says what the chat runs with; the file keeps only locks
+      return ok({ meta: { ...meta, presetId: chatPresetId(fsx, meta), personaId: chatPersonaId(fsx, meta) }, messages: msgs }, 201);
     }
 
     if (!id) return err(400, "chat id required");
@@ -3475,7 +3500,7 @@ const toolX = (r) => ({
       // look_changed, and the client's hydrate wipes its staged streaming
       // bubble mid-generation. Nothing changed → no write, no event.
       const same = (x, y) => JSON.stringify(x ?? null) === JSON.stringify(y ?? null);
-      const keys = ["title", "presetId", "personaId", "model", "authorNote", "lorebookIds", "chatLorebookIds", "userName", "characterId", "groupId",
+      const keys = ["title", "presetId", "presetLocked", "personaId", "personaLocked", "model", "authorNote", "lorebookIds", "chatLorebookIds", "userName", "characterId", "groupId",
         "authorNoteObject", "folderId", "chatTags", "backgroundId", "temporary", "summary",
         "memoryCutoffMessageId", "parentChatId", "parentMessageId"];
       // summaries edited in place: [{ id, text }] in order. A part keeps the

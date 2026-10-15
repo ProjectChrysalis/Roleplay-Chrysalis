@@ -2877,7 +2877,37 @@ describe("rp studio engine: pictures, personas, card regex", () => {
     expect(req).toContain("now tall");
   }, 30_000);
 
-  it("a new chat pins the persona in use, so changing the default later leaves it alone", async () => {
+  it("a persona locked to the character beats the one in use, a chat lock beats both", async () => {
+    const m = mockHost();
+    fs.writeFileSync(path.join(root, "personas", "bound.json"), JSON.stringify({ id: "bound", name: "Bound", boundCharacterIds: ["aria"] }));
+    fs.writeFileSync(path.join(root, "personas", "other.json"), JSON.stringify({ id: "other", name: "Other" }));
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    const meta = async () => (await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m)).json.meta;
+    expect(await meta()).toMatchObject({ personaId: "bound" });
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { personaId: "other", personaLocked: true } }, m);
+    expect(await meta()).toMatchObject({ personaId: "other", personaLocked: true });
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { personaId: null, personaLocked: false } }, m);
+    expect(await meta()).toMatchObject({ personaId: "bound" });
+    fs.rmSync(path.join(root, "personas", "bound.json"));
+    expect(await meta()).toMatchObject({ personaId: "you" });
+  }, 30_000);
+
+  it("a chat follows the preset in use until it is locked to one", async () => {
+    const m = mockHost();
+    fs.writeFileSync(path.join(root, "presets", "mine.json"), JSON.stringify({ id: "mine", name: "Mine", prompts: [], prompt_order: [] }));
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    const meta = async () => (await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m)).json.meta;
+    const before = (await meta()).presetId;
+    expect(before).not.toBe("mine");
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { presetId: "mine", presetLocked: true } }, m);
+    expect(await meta()).toMatchObject({ presetId: "mine", presetLocked: true });
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { presetId: null, presetLocked: false } }, m);
+    expect((await meta()).presetId).toBe(before);
+  }, 30_000);
+
+  it("a chat follows the persona in use until it is locked to one", async () => {
     const m = mockHost();
     await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
     const id = chatIdOf();
@@ -2885,7 +2915,11 @@ describe("rp studio engine: pictures, personas, card regex", () => {
     fs.writeFileSync(path.join(root, "personas", "other.json"), JSON.stringify({ id: "other", name: "Other" }));
     await drive(engineUrl, { method: "PUT", path: "/settings", body: { personaId: "other" } }, m);
     await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi {{user}}" } }, m);
-    expect(JSON.stringify(m.requests.at(-1)!.req)).toContain("hi You");
+    expect(JSON.stringify(m.requests.at(-1)!.req)).toContain("hi Other");
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { personaId: "other", personaLocked: true } }, m);
+    await drive(engineUrl, { method: "PUT", path: "/settings", body: { personaId: "you" } }, m);
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "again {{user}}" } }, m);
+    expect(JSON.stringify(m.requests.at(-1)!.req)).toContain("again Other");
   }, 30_000);
 
   it("regex scripts inside an imported card become that character's scripts", async () => {
@@ -2964,6 +2998,27 @@ describe("rp studio: backup zips survive the trip", () => {
     for (const [name, data] of Object.entries(files)) entries[name] = new TextDecoder().decode(data);
     return entries;
   };
+
+  it("brings back the lorebooks a card links and embeds", async () => {
+    const m = mockHost();
+    const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(root, rel), "utf8"));
+    fs.writeFileSync(path.join(root, "lorebooks", "world.json"), JSON.stringify({ id: "world", name: "World", entries: [{ keys: ["sea"], content: "The sea" }] }));
+    fs.writeFileSync(path.join(root, "lorebooks", "own.json"), JSON.stringify({ id: "own", name: "Own", entries: [{ keys: ["home"], content: "Home" }] }));
+    fs.mkdirSync(path.join(root, "characters", "linked"), { recursive: true });
+    fs.writeFileSync(path.join(root, "characters", "linked", "card.json"), JSON.stringify({ name: "Linked", studio: { linkedLorebookIds: ["world"], embeddedLorebookId: "own" } }));
+    const entries = await exportEntries(m);
+    for (const dir of ["characters", "lorebooks"]) { fs.rmSync(path.join(root, dir), { recursive: true, force: true }); fs.mkdirSync(path.join(root, dir)); }
+    const m2 = mockHost();
+    (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
+    expect(r.json.errors).toEqual([]);
+    const books = Object.fromEntries((r.json.lorebooks as string[]).map((id) => [read(`lorebooks/${id}.json`).name, id]));
+    const card = (r.json.characters as string[]).map((id) => read(`characters/${id}/card.json`)).find((c) => c.name === "Linked");
+    expect(Object.keys(books).sort()).toEqual(["Own", "World"]);
+    expect(card.studio.linkedLorebookIds).toEqual([books.World]);
+    expect(card.studio.embeddedLorebookId).toBe(books.Own);
+    expect(card._lorebookNames).toBeUndefined();
+  }, 30_000);
 
   it("brings back portraits, same-name cards and same-name presets", async () => {
     const m = mockHost();
@@ -3058,7 +3113,7 @@ describe("rp studio: backup zips survive the trip", () => {
     await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi", model: "mock/model" } }, m);
     await drive(engineUrl, {
       method: "PATCH", path: `/chats/${id}`,
-      body: { presetId: "mine", personaId: "robin", title: "Crossroads at Dusk", summary: "they met", chatTags: ["noir"] },
+      body: { presetId: "mine", presetLocked: true, personaId: "robin", personaLocked: true, title: "Crossroads at Dusk", summary: "they met", chatTags: ["noir"] },
     }, m);
 
     const entries = await exportEntries(m);
@@ -3747,7 +3802,7 @@ describe("rp studio: a foreign user folder imports linked up", () => {
     "default-user/characters/sera_v2.png": { __b64__: true, base64: cardPng({ spec: "chara_card_v2", data: { name: "Seraphina", description: "Guardian", extensions: { world: "Eldoria" } } }) },
     "default-user/characters/Seraphina/joy.png": { __b64__: true, base64: "QUFB" },
     "default-user/worlds/Eldoria.json": JSON.stringify({ entries: { 0: { uid: 0, key: ["forest"], content: "A forest" } } }),
-    "default-user/chats/sera_v2/2024-01-01.jsonl": jsonl({ user_name: "Alex", character_name: "Seraphina", chat_metadata: {} }, { name: "Seraphina", is_user: false, mes: "Hello" }),
+    "default-user/chats/sera_v2/2024-01-01.jsonl": jsonl({ user_name: "Alex", character_name: "Seraphina", chat_metadata: { persona: "user-default.png" } }, { name: "Seraphina", is_user: false, mes: "Hello" }),
     "default-user/groups/1700.json": JSON.stringify({ id: "1700", name: "Party", members: ["sera_v2.png"], disabled_members: ["sera_v2.png"], chats: ["Party - old", "Party - new"], chat_id: "Party - new", activation_strategy: 1, generation_mode: 1, past_metadata: { big: "x" } }),
     "default-user/group chats/Party - old.jsonl": jsonl({ chat_metadata: {} }, { name: "Sera", is_user: false, mes: "Hi all", original_avatar: "sera_v2.png" }),
     "default-user/User Avatars/user-default.png": { __b64__: true, base64: "QkJC" },
@@ -3770,6 +3825,8 @@ describe("rp studio: a foreign user folder imports linked up", () => {
     expect(sera.avatar).toStartWith("data:image/png;base64,");
     expect(sera.studio.expressions).toEqual([{ name: "joy", url: "data:image/png;base64,QUFB" }]);
     expect(read(`lorebooks/${(r.json.lorebooks as string[])[0]}.json`).linkedCharacterIds).toEqual([seraId]);
+    // chats scope books from the card, so the card carries the link too
+    expect(sera.studio.linkedLorebookIds).toEqual([(r.json.lorebooks as string[])[0]]);
 
     const metas = (r.json.chats as string[]).map((id) => read(`chats/${id}.meta.json`));
     const group = read(`groups/${(r.json.groups as string[])[0]}.json`);
@@ -3783,6 +3840,9 @@ describe("rp studio: a foreign user folder imports linked up", () => {
 
     const persona = read(`personas/${(r.json.personas as string[])[0]}.json`);
     expect(persona).toMatchObject({ name: "Alex", description: "Me", title: "Traveler", isDefault: true, avatar: "data:image/png;base64,QkJC" });
+    // the chat the folder locked to that persona stays locked to it
+    expect(metas.find((c) => c.characterId === seraId)).toMatchObject({ personaId: persona.id, personaLocked: true });
+    expect(groupChat.personaLocked).toBeFalsy();
     expect(r.json.regex).toHaveLength(1);
 
     const lib = read("library.json");

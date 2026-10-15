@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import { useApp } from "@/lib/store"
+import { useApp, chatPresetId } from "@/lib/store"
 import { regexImport, regexExport, downloadJson } from "@/lib/interop"
 import { uid } from "@/lib/tokens"
 import type { RegexScript } from "@/lib/types"
@@ -171,9 +171,7 @@ export function RegexView() {
 
   // what the open chat runs with: those owners sort first and start expanded
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null
-  const activePresetId = activeChat && presets.some((p) => p.id === activeChat.presetId)
-    ? activeChat.presetId
-    : (presets.find((p) => p.isDefault)?.id ?? null)
+  const activePresetId = chatPresetId({ presets }, activeChat)
   const activeCharacter = characters.find((c) => c.id === activeChat?.characterId) ?? null
   const activeCharacterIds = activeCharacter ? [activeCharacter.id, ...(activeCharacter.members ?? [])] : []
   const activeTarget: Record<RegexScript['scope'], string | null> = {

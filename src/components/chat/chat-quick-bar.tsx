@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { createToast } from '@/lib/notifications'
-import { useApp } from '@/lib/store'
+import { chatPersonaLock, chatPresetId, useApp } from '@/lib/store'
 import type { ID } from '@/lib/types'
 import { cn, shortModel } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -8,7 +8,7 @@ import {
   Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
 } from '@/components/ui/command'
 import { ProfilesSheet } from '@/components/connections/profiles-sheet'
-import { BookmarkSimple, Check, PencilSimple, GearSix } from '@phosphor-icons/react'
+import { BookmarkSimple, Check, PencilSimple, GearSix, Lock, LockOpen } from '@phosphor-icons/react'
 
 const toast = createToast('connections')
 
@@ -21,6 +21,10 @@ const toast = createToast('connections')
  * Profiles are connection profiles: a saved (provider, model)
  * pair. Picking one swaps the model for the NEXT generation — switching
  * mid-RP never touches chat content.
+ *
+ * The preset and persona are the current ones everywhere unless this chat
+ * (or, for the persona, its character) is locked; picking one while locked
+ * moves the lock. A lock shows on the trigger.
  */
 /** cmdk renders every item it's given — with years of presets/personas that's
  *  thousands of DOM nodes. Cap each group and tell the user to type. */
@@ -33,6 +37,16 @@ function GroupCapHint({ hidden }: { hidden: number }) {
   )
 }
 
+function LockItem({ value, label, on, onToggle }: { value: string; label: string; on: boolean; onToggle: () => void }) {
+  const Icon = on ? Lock : LockOpen
+  return (
+    <CommandItem value={value} onSelect={onToggle} aria-checked={on} role="menuitemcheckbox">
+      <Icon className={cn('size-3.5 shrink-0', on && 'text-primary')} aria-hidden="true" />
+      <span className="flex-1">{label}</span>
+    </CommandItem>
+  )
+}
+
 export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
   const chat = useApp((s) => s.chats.find((c) => c.id === chatId))
   const presets = useApp((s) => s.presets)
@@ -42,15 +56,21 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
   const model = useApp((s) => s.model)
   const setModel = useApp((s) => s.setModel)
   const addProfile = useApp((s) => s.addConnectionProfile)
-  const updateChat = useApp((s) => s.updateChat)
+  const pickPreset = useApp((s) => s.usePreset)
+  const pickPersona = useApp((s) => s.usePersona)
+  const lockChatPreset = useApp((s) => s.lockChatPreset)
+  const lockChatPersona = useApp((s) => s.lockChatPersona)
+  const owner = useApp((s) => s.characters.find((c) => c.id === chat?.characterId))
   const focusPreset = useApp((s) => s.focusPreset)
   const focusPersona = useApp((s) => s.focusPersona)
   const [open, setOpen] = useState(false)
   const [manageOpen, setManageOpen] = useState(false)
   if (!chat) return null
 
-  const preset = presets.find((p) => p.id === chat.presetId) ?? presets.find((p) => p.isDefault)
-  const persona = personas.find((p) => p.id === chat.personaId) ?? personas.find((p) => p.isDefault)
+  const preset = presets.find((p) => p.id === chatPresetId({ presets }, chat))
+  const personaLock = chatPersonaLock({ personas }, chat)
+  const persona = personas.find((p) => p.id === personaLock.id)
+  const locked = chat.presetLocked || personaLock.kind !== null
   // resolve through the catalog so qualified refs AND legacy bare names agree
   const current = model ? (models.find((m) => m.ref === model) ?? models.find((m) => m.id === model) ?? null) : null
   const activeProfile = current
@@ -79,7 +99,7 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
             'flex h-8 min-w-0 items-center gap-1.5 rounded-md border border-border bg-card/60 px-2 text-[11px] text-muted-foreground',
             'hover:bg-accent hover:text-foreground',
           )}
-          aria-label={`Switch: preset ${preset?.name ?? 'none'}, persona ${persona?.name ?? 'none'}, profile ${activeProfile?.name ?? (current ? shortModel(current.id) : model) ?? 'none'}`}
+          aria-label={`Switch: preset ${preset?.name ?? 'none'}${chat.presetLocked ? ' (locked)' : ''}, persona ${persona?.name ?? 'none'}${personaLock.kind ? ' (locked)' : ''}, profile ${activeProfile?.name ?? (current ? shortModel(current.id) : model) ?? 'none'}`}
         >
           {/* mobile: just the icon; desktop: the live preset rides along */}
           <svg viewBox="0 0 20 20" className="size-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
@@ -91,6 +111,7 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
             <span className="shrink-0 font-medium">Preset:</span>
             <span className="max-w-36 truncate">{preset?.name ?? '—'}</span>
           </span>
+          {locked && <Lock className="size-3 shrink-0 text-primary" aria-hidden="true" />}
         </PopoverTrigger>
         <PopoverContent align="end" className="w-72 p-0">
           <Command>
@@ -100,12 +121,13 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
 
               <CommandGroup heading={`Preset: ${preset?.name ?? 'none'}`}>
                 {presets.slice(0, GROUP_CAP).map((p) => (
-                  <CommandItem key={p.id} value={`preset ${p.name}`} onSelect={() => updateChat(chatId, { presetId: p.id })}>
+                  <CommandItem key={p.id} value={`preset ${p.name}`} onSelect={() => pickPreset(p.id)}>
                     <Check className={cn('size-3.5 shrink-0', p.id === preset?.id ? 'opacity-100' : 'opacity-0')} aria-hidden="true" />
                     <span className="min-w-0 flex-1 truncate">{p.name}</span>
                   </CommandItem>
                 ))}
                 {presets.length > GROUP_CAP && <GroupCapHint hidden={presets.length - GROUP_CAP} />}
+                <LockItem value="lock preset to chat" label="Lock to this chat" on={chat.presetLocked} onToggle={() => lockChatPreset(chatId, !chat.presetLocked)} />
                 <CommandItem value="edit preset" onSelect={() => { if (preset) focusPreset(preset.id) }}>
                   <PencilSimple className="size-3.5 shrink-0" aria-hidden="true" />
                   <span className="flex-1">Edit preset…</span>
@@ -114,12 +136,16 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
 
               <CommandGroup heading={`Persona: ${persona?.name ?? 'none'}`}>
                 {personas.slice(0, GROUP_CAP).map((p) => (
-                  <CommandItem key={p.id} value={`persona ${p.name}`} onSelect={() => updateChat(chatId, { personaId: p.id })}>
+                  <CommandItem key={p.id} value={`persona ${p.name}`} onSelect={() => pickPersona(p.id)}>
                     <Check className={cn('size-3.5 shrink-0', p.id === persona?.id ? 'opacity-100' : 'opacity-0')} aria-hidden="true" />
                     <span className="min-w-0 flex-1 truncate">{p.name}</span>
                   </CommandItem>
                 ))}
                 {personas.length > GROUP_CAP && <GroupCapHint hidden={personas.length - GROUP_CAP} />}
+                <LockItem value="lock persona to chat" label="Lock to this chat" on={personaLock.kind === 'chat'} onToggle={() => lockChatPersona(chatId, personaLock.kind === 'chat' ? null : 'chat')} />
+                {owner && (
+                  <LockItem value="lock persona to character" label={`Lock to ${owner.name}`} on={personaLock.kind === 'character'} onToggle={() => lockChatPersona(chatId, personaLock.kind === 'character' ? null : 'character')} />
+                )}
                 <CommandItem value="edit personas" onSelect={() => { if (persona) focusPersona(persona.id) }}>
                   <PencilSimple className="size-3.5 shrink-0" aria-hidden="true" />
                   <span className="flex-1">Edit personas…</span>

@@ -20,7 +20,7 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { estimateTokens, formatCost, knownCost } from '@/lib/tokens'
 import { fileToRawDataUrl, fetchWIStatus, type WIStatus } from '@/lib/engine'
-import { useApp, useChat, useCharacter } from '@/lib/store'
+import { useApp, useChat, useCharacter, chatPresetId } from '@/lib/store'
 import { speakText, voiceFor } from '@/lib/tts'
 import { ChatLorebooks } from './chat-lorebooks'
 import { ChatQuickSwitch } from '@/components/chat/chat-quick-bar'
@@ -117,7 +117,7 @@ export function ChatView() {
   const presets = useApp((s) => s.presets)
   useEffect(() => {
     if (!chat || !character) return
-    const preset = presets.find((p) => p.id === chat.presetId)
+    const preset = presets.find((p) => p.id === chatPresetId({ presets }, chat))
     for (const owner of [{ scope: 'character', id: character.id, name: character.name }, ...(preset ? [{ scope: 'preset', id: preset.id, name: preset.name }] : [])]) {
       const key = `${owner.scope}:${owner.id}`
       if (embeddedNotices.has(key)) continue
@@ -490,7 +490,7 @@ export function ChatView() {
   // memory cutoff: walk from newest message backwards, accumulate token estimate against the preset's context size
   const cutoffIndex = useMemo(() => {
     if (!chat) return -1
-    const preset = presets.find((p) => p.id === chat.presetId) ?? presets.find((p) => p.isDefault) ?? presets[0]
+    const preset = presets.find((p) => p.id === chatPresetId({ presets }, chat)) ?? presets[0]
     const budget = (preset?.samplers.contextSize ?? 8192) - (preset?.samplers.maxTokens ?? 512) - 800 // reserve for system/response
     let used = 0
     // messages above the summary cutoff already left the prompt; the summary
