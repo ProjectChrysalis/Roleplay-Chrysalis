@@ -109,7 +109,7 @@ export function PresetsView() {
       const r = await importPreset(json, name, preset, enableEmbeddedRegex)
       setSelectedId(r.preset.id)
       setPendingImport(null)
-      toast.success(`Imported ${r.preset.name}`, { description: r.scripts ? `${r.scripts} regex scripts, ${enableEmbeddedRegex ? 'enabled unless disabled in the file' : 'off until enabled in Regex'}` : undefined })
+      toast.success(`${r.replaced ? 'Updated' : 'Imported'} ${r.preset.name}`, { description: r.scripts ? `${r.scripts} new regex scripts, ${enableEmbeddedRegex ? 'enabled unless disabled in the file' : 'off until enabled in Regex'}` : undefined })
       setDetailOpen(true)
     } catch (e) { toast.error(String((e as Error).message ?? e)) }
     finally { setImportBusy(false) }

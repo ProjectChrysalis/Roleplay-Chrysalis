@@ -399,7 +399,7 @@ function STImportSection() {
     for (const file of Array.from(files)) {
       try {
         const r = await importPreset(JSON.parse(await file.text()), file.name.replace(/\.json$/i, ""))
-        toast.success(`Preset imported: ${r.preset.name} (${r.preset.sections.length} prompts${r.scripts ? `, ${r.scripts} regex scripts` : ""})`)
+        toast.success(`Preset ${r.replaced ? "updated" : "imported"}: ${r.preset.name} (${r.preset.sections.length} prompts${r.scripts ? `, ${r.scripts} new regex scripts` : ""})`)
       } catch (e) { toast.error(`${file.name}: ${(e as Error).message ?? "invalid JSON"}`) }
     }
   }

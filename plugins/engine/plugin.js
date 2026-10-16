@@ -526,17 +526,36 @@ function regexScopeRank(s) {
   return 2;
 }
 
-function loadRegexScripts(fsx) {
+/** The scripts that can run in this chat. A library holds thousands, most
+ *  bound to some other preset, card or chat; a cheap look at the raw file
+ *  skips those before they are parsed. The same chat asks again for every
+ *  message a call saves, so a call keeps its answer. */
+let regexScriptsFor = null;
+function loadRegexScripts(fsx, meta, members) {
+  const presetId = (meta && meta.presetId) || "default";
+  const targets = new Set([meta && meta.id, meta && meta.characterId, ...(members || []).map((x) => x && x.id), presetId].filter(Boolean));
+  const key = [...targets].join("|");
+  if (regexScriptsFor && regexScriptsFor.key === key) return regexScriptsFor.scripts;
+  const elsewhere = (text) => {
+    const scope = /"scope"\s*:\s*"(chat|character|preset)"/.exec(text);
+    if (!scope) return false;
+    const target = /"scopeTargetId"\s*:\s*"([^"\\]*)"/.exec(text);
+    return !target || !targets.has(target[1]);
+  };
   let scripts = [];
-  try {
-    scripts = fsx.list("regex").filter((f) => f.endsWith(".json"))
-      .map((f) => { try { return JSON.parse(fsx.read("regex/" + f)); } catch { return null; } })
-      .filter(Boolean);
-  } catch {}
-  return scripts.sort((a, b) =>
+  let files = [];
+  try { files = fsx.list("regex").filter((f) => f.endsWith(".json")); } catch {}
+  const texts = readFiles(fsx, files.map((f) => "regex/" + f));
+  for (const text of texts) {
+    if (text == null || (meta && elsewhere(text))) continue;
+    try { const script = JSON.parse(text); if (script) scripts.push(script); } catch { /* unreadable script */ }
+  }
+  scripts = scripts.sort((a, b) =>
     regexScopeRank(a) - regexScopeRank(b) ||
     ((a.order ?? 0) - (b.order ?? 0)) ||
     String(a.scriptName ?? "").localeCompare(String(b.scriptName ?? "")));
+  regexScriptsFor = meta ? { key, scripts } : null;
+  return scripts;
 }
 
 /** One script over one string — the studio replace semantics: {{match}} is
@@ -673,7 +692,7 @@ function cardGreetings(fsx, meta, charId, card) {
  *  reply, a greeting, reasoning): the scripts with neither "only" flag. */
 function regexOnSave(fsx, meta, members, text, placement, mc) {
   if (!text) return text;
-  return runRegexScripts(loadRegexScripts(fsx), meta, members, text, [placement], null, mc, "store");
+  return runRegexScripts(loadRegexScripts(fsx, meta, members), meta, members, text, [placement], null, mc, "store");
 }
 
 // ---------- data bank (chunked documents, term-scored retrieval) ----------
@@ -791,6 +810,35 @@ function saveWiVectors(fsx, map) {
 }
 function wiVectorKey(book, entry, i) { return (book.id || book.name) + "#" + (entry.uid ?? i); }
 
+/** The books in a chat's scope, read by id. A scope may still name a book
+ *  by its name, and only then is the whole folder read to find it. Books
+ *  come back in file name order. */
+function loadBoundBooks(fsx, bound) {
+  const books = new Map();
+  const unresolved = new Set();
+  for (const key of bound) {
+    if (typeof key !== "string" || !key) continue;
+    if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(key)) {
+      try {
+        const book = JSON.parse(fsx.read("lorebooks/" + key + ".json"));
+        if (book && (book.id || book.name) === key) { books.set(key + ".json", book); continue; }
+      } catch { /* not stored under its id */ }
+    }
+    unresolved.add(key);
+  }
+  if (unresolved.size) {
+    let files = [];
+    try { files = fsx.list("lorebooks").filter((f) => f.endsWith(".json") && !books.has(f)); } catch {}
+    for (const f of files) {
+      try {
+        const book = JSON.parse(fsx.read("lorebooks/" + f));
+        if (book && unresolved.has(book.id || book.name)) books.set(f, book);
+      } catch { /* unreadable book */ }
+    }
+  }
+  return [...books.keys()].sort().map((f) => books.get(f));
+}
+
 /** Semantic prep shared by send/peek: the bound books' vectorized entries
  *  that lack a cached vector. Returns null when there are none, and no
  *  embedding pass is paid for. */
@@ -798,14 +846,8 @@ function semanticEmbedWork(fsx, meta, extraBookIds) {
   const vecMap = loadWiVectors(fsx);
   const needed = [];
   const bound = new Set([...(meta.lorebookIds || []), ...(meta.chatLorebookIds || []), ...(extraBookIds || [])]);
-  let books = [];
-  try {
-    books = fsx.list("lorebooks").filter((f) => f.endsWith(".json"))
-      .map((f) => { try { return JSON.parse(fsx.read("lorebooks/" + f)); } catch { return null; } })
-      .filter(Boolean);
-  } catch { books = []; }
+  const books = loadBoundBooks(fsx, bound);
   for (const book of books) {
-    if (!bound.has(book.id || book.name)) continue;
     (book.entries || []).forEach((entry, i) => {
       if (entry.enabled === false) return;
       const isVec = entry.vectorized === true || entry.status === "vectorized";
@@ -1063,20 +1105,12 @@ function activateWorldInfo(fsx, meta, dialogue, extraBookIds, budgetChars, opts)
   const wiVecMap = scanVec ? loadWiVectors(fsx) : null;
   const cfg = options.config && typeof options.config === "object" ? options.config : {};
   let budget = budgetChars && budgetChars > 0 ? budgetChars : 8192;
-  let books = [];
-  try {
-    books = fsx.list("lorebooks").filter((f) => f.endsWith(".json"))
-      .map((f) => { try { return JSON.parse(fsx.read("lorebooks/" + f)); } catch { return null; } })
-      .filter(Boolean);
-  } catch {
-    return { before: [], after: [], depth: [], trace: [], skipped: [], used: 0, budgetChars: budget };
-  }
   // A book scans only when it is in THIS chat's scope — bound
   // to the chat, embedded in / linked to the character, or global (the app
   // resolves all three into meta.lorebookIds before each send). An empty
   // scope means NO world info, never "scan the whole library".
   const bound = new Set([...(meta.lorebookIds || []), ...(meta.chatLorebookIds || []), ...(extraBookIds || [])]);
-  books = books.filter((b) => bound.has(b.id || b.name));
+  const books = loadBoundBooks(fsx, bound);
   // budget knobs live on the books: contextPercent rescales the caller's
   // budget (which is the 25% figure), budgetCap is an absolute ceiling —
   // bound books asking for more win, the cap always clamps
@@ -1310,6 +1344,7 @@ function loadChat(fsx, id) {
 }
 function saveChat(fsx, id, meta, msgs) {
   meta.updatedAt = Date.now();
+  meta.listing = chatListing(msgs);
   fsx.write("chats/" + id + ".jsonl", msgs.map((m) => JSON.stringify(m)).join("\n") + (msgs.length ? "\n" : ""));
   fsx.write("chats/" + id + ".meta.json", JSON.stringify(meta, null, 2) + "\n");
   saveGlobalVars(fsx);
@@ -1424,18 +1459,39 @@ function chatMembers(fsx, meta) {
  * msgs = messages BEFORE the reply being generated (already includes any
  * pending user message the caller staged). speaker = the member replying.
  */
-/** The preset the user marked as default; the stock file when none is. */
+/** The preset the user marked as default; the stock file when none is.
+ *  Presets run to hundreds of kilobytes and a library holds hundreds, so
+ *  presets/_default.json names the last one found (null: none is marked)
+ *  and how many presets there were. A named one is checked against its
+ *  preset before it is trusted, "none" only while the count holds, and
+ *  saving a preset as the default rewrites it. */
+let defaultPresetFound = null;
+const DEFAULT_PRESET_HINT = "presets/_default.json";
+function isDefaultPreset(text) {
+  if (!text.includes('"isDefault"')) return false;
+  const cand = JSON.parse(text);
+  return !!(cand && cand.studio && cand.studio.isDefault === true);
+}
 function defaultPresetId(fsx) {
-  try {
-    for (const f of fsx.list("presets")) {
-      if (!f.endsWith(".json")) continue;
-      try {
-        const cand = JSON.parse(fsx.read("presets/" + f));
-        if (cand && cand.studio && cand.studio.isDefault === true) return f.slice(0, -5);
-      } catch {}
-    }
-  } catch {}
-  return "default";
+  if (defaultPresetFound) return defaultPresetFound;
+  let names = [];
+  try { names = fsx.list("presets").filter((f) => f.endsWith(".json") && !f.startsWith("_")); } catch {}
+  let hint = {};
+  try { hint = JSON.parse(fsx.read(DEFAULT_PRESET_HINT)) || {}; } catch {}
+  const hinted = hint.id;
+  if (hinted === null && hint.files === names.length) return (defaultPresetFound = "default");
+  if (typeof hinted === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(hinted)) {
+    try { if (isDefaultPreset(fsx.read("presets/" + hinted + ".json"))) return (defaultPresetFound = hinted); } catch {}
+  }
+  let found = null;
+  for (const f of names) {
+    try { if (isDefaultPreset(fsx.read("presets/" + f))) { found = f.slice(0, -5); break; } } catch {}
+  }
+  rememberDefaultPreset(fsx, found, names.length);
+  return (defaultPresetFound = found || "default");
+}
+function rememberDefaultPreset(fsx, id, files) {
+  try { fsx.write(DEFAULT_PRESET_HINT, JSON.stringify({ id, files }) + "\n"); } catch {}
 }
 
 function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
@@ -1547,7 +1603,7 @@ function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   // regex scripts — shared machinery (scope/placement/depth gates, studio
   // replace semantics); imported patterns are length-capped there so a bad
   // regex costs a hiccup, not a hang
-  const scripts = loadRegexScripts(fsx);
+  const scripts = loadRegexScripts(fsx, meta, members);
   // only prompt-stage scripts run here: stored rewrites are already baked
   // into the saved text, and preset sections are never regexed
   const rx = (text, placement, depth) => runRegexScripts(scripts, meta, members, text, [placement], depth, mc, "prompt");
@@ -2412,7 +2468,7 @@ export function onAppUpdate(ctx, host) {
   }
   if (olderThan(from, "4.18.2")) {
     let files = [];
-    try { files = fsx.list("presets").filter((f) => f.endsWith(".json")); } catch { files = []; }
+    try { files = fsx.list("presets").filter((f) => f.endsWith(".json") && !f.startsWith("_")); } catch { files = []; }
     for (const f of files) {
       const out = allTriggersWhereNormalOnly(readJsonFile(fsx, "presets/" + f));
       if (!out) continue;
@@ -2599,13 +2655,75 @@ function searchChatLibrary(fsx, options) {
   return { total, offset, limit, results, errors };
 }
 
+/** Files as text, null for one that cannot be read: one call to the host on
+ *  engines that read many at once, one per file on older ones. */
+function readFiles(fsx, rels) {
+  if (typeof fsx.readMany === "function") return fsx.readMany(rels);
+  return rels.map((rel) => { try { return fsx.read(rel); } catch { return null; } });
+}
+
+// ---------- paged reads ----------
+// A route call runs on a fixed clock and heap. A library of thousands of
+// cards and books read in one call ran out of both, so the collections load
+// in pages: `?offset=N` reads files from the Nth (in name order) until about
+// PAGE_BYTES of JSON were read, and answers `next` (null after the last) and
+// `total`. `&end=M` stops before the Mth file, so a client can read several
+// ranges of one collection side by side.
+const PAGE_BYTES = 2 * 1024 * 1024;
+function pageOf(query, budget) {
+  if (!query || query.offset == null) return null;
+  const end = query.end == null ? Infinity : Math.max(0, Math.floor(Number(query.end) || 0));
+  return { offset: Math.max(0, Math.floor(Number(query.offset) || 0)), end, budget: budget || PAGE_BYTES };
+}
+/** `read(name, text)` → {item, bytes} or null, given the text of
+ *  `pathOf(name)`. At least one file per page; files are read a few dozen
+ *  at a time. */
+function readPage(fsx, names, page, pathOf, read) {
+  const items = [];
+  const end = Math.min(names.length, page.end);
+  let bytes = 0;
+  let at = page.offset;
+  while (at < end && (at === page.offset || bytes < page.budget)) {
+    const chunk = names.slice(at, Math.min(end, at + 32));
+    const texts = readFiles(fsx, chunk.map(pathOf));
+    for (let i = 0; i < chunk.length && (at === page.offset || bytes < page.budget); i++) {
+      const got = texts[i] == null ? null : read(chunk[i], texts[i]);
+      at++;
+      if (got) { items.push(got.item); bytes += got.bytes; }
+    }
+  }
+  return { items, next: at < end ? at : null, total: names.length };
+}
+/** What a chat list shows without its transcript, kept in the chat's meta
+ *  by every save so the list never reads thousands of transcripts. */
+function chatListing(msgs) {
+  const last = msgs.length ? msgs[msgs.length - 1] : null;
+  return { messageCount: msgs.length, preview: last ? String(last.text || "").slice(0, 160) : "", hasUser: msgs.some((m) => m && m.role === "user") };
+}
+
+/** The host as guest objects whose functions call the host's without a
+ *  receiver. On engines that hand the plugin host objects directly, each
+ *  method call (host.fs.read(...)) serialized its object again: about a
+ *  millisecond a call, which a route reading thousands of files paid in full. */
+function ownHost(v, depth = 0) {
+  if (typeof v === "function") return (...args) => v(...args);
+  if (v === null || typeof v !== "object" || depth > 6) return v;
+  if (Array.isArray(v)) return v.map((x) => ownHost(x, depth + 1));
+  const o = {};
+  for (const k of Object.keys(v)) o[k] = ownHost(v[k], depth + 1);
+  return o;
+}
+
 export function handleRoute(req, host) {
+  host = ownHost(host);
   hostRegex = host.regex && typeof host.regex.matches === "function" ? host.regex : null;
   const fsx = host.fs;
   // a host that keeps the module loaded between calls must not hand one
   // call's shared variables to the next
   sharedVars = null;
   sharedVarsSaved = "";
+  defaultPresetFound = null;
+  regexScriptsFor = null;
   const seg = req.path.split("?")[0].split("/").filter(Boolean);
   const head = seg[0];
   const id = seg[1];
@@ -2629,8 +2747,17 @@ export function handleRoute(req, host) {
   // sub-calls run in this same context and return the exact shapes the
   // individual routes do, so there is no second definition to keep in sync.
   if (head === "bootstrap" && !id && req.method === "GET") {
-    const sub = (p) => handleRoute({ method: "GET", path: p, body: null }, host).json;
-    const metas = sub("/chats").chats ?? [];
+    // ?paged=1: each collection comes as its first page and `more` says where
+    // the rest starts and how many files there are; the client reads those
+    // pages from the routes below
+    const paged = req.query && req.query.paged === "1";
+    const more = {};
+    const sub = (p, key) => {
+      const r = handleRoute({ method: "GET", path: p, body: null, query: paged && key ? { offset: "0", budget: String(PAGE_BYTES / 4) } : {} }, host).json;
+      if (paged && key && r && r.next != null) more[key] = { next: r.next, total: r.total };
+      return r;
+    };
+    const metas = sub("/chats", "chats").chats ?? [];
     const wanted = req.query && req.query.chat ? String(req.query.chat) : "";
     let activeChat = null;
     if (wanted) {
@@ -2638,24 +2765,24 @@ export function handleRoute(req, host) {
       if (full && full.meta) activeChat = { meta: full.meta, messages: full.messages ?? [] };
     }
     return ok({
-      characters: sub("/characters").characters ?? [],
-      groups: sub("/groups").items ?? [],
-      personas: sub("/personas").items ?? [],
-      presets: sub("/presets").items ?? [],
-      lorebooks: sub("/lorebooks").items ?? [],
-      regex: sub("/regex").items ?? [],
+      characters: sub("/characters", "characters").characters ?? [],
+      groups: sub("/groups", "groups").items ?? [],
+      personas: sub("/personas", "personas").items ?? [],
+      presets: sub("/presets", "presets").items ?? [],
+      lorebooks: sub("/lorebooks", "lorebooks").items ?? [],
+      regex: sub("/regex", "regex").items ?? [],
       settings: sub("/settings"),
       library: sub("/library"),
       databank: sub("/databank"),
       // Metas only. Inlining every transcript made this payload grow with
-      // every message ever written — a megabyte of JSON built inside a 64MB
-      // sandbox heap on every single app load. Each meta carries preview,
-      // messageCount and hasUser, so lists and the sweep need no transcript;
-      // the client pulls one chat at a time from /chats/:id.
+      // every message ever written. Each meta carries preview, messageCount
+      // and hasUser, so lists and the sweep need no transcript; the client
+      // pulls one chat at a time from /chats/:id.
       chats: metas,
       // …except the chat the client is about to show, which rides along so
-      // opening the app still costs ONE request and paints a full transcript.
+      // opening the app still paints a full transcript at once.
       activeChat,
+      ...(paged ? { more } : {}),
     });
   }
 
@@ -2665,20 +2792,24 @@ export function handleRoute(req, host) {
       let ids = [];
       try { ids = fsx.list("characters"); } catch {}
       ids = ids.filter((cid) => !cid.startsWith("_")); // _-prefixed = AI-only template
-      const out = [];
-      for (const cid of ids) {
-        const c = readJson("characters/" + cid + "/card.json", null);
-        if (c) {
-          let stored = c;
+      const pathOf = (cid) => "characters/" + cid + "/card.json";
+      const read = (cid, text) => {
+        let c;
+        try { c = JSON.parse(text); } catch { return null; }
+        if (!c || typeof c !== "object") return null;
+        let stored = c;
+        // inline images move to media files; only a card holding one can need it
+        if (text.includes('"data:')) {
           try {
             const migrated = storeMedia(c, fsx);
             if (JSON.stringify(migrated) !== JSON.stringify(c)) writeJson("characters/" + cid + "/card.json", migrated);
             stored = migrated;
           } catch { /* original card remains readable until migration can finish */ }
-          out.push({ ...stored, id: cid, name: c.name, avatar: stored.avatar || null, tags: c.tags || [], version: c.spec || "chara_card_v2" });
         }
-      }
-      return ok({ characters: out });
+        return { item: { ...stored, id: cid, name: c.name, avatar: stored.avatar || null, tags: c.tags || [], version: c.spec || "chara_card_v2" }, bytes: text.length };
+      };
+      const r = readPage(fsx, ids, pageOf(req.query, Number(req.query?.budget) || 0) || { offset: 0, end: Infinity, budget: Infinity }, pathOf, read);
+      return ok(req.query?.offset != null ? { characters: r.items, next: r.next, total: r.total } : { characters: r.items });
     }
     if (!id) return err(400, "character id required");
     if (req.method === "GET") {
@@ -2733,19 +2864,28 @@ export function handleRoute(req, host) {
   for (const kind of ["personas", "presets", "regex", "groups", "lorebooks"]) {
     if (head !== kind) continue;
     if (req.method === "GET" && !id) {
-      let items = [];
-      try {
-        items = fsx.list(kind).filter((f) => f.endsWith(".json") && !f.startsWith("_"))
-          .map((f) => readJson(kind + "/" + f, null)).filter(Boolean);
-      } catch {}
-      return ok({ items });
+      let names = [];
+      try { names = fsx.list(kind).filter((f) => f.endsWith(".json") && !f.startsWith("_")); } catch {}
+      const read = (f, text) => {
+        try {
+          const item = JSON.parse(text);
+          return item ? { item, bytes: text.length } : null;
+        } catch { return null; }
+      };
+      const r = readPage(fsx, names, pageOf(req.query, Number(req.query?.budget) || 0) || { offset: 0, end: Infinity, budget: Infinity }, (f) => kind + "/" + f, read);
+      return ok(req.query?.offset != null ? { items: r.items, next: r.next, total: r.total } : { items: r.items });
     }
     if (!id) return err(400, kind + " id required");
     if (req.method === "GET") {
       const v = readJson(kind + "/" + id + ".json", null);
       return v ? ok({ ...v, id }) : err(404, "not found");
     }
-    if (req.method === "PUT") { writeJson(kind + "/" + id + ".json", { ...body(), id }); return ok({ ok: true, id }); }
+    if (req.method === "PUT") {
+      const b = body();
+      writeJson(kind + "/" + id + ".json", { ...b, id });
+      if (kind === "presets" && b.studio && b.studio.isDefault === true) { rememberDefaultPreset(fsx, id, null); defaultPresetFound = id; }
+      return ok({ ok: true, id });
+    }
     // PATCH merges into what's on disk — no client read-modify-write, no lost
     // updates when two clients touch different fields of the same entity
     if (req.method === "PATCH") {
@@ -2955,7 +3095,7 @@ export function handleRoute(req, host) {
     } catch {}
     const presets = {};
     try {
-      for (const f of fsx.list("presets").filter((x) => x.endsWith(".json"))) {
+      for (const f of fsx.list("presets").filter((x) => x.endsWith(".json") && !x.startsWith("_"))) {
         const preset = readJson("presets/" + f, null);
         if (preset) {
           const copy = { ...preset, extensions: { ...preset.extensions } };
@@ -2999,7 +3139,7 @@ export function handleRoute(req, host) {
     } catch {}
     const presetNames = new Map();
     try {
-      for (const f of fsx.list("presets").filter((x) => x.endsWith(".json"))) {
+      for (const f of fsx.list("presets").filter((x) => x.endsWith(".json") && !x.startsWith("_"))) {
         const p = readJson("presets/" + f, null);
         if (p) presetNames.set(p.id || f.replace(/\.json$/, ""), p.name || f.replace(/\.json$/, ""));
       }
@@ -3315,28 +3455,42 @@ export function handleRoute(req, host) {
       try { return ok(searchChatLibrary(fsx, b)); } catch { return err(500, "Could not search chats"); }
     }
     if (req.method === "GET" && !id) {
-      let metas = [];
-      try {
-        metas = fsx.list("chats").filter((f) => f.endsWith(".meta.json"))
-          .map((f) => readJson("chats/" + f, null)).filter(Boolean)
-          .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
-      } catch {}
+      let names = [];
+      try { names = fsx.list("chats").filter((f) => f.endsWith(".meta.json")); } catch {}
       // list payload carries a preview + count so chat lists render without
       // fetching every transcript (the studio UI shows both per chat)
-      for (const m of metas) {
-        try {
-          const lines = fsx.read("chats/" + m.id + ".jsonl").split("\n").filter((l) => l.trim());
-          m.messageCount = lines.length;
-          const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
-          m.preview = last ? String(last.text || "").slice(0, 160) : "";
-          // the boot sweep deletes chats that were created and never went
-          // anywhere. It cannot read a transcript it did not load, so it needs
-          // to know here whether the user ever spoke. A raw substring test
-          // keeps this list cheap: these lines are engine-written JSON.
-          m.hasUser = lines.some((l) => l.includes('"role":"user"'));
-        } catch { m.messageCount = 0; m.preview = ""; m.hasUser = false; }
-      }
-      return ok({ chats: metas });
+      const read = (f, text) => {
+        let m;
+        try { m = JSON.parse(text); } catch { return null; }
+        if (!m || typeof m !== "object") return null;
+        let bytes = text.length;
+        const { listing, ...meta } = m;
+        // the boot sweep deletes chats that were created and never went
+        // anywhere, judging from these fields. A saved listing can only be
+        // older than the transcript, so one that says "empty" is checked
+        // against the transcript, which is at most a greeting long.
+        if (listing && typeof listing.messageCount === "number" && (listing.messageCount > 1 || listing.hasUser === true)) {
+          Object.assign(meta, { messageCount: listing.messageCount, preview: String(listing.preview || ""), hasUser: listing.hasUser === true });
+        } else {
+          try {
+            const transcript = fsx.read("chats/" + meta.id + ".jsonl");
+            bytes += transcript.length;
+            const lines = transcript.split("\n").filter((l) => l.trim());
+            meta.messageCount = lines.length;
+            const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
+            meta.preview = last ? String(last.text || "").slice(0, 160) : "";
+            // a raw substring test keeps this cheap: these lines are
+            // engine-written JSON
+            meta.hasUser = lines.some((l) => l.includes('"role":"user"'));
+            // remembered, so the next list skips this transcript
+            if (lines.length > 1) fsx.write("chats/" + f, JSON.stringify({ ...m, listing: { messageCount: meta.messageCount, preview: meta.preview, hasUser: meta.hasUser } }, null, 2) + "\n");
+          } catch { meta.messageCount = 0; meta.preview = ""; meta.hasUser = false; }
+        }
+        return { item: meta, bytes };
+      };
+      const newest = (a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0);
+      const r = readPage(fsx, names, pageOf(req.query, Number(req.query?.budget) || 0) || { offset: 0, end: Infinity, budget: Infinity }, (f) => "chats/" + f, read);
+      return ok(req.query?.offset != null ? { chats: r.items.sort(newest), next: r.next, total: r.total } : { chats: r.items.sort(newest) });
     }
 
     if (req.method === "POST" && !id) {
@@ -4314,7 +4468,7 @@ const toolX = (r) => ({
         // (the edit is an explicit user action — destructive by nature)
         const speaker = members.find((x) => x.id === msg.charId) || members[0] || null;
         const text = runRegexScripts(
-          loadRegexScripts(fsx), meta, members, b.text,
+          loadRegexScripts(fsx, meta, members), meta, members, b.text,
           [msg.role === "user" ? "user_input" : "ai_output"], null, saveMacros(fsx, meta, chat.msgs, speaker), "edit",
         );
         const swipes = msg.swipes && msg.swipes.length ? msg.swipes.slice() : [msg.text];

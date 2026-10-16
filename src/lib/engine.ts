@@ -261,10 +261,43 @@ export interface EngineBootstrap {
   activeChat: { meta: EngineChatMeta; messages: EngineMessage[] } | null
 }
 
+/** The collections bootstrap sends a page at a time, and the field each
+ *  page's route answers in. */
+const PAGED = {
+  characters: ['/characters', 'characters'], groups: ['/groups', 'items'], personas: ['/personas', 'items'],
+  presets: ['/presets', 'items'], lorebooks: ['/lorebooks', 'items'], regex: ['/regex', 'items'], chats: ['/chats', 'chats'],
+} as const
+type PagedKey = keyof typeof PAGED
+
 /** `chatId` asks for that chat's transcript inline — pass the one about to be
- *  shown so the first paint needs no follow-up fetch. */
-export function fetchBootstrap(chatId?: string | null): Promise<EngineBootstrap> {
-  return j<EngineBootstrap>(chatId ? `/bootstrap?chat=${encodeURIComponent(chatId)}` : '/bootstrap')
+ *  shown so the first paint needs no follow-up fetch. A library too big for
+ *  one plugin call comes in pages: bootstrap carries the first page of each
+ *  collection, `more` says where the rest starts. */
+export async function fetchBootstrap(chatId?: string | null): Promise<EngineBootstrap> {
+  const query = new URLSearchParams({ paged: '1' })
+  if (chatId) query.set('chat', chatId)
+  const boot = await j<EngineBootstrap & { more?: Partial<Record<PagedKey, { next: number; total: number }>> }>(`/bootstrap?${query}`)
+  // a big collection splits into ranges read side by side; each range keeps
+  // its place, so the collection comes back in the engine's order
+  const ranges: { key: PagedKey; from: number; end: number; items: unknown[] }[] = []
+  for (const [key, more] of Object.entries(boot.more ?? {}) as [PagedKey, { next: number; total: number }][]) {
+    const count = Math.max(1, Math.min(4, Math.ceil((more.total - more.next) / 300)))
+    const size = Math.ceil((more.total - more.next) / count)
+    for (let from = more.next; from < more.total; from += size) ranges.push({ key, from, end: Math.min(more.total, from + size), items: [] })
+  }
+  await Promise.all(ranges.map(async (range) => {
+    const [route, field] = PAGED[range.key]
+    for (let next: number | null | undefined = range.from; next != null;) {
+      const page: Record<string, unknown> & { next?: number | null } = await j(`${route}?offset=${next}&end=${range.end}`)
+      range.items.push(...((page[field] as unknown[] | undefined) ?? []))
+      next = page.next
+    }
+  }))
+  for (const range of ranges) (boot[range.key] as unknown[]).push(...range.items)
+  const updated = (m: EngineChatMeta) => m.updatedAt || m.createdAt || 0
+  boot.chats.sort((a, b) => updated(b) - updated(a))
+  delete boot.more
+  return boot
 }
 
 export async function fetchModels(): Promise<ModelInfo[]> {

@@ -5,7 +5,7 @@ import {
   archiveImportState, importArchiveBatches, listArchiveImports, removeArchiveImport,
   runArchiveImport, stopArchiveImport, uploadArchive, type ArchiveImportState, type ArchiveSummary,
 } from './engine'
-import { useApp } from './store'
+import { holdLiveHydrate, useApp } from './store'
 
 const toast = createToast('imports')
 
@@ -51,7 +51,11 @@ export function describeCounts(counts: Record<string, number> | undefined): stri
 // ── imports the engine is running, shared by every view ──
 let imports: ArchiveImportState[] = []
 const listeners = new Set<() => void>()
-const publish = (next: ArchiveImportState[]) => { imports = next; for (const l of listeners) l() }
+const publish = (next: ArchiveImportState[]) => {
+  imports = next
+  holdLiveHydrate(next.some((i) => i.running))
+  for (const l of listeners) l()
+}
 const upsert = (state: ArchiveImportState) => publish([state, ...imports.filter((i) => i.id !== state.id)])
 const drop = (id: string) => publish(imports.filter((i) => i.id !== id))
 
@@ -104,6 +108,8 @@ export function followArchiveImport(id: string): Promise<ArchiveSummary | null> 
       }
     } catch (error) {
       toast.dismiss(toastId)
+      // no longer followed, so nothing would release the held live updates
+      holdLiveHydrate(false)
       if (cancelled.has(id)) return null
       throw error
     } finally { following.delete(id) }

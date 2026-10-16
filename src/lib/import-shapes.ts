@@ -338,6 +338,14 @@ export function regexImport(json: unknown): Omit<RegexScript, 'id' | 'order'> | 
   }
 }
 
+/** What a script does, with its name: equal signatures rewrite the same
+ *  text the same way. Order, folder and the on/off switch are left out. */
+export function regexSignature(r: Omit<RegexScript, 'id' | 'order'>): string {
+  const p = r.placements
+  return JSON.stringify([r.name, r.find, r.flags, r.replace, r.trimStrings, [p.userInput, p.aiOutput, p.slash, p.wi, p.reasoning].map(Boolean),
+    r.markdownOnly, r.promptOnly, r.runOnEdit, r.minDepth ?? null, r.maxDepth ?? null, r.macroMode ?? 'none'])
+}
+
 export function regexExport(script: RegexScript): WireRegex {
   const placement: number[] = []
   if (script.placements.userInput) placement.push(1)

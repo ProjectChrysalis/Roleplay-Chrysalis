@@ -5,22 +5,44 @@
  */
 
 // ---------- PNG card extraction (own parser) ----------
-function b64ToBytes(b64) {
+const B64 = (() => {
+  const map = new Uint8Array(128);
   const table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let i = 0; i < 64; i++) map[table.charCodeAt(i)] = i;
+  return map;
+})();
+function b64ToBytes(b64) {
   const clean = String(b64).replace(/[^A-Za-z0-9+/]/g, "");
-  const out = [];
-  for (let i = 0; i < clean.length; i += 4) {
-    const n = (table.indexOf(clean[i]) << 18) | (table.indexOf(clean[i + 1]) << 12) | ((table.indexOf(clean[i + 2]) & 63) << 6) | ((table.indexOf(clean[i + 3]) & 63) & 63);
-    out.push((n >> 16) & 255);
-    if (clean[i + 2] && clean[i + 2] !== "=") out.push((n >> 8) & 255);
-    if (clean[i + 3] && clean[i + 3] !== "=") out.push(n & 255);
+  const out = new Uint8Array(Math.floor(clean.length * 3 / 4));
+  let o = 0, i = 0;
+  for (; i + 3 < clean.length; i += 4) {
+    const n = (B64[clean.charCodeAt(i)] << 18) | (B64[clean.charCodeAt(i + 1)] << 12) | (B64[clean.charCodeAt(i + 2)] << 6) | B64[clean.charCodeAt(i + 3)];
+    out[o++] = n >> 16; out[o++] = (n >> 8) & 255; out[o++] = n & 255;
   }
-  return out;
+  const rest = clean.length - i;
+  if (rest >= 2) {
+    const n = (B64[clean.charCodeAt(i)] << 18) | (B64[clean.charCodeAt(i + 1)] << 12) | (rest === 3 ? B64[clean.charCodeAt(i + 2)] << 6 : 0);
+    out[o++] = n >> 16;
+    if (rest === 3) out[o++] = (n >> 8) & 255;
+  }
+  return out.subarray(0, o);
 }
 function latin1(bytes) {
   let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
+  for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode.apply(null, bytes.subarray ? bytes.subarray(i, i + 8192) : bytes.slice(i, i + 8192));
   return s;
+}
+/** UTF-8 bytes as text. The native escape/decode pair is several times
+ *  faster than a decoder written in the sandbox; malformed bytes fall back
+ *  to the replacing decoder. */
+function utf8(bytes) {
+  try { return decodeURIComponent(escape(latin1(bytes))); } catch { return new TextDecoder().decode(bytes); }
+}
+/** A card's PNG text field: JSON as is, or base64 JSON. `decoded` is the
+ *  engine's own decode of it, when the engine sends one. */
+function cardText(payload, decoded) {
+  if (typeof decoded === "string") return decoded;
+  return payload.trimStart().startsWith("{") ? payload : utf8(b64ToBytes(payload));
 }
 function extractCardFromPng(bytes) {
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -48,8 +70,8 @@ function extractCardFromPng(bytes) {
             }
             const payload = latin1(data.slice(start));
             const text = type === "iTXt" && keyword === "ccv3" && payload.trimStart().startsWith("{")
-              ? new TextDecoder().decode(new Uint8Array(data.slice(start)))
-              : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)));
+              ? utf8(data.slice(start))
+              : utf8(b64ToBytes(payload));
             const card = JSON.parse(text);
             if (keyword === "ccv3") return card;
             if (!v2) v2 = card;
@@ -444,6 +466,20 @@ function normalizePreset(raw, fallbackName) {
     preset.prompt_order = [{ character_id: 100000, order: preset.prompts.map((p) => ({ identifier: p.identifier, enabled: true })) }];
   }
   return preset;
+}
+
+/** What a regex script does, with its name: two scripts with the same
+ *  signature rewrite the same text the same way. Order, folder and the
+ *  on/off switch are left out. */
+function regexSignature(s) {
+  return JSON.stringify([
+    String(s.scriptName ?? ""), String(s.findRegex ?? ""), String(s.flags ?? ""), String(s.replaceString ?? ""),
+    (Array.isArray(s.trimStrings) ? s.trimStrings : []).map(String),
+    (Array.isArray(s.placement) ? s.placement : []).map(String).sort(),
+    s.markdownOnly === true, s.promptOnly === true, s.runOnEdit === true,
+    typeof s.minDepth === "number" ? s.minDepth : null, typeof s.maxDepth === "number" ? s.maxDepth : null,
+    s.macroMode && s.macroMode !== "none" ? s.macroMode : "none",
+  ]);
 }
 
 // numeric placement of the portable regex format: 1 user input, 2 AI
@@ -909,7 +945,7 @@ function tavernRoute(req, host) {
         for (const key of ["ccv3", "chara"]) {
           const payload = decoded.metadata[key];
           if (!payload) continue;
-          try { card = JSON.parse(payload.trimStart().startsWith("{") ? payload : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)))); break; } catch { /* next metadata field */ }
+          try { card = JSON.parse(cardText(payload, decoded.text?.[key])); break; } catch { /* next metadata field */ }
         }
       } catch (e) { return { status: 502, json: { error: String(e.message || e) } }; }
     }
@@ -998,7 +1034,21 @@ function importEmbeddedBook(card, book, writeJson, uid, summary) {
   }
 }
 
+/** The host as guest objects whose functions call the host's without a
+ *  receiver. On engines that hand the plugin host objects directly, each
+ *  method call (host.fs.read(...)) serialized its object again: about a
+ *  millisecond a call, which a route reading thousands of files paid in full. */
+function ownHost(v, depth = 0) {
+  if (typeof v === "function") return (...args) => v(...args);
+  if (v === null || typeof v !== "object" || depth > 6) return v;
+  if (Array.isArray(v)) return v.map((x) => ownHost(x, depth + 1));
+  const o = {};
+  for (const k of Object.keys(v)) o[k] = ownHost(v[k], depth + 1);
+  return o;
+}
+
 export function handleRoute(req, host) {
+  host = ownHost(host);
   if (req.method !== "POST") return null;
   if (["/marketplace/search", "/marketplace/detail", "/marketplace/import"].includes(req.path) && req.body?.source === "tavern") return tavernRoute(req, host);
   if (["/marketplace/search", "/marketplace/detail", "/marketplace/import"].includes(req.path) && req.body?.source === "wyvern") return wyvernRoute(req, host);
@@ -1190,12 +1240,76 @@ export function handleRoute(req, host) {
   // already exists on disk — re-importing the same card must never silently
   // overwrite the earlier one (its gallery/edits would be lost).
   const taken = (rel) => { try { fsx.read(rel); return true; } catch { return false; } };
+  // One listing per folder per call: a library holding fifty scripts of one
+  // name made every new copy read fifty files to find a free id.
+  const listed = new Map();
+  const listedIn = (dir) => {
+    if (!listed.has(dir)) { let names = []; try { names = fsx.list(dir); } catch {} listed.set(dir, new Set(names)); }
+    return listed.get(dir);
+  };
   const uid = (base, dir) => {
     let id = base, n = 2;
-    const hit = (x) => used.has(x) || (dir && (taken(dir + "/" + x + "/card.json") || taken(dir + "/" + x + ".json") || taken(dir + "/" + x + ".meta.json")));
+    const hit = (x) => used.has(x) || (dir && (() => { const names = listedIn(dir); return names.has(x) || names.has(x + ".json") || names.has(x + ".meta.json"); })());
     while (hit(id)) id = base + "-" + n++;
     used.add(id);
     return id;
+  };
+
+  // Presets and cards carry the same script packs, and every import of one
+  // used to add another copy. A script that does what one on disk already
+  // does, everywhere or in the same place, is not written again.
+  let regexKnown = null;
+  const regexKey = (scope, target, script) => scope + "|" + (target || "") + "|" + regexSignature(script);
+  // An archive import indexes the library's scripts once; reading them all
+  // again in every batch grew with each card that brought scripts.
+  const regexIndex = /^[a-f0-9-]{36}$/.test(String(req.body?.importId || "")) && fsx.lookup ? req.body.importId + "_regex" : null;
+  const regexDuplicate = (scope, target, script) => {
+    if (regexIndex) {
+      if (!fsx.lookup(regexIndex, "indexed")) {
+        let files = [];
+        try { files = fsx.list("regex").filter((f) => f.endsWith(".json")); } catch {}
+        for (const f of files) {
+          const one = readJson("regex/" + f, null);
+          if (one) fsx.lookup(regexIndex, regexKey(one.scope || "global", one.scopeTargetId, one), 1);
+        }
+        fsx.lookup(regexIndex, "indexed", 1);
+      }
+      const key = regexKey(scope, target, script);
+      if (fsx.lookup(regexIndex, regexKey("global", null, script)) || fsx.lookup(regexIndex, key)) return true;
+      fsx.lookup(regexIndex, key, 1);
+      return false;
+    }
+    if (!regexKnown) {
+      regexKnown = new Set();
+      let files = [];
+      try { files = fsx.list("regex").filter((f) => f.endsWith(".json")); } catch {}
+      for (const f of files) {
+        const one = readJson("regex/" + f, null);
+        if (one) regexKnown.add(regexKey(one.scope || "global", one.scopeTargetId, one));
+      }
+    }
+    if (regexKnown.has(regexKey("global", null, script))) return true;
+    const key = regexKey(scope, target, script);
+    if (regexKnown.has(key)) return true;
+    regexKnown.add(key);
+    return false;
+  };
+  // A preset is known by its name: importing one named like a preset that
+  // was here before the import replaces it in place, the way a newer copy of
+  // it arrives. The app's own default preset is never replaced.
+  let presetIds = null;
+  const presetNamed = (name) => {
+    if (!presetIds) {
+      presetIds = new Map();
+      let files = [];
+      try { files = fsx.list("presets").filter((f) => f.endsWith(".json") && !f.startsWith("_")); } catch {}
+      for (const f of files) {
+        const id = f.slice(0, -5);
+        const one = id === "default" ? null : readJson("presets/" + f, null);
+        if (one && typeof one.name === "string" && !presetIds.has(lower(one.name))) presetIds.set(lower(one.name), id);
+      }
+    }
+    return presetIds.get(lower(name)) || null;
   };
 
   if (req.path === "/import/embedded-lorebook") {
@@ -1344,6 +1458,7 @@ export function handleRoute(req, host) {
     embedded.forEach((raw, i) => {
       const n = normalizeRegex(raw);
       if (!n) return;
+      if (regexDuplicate("character", id, n)) return;
       const rid = uid(slug(n.scriptName), "regex");
       writeJson("regex/" + rid + ".json", { ...n, id: rid, disabled: n.disabled || req.body?.enableEmbeddedRegex !== true, scope: "character", scopeTargetId: id, order: i });
       summary.regex.push(rid);
@@ -1458,14 +1573,18 @@ export function handleRoute(req, host) {
   };
   const writePreset = (n) => {
     if (!n) return;
-    const id = uid(slug(n.name || "preset"), "presets");
-    writeJson("presets/" + id + ".json", { ...n, id });
+    // a second preset of the same name in one import is its own preset
+    const existing = presetIdByName.get(lower(n.name)) ? null : presetNamed(n.name);
+    const id = existing || uid(slug(n.name || "preset"), "presets");
+    const kept = existing ? readJson("presets/" + id + ".json", {}) : {};
+    writeJson("presets/" + id + ".json", { ...n, ...(kept.folderId ? { folderId: kept.folderId } : {}), id });
+    presetIds.set(lower(n.name), id);
     presetIdByName.set(lower(n.name), id);
     summary.presets.push(id);
     const embedded = Array.isArray(n.extensions?.regex_scripts) ? n.extensions.regex_scripts : [];
     embedded.forEach((raw, order) => {
       const script = normalizeRegex(raw);
-      if (!script) return;
+      if (!script || regexDuplicate("preset", id, script)) return;
       const rid = uid(slug(script.scriptName), "regex");
       writeJson("regex/" + rid + ".json", { ...script, id: rid, disabled: script.disabled || req.body?.enableEmbeddedRegex !== true, scope: "preset", scopeTargetId: id, order });
       summary.regex.push(rid);
@@ -1473,11 +1592,13 @@ export function handleRoute(req, host) {
   };
   const writeRegex = (n) => {
     if (!n) return;
-    const id = uid(slug(n.scriptName), "regex");
     const { _studioScope: saved, ...script } = n;
     const scope = saved && ["global", "character", "preset", "chat"].includes(saved.scope) ? saved.scope : "global";
     const target = scope === "character" ? charIdByName().get(lower(saved.targetName))
       : scope === "preset" ? presetIdByName.get(lower(saved.targetName)) : null;
+    // a chat's script waits for its chat's new id, so it has no target to match yet
+    if (scope !== "chat" && regexDuplicate(scope, target, script)) return;
+    const id = uid(slug(n.scriptName), "regex");
     writeJson("regex/" + id + ".json", { ...script, id, scope, scopeTargetId: target || null, order: saved?.order ?? 0,
       ...(scope === "chat" && saved?.chatId ? { _restoreChatId: saved.chatId, _restoreImportId: importId } : {}) });
     summary.regex.push(id);
@@ -1486,8 +1607,17 @@ export function handleRoute(req, host) {
    *  carried one — the flat {name: description} map foreign tools write is
    *  all most backups have, and rebuilding from it alone is what dropped the
    *  avatar, title, pronouns, bound cards, linked books and default flag. */
+  /** Returns the persona's id. */
   const writePersona = (name, description, full) => {
-    if (!name) return;
+    if (!name) return null;
+    // the same persona imported again (name and description match one here)
+    // stays one persona; chats that name it link to the one already here
+    for (let n = 1, base = slug(name); n < 50; n++) {
+      const here = readJson("personas/" + (n === 1 ? base : base + "-" + n) + ".json", null);
+      if (!here) break;
+      const hereId = n === 1 ? base : base + "-" + n;
+      if (here.name === name && (here.description || "") === (description || "")) { personaIdByName.set(lower(name), hereId); return hereId; }
+    }
     const id = uid(slug(name), "personas");
     const rest = {};
     if (full && typeof full === "object") {
@@ -1511,6 +1641,7 @@ export function handleRoute(req, host) {
     writeJson("personas/" + id + ".json", { ...rest, id, name, description: description || "" });
     personaIdByName.set(lower(name), id);
     summary.personas.push(id);
+    return id;
   };
   /** `saved` is the chat's own meta when the backup carried one: everything
    *  ABOUT the conversation (its preset, persona, model, author's note,
@@ -1585,6 +1716,9 @@ export function handleRoute(req, host) {
       if (typeof latest === "number") meta.updatedAt = latest;
     }
     fsx.write("chats/" + id + ".jsonl", n.msgs.map((m) => JSON.stringify(m)).join("\n") + "\n");
+    // what the chat list shows, so it never has to read the transcript
+    const last = n.msgs[n.msgs.length - 1];
+    meta.listing = { messageCount: n.msgs.length, preview: last ? String(last.text || "").slice(0, 160) : "", hasUser: n.msgs.some((m) => m && m.role === "user") };
     writeJson("chats/" + id + ".meta.json", meta);
     if (Array.isArray(n.memories) && n.memories.length) {
       writeJson("chats/" + id + ".memories.json", n.memories);
@@ -1664,7 +1798,7 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex", "regex"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
@@ -1765,13 +1899,13 @@ export function handleRoute(req, host) {
                 .filter((c) => c && c.type === "character" && typeof c.id === "string")
                 .map((c) => charIdByName().get("file:" + lower(c.id.replace(/\.png$/i, ""))))
                 .filter(Boolean);
-              writePersona(String(pname || avatarKey), String(d.description || ""), {
+              const pid = writePersona(String(pname || avatarKey), String(d.description || ""), {
                 ...(bound.length ? { _boundIds: bound } : {}),
                 ...(typeof d.title === "string" && d.title ? { title: d.title } : {}),
                 ...(pu.default_persona === avatarKey ? { isDefault: true } : {}),
                 ...(typeof d.lorebook === "string" && d.lorebook ? { _lorebookNames: [d.lorebook] } : {}),
               });
-              personaIdByFile.set(lower(avatarKey), summary.personas[summary.personas.length - 1]);
+              if (pid) personaIdByFile.set(lower(avatarKey), pid);
             }
           } catch { summary.errors.push("personas failed: settings.json"); }
         }
@@ -1827,7 +1961,7 @@ export function handleRoute(req, host) {
             for (const key of ["ccv3", "chara"]) {
               const payload = image.metadata[key];
               if (!payload) continue;
-              try { rawCard = JSON.parse(payload.trimStart().startsWith("{") ? payload : new TextDecoder().decode(new Uint8Array(b64ToBytes(payload)))); break; } catch { /* try the next metadata field */ }
+              try { rawCard = JSON.parse(cardText(payload, image.text?.[key])); break; } catch { /* try the next metadata field */ }
             }
             const card = rawCard && normalizeCard(rawCard);
             if (card) { card.avatar = image.url; remember(writeCardWithBook(card, rawCard, null, image.url, true)); }

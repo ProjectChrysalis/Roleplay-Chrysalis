@@ -1,6 +1,6 @@
 
 import { useViewMemory } from '@/lib/view-memory'
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Plus, Trash, CaretRight, DotsThreeVertical, ToggleLeft, ToggleRight, UploadSimple, DownloadSimple, Flask, X } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from "@/components/ui/button"
@@ -165,9 +165,14 @@ export function RegexView() {
   const [pendingImport, setPendingImport] = useState<Omit<RegexScript, 'id' | 'order'>[]>([])
   const [query, setQuery] = useState('')
   const [openState, setOpenState] = useViewMemory<Record<string, boolean>>('regex.open', NO_OVERRIDES)
-  const targetName = (script: RegexScript) => script.scope === 'character' ? characters.find((c) => c.id === script.scopeTargetId)?.name
-    : script.scope === 'chat' ? chats.find((c) => c.id === script.scopeTargetId)?.title
-    : script.scope === 'preset' ? presets.find((p) => p.id === script.scopeTargetId)?.name : null
+  // by id: a large library holds thousands of scripts and cards, and a
+  // search through the cards for each script made every keystroke crawl
+  const names = useMemo(() => ({
+    character: new Map(characters.map((c) => [c.id, c.name])),
+    chat: new Map(chats.map((c) => [c.id, c.title])),
+    preset: new Map(presets.map((p) => [p.id, p.name])),
+  }), [characters, chats, presets])
+  const targetName = (script: RegexScript) => script.scope === 'global' ? null : names[script.scope].get(script.scopeTargetId ?? '')
 
   // what the open chat runs with: those owners sort first and start expanded
   const activeChat = chats.find((c) => c.id === activeChatId) ?? null

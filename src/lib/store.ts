@@ -35,7 +35,7 @@ import {
 } from './engine'
 import { MOBILE_BREAKPOINT } from '@/hooks/use-mobile'
 import { buildImagePrompt, generateImage, postPicture, type GeneratedImage } from './image-gen'
-import { presetImport, regexImport } from './import-shapes'
+import { presetImport, regexImport, regexSignature } from './import-shapes'
 
 const toast = createToast('chat')
 const shortcutsToast = createToast('shortcuts')
@@ -205,7 +205,7 @@ interface AppState {
   saveSceneEntry: (chatId: ID, entry: { title: string; keys: string[]; content: string }, bookId: ID | null) => Promise<ID>
   /** Import a portable preset file; regex scripts it carries become scripts
    *  bound to the new preset. `base` fills whatever the file leaves out. */
-  importPreset: (json: unknown, name: string, base?: Preset, enableEmbeddedRegex?: boolean) => Promise<{ preset: Preset; scripts: number }>
+  importPreset: (json: unknown, name: string, base?: Preset, enableEmbeddedRegex?: boolean) => Promise<{ preset: Preset; scripts: number; replaced: boolean }>
   /** Post a generated picture as the chat's last speaker (and keep it in
    *  that character's gallery when the setting says so). */
   postPicture: (chatId: ID, image: GeneratedImage) => Promise<void>
@@ -305,6 +305,20 @@ let mutateSeq = 0
 const bumpMutate = () => { mutateSeq++ }
 /** look_changed coalescing — bursts collapse into one trailing hydrate */
 let lookHydrateTimer: ReturnType<typeof setTimeout> | undefined
+/** While an archive import runs, its batches land every second or so; each
+ *  re-read the whole growing library and slowed the import it was showing.
+ *  Changes wait, and one hydrate follows the import. */
+let liveHydrateHeld = false
+let liveHydrateMissed = false
+export function holdLiveHydrate(held: boolean) {
+  if (liveHydrateHeld === held) return
+  liveHydrateHeld = held
+  if (!held && liveHydrateMissed) {
+    liveHydrateMissed = false
+    clearTimeout(lookHydrateTimer)
+    lookHydrateTimer = setTimeout(() => void useApp.getState().hydrate(), 250)
+  }
+}
 /** a dist build landed while the tab was hidden — reload once it's visible */
 let distReloadPending = false
 let distReloadArmed = false
@@ -732,6 +746,7 @@ export const useApp = create<AppState>()(
               }
               return
             }
+            if (liveHydrateHeld) { liveHydrateMissed = true; return }
             clearTimeout(lookHydrateTimer)
             lookHydrateTimer = setTimeout(() => void get().hydrate(), 250)
           }, (chatId, delta) => {
@@ -1402,22 +1417,32 @@ export const useApp = create<AppState>()(
       },
       importPreset: async (json, name, base, enableEmbeddedRegex = false) => {
         const fill = base ?? get().presets.find((p) => !p.readOnly) ?? get().presets[0]
-        const preset = fill ? presetImport(json, name, fill) : null
-        if (!preset) throw new Error('Not a recognizable preset file')
+        const imported = fill ? presetImport(json, name, fill) : null
+        if (!imported) throw new Error('Not a recognizable preset file')
+        // a preset named like one here replaces it in place, keeping its id,
+        // so chats and scripts bound to it stay bound; the default preset is
+        // never replaced
+        const same = get().presets.find((p) => p.id !== 'default' && !p.readOnly && p.name.toLowerCase() === imported.name.toLowerCase())
+        const preset = same ? { ...imported, id: same.id, isDefault: same.isDefault } : imported
         await j(`/presets/${encodeURIComponent(preset.id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(preset), id: preset.id }) })
         bumpMutate()
-        set((s) => ({ presets: [...s.presets, preset] }))
+        set((s) => ({ presets: same ? s.presets.map((p) => (p.id === same.id ? preset : p)) : [...s.presets, preset] }))
         const embedded = (json as { extensions?: { regex_scripts?: unknown[] } }).extensions?.regex_scripts
+        // a script already here, everywhere or on this preset, is not added again
+        const known = new Set(get().regexScripts
+          .filter((r) => r.scope === 'global' || (r.scope === 'preset' && r.scopeTargetId === preset.id))
+          .map((r) => regexSignature(r)))
         const scripts: RegexScript[] = []
         for (const item of Array.isArray(embedded) ? embedded : []) {
           const rx = regexImport(item)
-          if (!rx) continue
+          if (!rx || known.has(regexSignature(rx))) continue
+          known.add(regexSignature(rx))
           const script: RegexScript = { ...rx, enabled: enableEmbeddedRegex && rx.enabled, id: uid('rx'), scope: 'preset', scopeTargetId: preset.id, order: scripts.length }
           await j(`/regex/${encodeURIComponent(script.id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id: script.id }) })
           scripts.push(script)
         }
         if (scripts.length) set((s) => ({ regexScripts: [...s.regexScripts, ...scripts] }))
-        return { preset, scripts: scripts.length }
+        return { preset, scripts: scripts.length, replaced: !!same }
       },
       postPicture: async (chatId, image) => {
         const chat = get().chats.find((c) => c.id === chatId)

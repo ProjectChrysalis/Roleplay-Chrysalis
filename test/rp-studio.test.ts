@@ -218,6 +218,62 @@ describe("rp studio engine: bootstrap pages instead of shipping every transcript
     for (const c of r.json.chats as Record<string, unknown>[]) expect(c.messages).toBeUndefined();
   });
 
+  it("pages a library too big for one call", async () => {
+    seed();
+    fs.mkdirSync(path.join(root, "characters"), { recursive: true });
+    for (let i = 0; i < 40; i++) {
+      fs.mkdirSync(path.join(root, "characters", `card${String(i).padStart(2, "0")}`), { recursive: true });
+      fs.writeFileSync(path.join(root, "characters", `card${String(i).padStart(2, "0")}`, "card.json"), JSON.stringify({ name: `Card ${i}`, description: "x".repeat(40_000) }));
+    }
+    const boot = (await drive(engineUrl, { method: "GET", path: "/bootstrap?paged=1" }, mockHost())).json as { characters: { name: string }[]; more: Record<string, { next: number; total: number }> };
+    expect(boot.characters.length).toBeGreaterThan(0);
+    expect(boot.characters.length).toBeLessThan(40);
+    const names = boot.characters.map((c) => c.name);
+    const more = boot.more.characters!;
+    // two ranges read side by side, as the client does
+    const half = Math.ceil((more.next + more.total) / 2);
+    for (const [from, end] of [[more.next, half], [half, more.total]] as const) {
+      for (let next: number | null = from; next != null;) {
+        const page = (await drive(engineUrl, { method: "GET", path: `/characters?offset=${next}&end=${end}` }, mockHost())).json as { characters: { name: string }[]; next: number | null; total: number };
+        expect(page.total).toBe(more.total);
+        names.push(...page.characters.map((c) => c.name));
+        next = page.next;
+      }
+    }
+    const whole = (await drive(engineUrl, { method: "GET", path: "/bootstrap" }, mockHost())).json as { characters: { name: string }[]; more?: unknown };
+    expect(whole.more).toBeUndefined();
+    expect(whole.characters.length).toBeGreaterThan(40);
+    expect(names.sort()).toEqual(whole.characters.map((c) => c.name).sort());
+  });
+
+  it("reads many files in one host call when the engine offers it", async () => {
+    seed();
+    const plain = (await drive(engineUrl, { method: "GET", path: "/bootstrap" }, mockHost())).json;
+    const m = mockHost();
+    let calls = 0;
+    (m.host.fs as Record<string, unknown>).readMany = (rels: string[]) => { calls++; return rels.map((rel) => { try { return fs.readFileSync(path.resolve(root, rel), "utf8"); } catch { return null; } }); };
+    const batched = (await drive(engineUrl, { method: "GET", path: "/bootstrap" }, m)).json;
+    expect(calls).toBeGreaterThan(0);
+    for (const key of ["characters", "chats", "presets", "regex", "lorebooks", "personas"]) expect(batched[key]).toEqual(plain[key]);
+  });
+
+  it("a saved chat lists from its meta without the transcript", async () => {
+    seed();
+    const sent = await drive(engineUrl, { method: "POST", path: "/chats/c2/messages", body: { role: "user", text: "still here" } }, mockHost());
+    expect(sent.status).toBeLessThan(300);
+    const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", "c2.meta.json"), "utf8"));
+    expect(meta.listing).toMatchObject({ messageCount: 4, preview: "still here", hasUser: true });
+    // the list no longer opens a transcript it has a listing for
+    fs.writeFileSync(path.join(root, "chats", "c2.jsonl"), "");
+    const chats = (await drive(engineUrl, { method: "GET", path: "/chats" }, mockHost())).json.chats as Record<string, unknown>[];
+    expect(chats.find((c) => c.id === "c2")).toMatchObject({ messageCount: 4, preview: "still here", hasUser: true });
+    expect(chats.find((c) => c.id === "c2")!.listing).toBeUndefined();
+    // a listing that says "empty" is checked against the transcript: the sweep relies on it
+    writeChat("c3", [{ id: "u1", role: "user", text: "hi" }, { id: "u2", role: "char", text: "yo" }], { listing: { messageCount: 1, preview: "", hasUser: false } });
+    const again = (await drive(engineUrl, { method: "GET", path: "/chats" }, mockHost())).json.chats as Record<string, unknown>[];
+    expect(again.find((c) => c.id === "c3")).toMatchObject({ messageCount: 2, hasUser: true });
+  });
+
   it("totals the home screen needs are answerable from the metas alone", async () => {
     seed();
     const r = await drive(engineUrl, { method: "GET", path: "/bootstrap" }, mockHost());
@@ -1702,6 +1758,22 @@ describe("rp studio engine: world info scope", () => {
     expect(removed.json.fired as unknown[]).toHaveLength(0);
   });
 
+  it("a send reads only the books in the chat's scope", async () => {
+    shipTownBook();
+    for (let i = 0; i < 5; i++) shipBook(`other${i}`, [{ uid: 0, title: "Other", keys: [], content: "Not this one.", constant: true, enabled: true, order: 100, position: "before_char" }]);
+    const m = mockHost();
+    const reads: string[] = [];
+    const read = m.host.fs.read;
+    m.host.fs.read = (rel: string) => { reads.push(rel); return read(rel); };
+    const id = chatIdOf(await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m));
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}`, body: { chatLorebookIds: ["town"] } }, m);
+    reads.length = 0;
+    const peek = await drive(engineUrl, { method: "POST", path: "/prompt/preview", body: { chatId: id } }, m);
+    expect(JSON.stringify(peek.json.messages)).toContain("A cozy tavern.");
+    expect(JSON.stringify(peek.json.messages)).not.toContain("Not this one.");
+    expect(reads.filter((r) => r.startsWith("lorebooks/other"))).toEqual([]);
+  });
+
   it("entry status is the constant source of truth; the legacy boolean only counts when status is absent", async () => {
     shipBook("statusbook", [
       { uid: 0, title: "Status const", keys: [], content: "Status constant, no boolean.", status: "constant", enabled: true, order: 100, position: "before_char" },
@@ -2582,7 +2654,9 @@ describe("rp studio: export → import zip round-trip", () => {
     (m2.host as { zip: unknown }).zip = { entries: () => entries, list: () => Object.keys(entries).length };
     const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m2);
     expect(r.json.characters).toHaveLength(1);
-    expect(r.json.personas).toHaveLength(1);
+    // the same persona is already here, so it stays one persona
+    expect(r.json.personas).toHaveLength(0);
+    expect(fs.readdirSync(path.join(root, "personas")).filter((f) => f.endsWith(".json"))).toHaveLength(1);
     expect(r.json.chats).toHaveLength(1);
     expect(r.json.errors).toHaveLength(0);
   }, 30_000);
@@ -3587,16 +3661,37 @@ describe("card import choices and sources", () => {
     }
   });
   it("extracts ordered preset regex in both batch and archive imports", async () => {
-    const preset = { name: "With regex", prompts: [{ identifier: "main", name: "Main", content: "hello" }], extensions: { regex_scripts: [script, { ...script, scriptName: "Second" }] } };
-    for (const body of [{ presets: [preset], enableEmbeddedRegex: true }, { entries: { "presets/shared.json": JSON.stringify(preset) } }]) {
+    for (const [name, body] of [["With regex", { enableEmbeddedRegex: true }], ["With regex zip", null]] as const) {
+      const preset = { name, prompts: [{ identifier: "main", name: "Main", content: "hello" }], extensions: { regex_scripts: [script, { ...script, scriptName: "Second" }] } };
       const m = mockHost();
-      if ("entries" in body) (m.host as { zip: unknown }).zip = { entries: () => body.entries, list: () => 1 };
-      const r = await drive(stUrl, { method: "POST", path: "entries" in body ? "/import/zip" : "/import/batch", body }, m);
+      if (!body) (m.host as { zip: unknown }).zip = { entries: () => ({ "presets/shared.json": JSON.stringify(preset) }), list: () => 1 };
+      const r = await drive(stUrl, { method: "POST", path: body ? "/import/batch" : "/import/zip", body: body ? { presets: [preset], ...body } : {} }, m);
       expect(r.json.regex).toHaveLength(2);
       const scripts = (r.json.regex as string[]).map(readScript);
       expect(scripts.map((s) => s.order)).toEqual([0, 1]);
-      expect(scripts[0]).toMatchObject({ scope: "preset", scopeTargetId: (r.json.presets as string[])[0], disabled: !("enableEmbeddedRegex" in body), flags: "" });
+      expect(scripts[0]).toMatchObject({ scope: "preset", scopeTargetId: (r.json.presets as string[])[0], disabled: !body, flags: "" });
     }
+  });
+  it("a preset imported again replaces itself and brings no second copy of its scripts", async () => {
+    const preset = { name: "Again", temperature: 0.4, prompts: [{ identifier: "main", name: "Main", content: "v1" }], extensions: { regex_scripts: [{ ...script, scriptName: "Again one" }] } };
+    const first = await drive(stUrl, { method: "POST", path: "/import/batch", body: { presets: [preset] } }, mockHost());
+    expect(first.json.regex).toHaveLength(1);
+    const again = await drive(stUrl, { method: "POST", path: "/import/batch", body: { presets: [{ ...preset, temperature: 0.8 }] } }, mockHost());
+    expect(again.json.presets).toEqual(first.json.presets);
+    expect(again.json.regex).toHaveLength(0);
+    const id = (first.json.presets as string[])[0];
+    expect(JSON.parse(fs.readFileSync(path.join(root, "presets", id + ".json"), "utf8")).temperature).toBe(0.8);
+  });
+  it("skips a script the library already runs everywhere", async () => {
+    const shared = { ...script, scriptName: "Everywhere" };
+    const global = await drive(stUrl, { method: "POST", path: "/import/batch", body: { regex: [shared] } }, mockHost());
+    expect(global.json.regex).toHaveLength(1);
+    const repeat = await drive(stUrl, { method: "POST", path: "/import/batch", body: { regex: [shared, { ...shared, replaceString: "c" }] } }, mockHost());
+    expect(repeat.json.regex).toHaveLength(1);
+    const withCard = { ...card, data: { ...card.data, name: "Carries shared", extensions: { regex_scripts: [shared] } } };
+    const r = await drive(stUrl, { method: "POST", path: "/import/batch", body: { cards: [withCard], presets: [{ name: "Carries shared", prompts: [{ identifier: "main", name: "Main", content: "x" }], extensions: { regex_scripts: [shared] } }] } }, mockHost());
+    expect(r.json.characters).toHaveLength(1);
+    expect(r.json.regex).toHaveLength(0);
   });
   it("imports catalog JSON cards with their embedded content", async () => {
     const m = mockHost(undefined, (key, req) => {
