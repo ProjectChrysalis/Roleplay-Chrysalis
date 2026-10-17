@@ -226,7 +226,7 @@ export function ManageChatsDialog({
         if (!lines.length) { toast.error(`${file.name}: no messages found`); continue }
         const r = await j<{ chats: string[] }>("/import/batch", {
           method: "POST",
-          body: JSON.stringify({ chats: [{ character: character.name, file: file.name.replace(/\.jsonl$/i, ""), lines }] }),
+          body: JSON.stringify({ chats: [{ character: character.name, characterId: character.id, file: file.name.replace(/\.jsonl$/i, ""), lines }] }),
         })
         toast.success(`Imported to ${character.name} (${r.chats.length} new)`)
       } catch (e) { toast.error(`${file.name}: ${(e as Error).message ?? "could not parse JSONL"}`) }

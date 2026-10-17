@@ -467,7 +467,7 @@ function STImportSection() {
         if (!lines.length) { toast.error(`${file.name}: no messages found`); continue }
         const r = await j<{ chats: string[] }>("/import/batch", {
           method: "POST",
-          body: JSON.stringify({ chats: [{ character: char.name, file: file.name.replace(/\.jsonl$/i, ""), lines }] }),
+          body: JSON.stringify({ chats: [{ character: char.name, characterId: char.id, file: file.name.replace(/\.jsonl$/i, ""), lines }] }),
         })
         toast.success(`Chat imported to ${char.name} (${r.chats.length} new)`)
       } catch (e) { toast.error(`${file.name}: ${(e as Error).message ?? "could not parse JSONL"}`) }

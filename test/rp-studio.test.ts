@@ -1922,6 +1922,16 @@ describe("rp studio engine: world info scope", () => {
 });
 
 describe("rp studio import", () => {
+  it("batch: a chat goes to the character id it names, whatever the name says", async () => {
+    const m = mockHost();
+    const lines = [{ user_name: "You", character_name: "Someone Else" }, { name: "Someone Else", is_user: false, mes: "hello", send_date: "2024-01-01" }];
+    const r = await drive(stUrl, { method: "POST", path: "/import/batch", body: { chats: [{ character: "Someone Else", characterId: "aria", file: "x", lines }] } }, m);
+    const id = (r.json.chats as string[])[0]!;
+    expect(JSON.parse(fs.readFileSync(path.join(root, "chats", `${id}.meta.json`), "utf8")).characterId).toBe("aria");
+    const missing = await drive(stUrl, { method: "POST", path: "/import/batch", body: { chats: [{ character: "Aria", characterId: "gone", file: "y", lines }] } }, m);
+    const other = (missing.json.chats as string[])[0]!;
+    expect(JSON.parse(fs.readFileSync(path.join(root, "chats", `${other}.meta.json`), "utf8")).characterId).toBe("aria");
+  });
   it("batch: cards + worlds + presets + regex land in the app data", async () => {
     const m = mockHost();
     const r = await drive(stUrl, {

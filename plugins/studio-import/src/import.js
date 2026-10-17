@@ -767,8 +767,10 @@ export function handleRoute(req, host) {
       try {
         const n = normalizeChatLines(c);
         if (!n) continue;
-        // link to a character by name when one matches
-        writeChat(n, (c.character && charIdByName().get(lower(c.character))) || null);
+        // the caller's character id when it names one: matching the name
+        // reads every card in the library, too slow for a large one
+        const own = typeof c.characterId === "string" && /^[a-zA-Z0-9_-]+$/.test(c.characterId) && readJson("characters/" + c.characterId + "/card.json", null) ? c.characterId : null;
+        writeChat(n, own || (c.character && charIdByName().get(lower(c.character))) || null);
       } catch { summary.errors.push("chat failed"); }
     }
     return { status: 200, json: summary };
