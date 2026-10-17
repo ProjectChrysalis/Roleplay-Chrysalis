@@ -1675,8 +1675,15 @@ export const useApp = create<AppState>()(
         bumpMutate()
         if (p) {
           const copy = { ...p, id: newId, name: `${p.name} (copy)`, readOnly: false, isDefault: false, createdAt: Date.now() }
-          set((s) => ({ presets: [...s.presets, copy] }))
+          // the preset's own regex scripts belong to the copy too
+          const scripts = get().regexScripts
+            .filter((r) => r.scope === 'preset' && r.scopeTargetId === id)
+            .map((r) => ({ ...r, id: uid('rx'), scopeTargetId: newId }))
+          set((s) => ({ presets: [...s.presets, copy], regexScripts: [...s.regexScripts, ...scripts] }))
           writeThrough('presets', 'the new preset', j(`/presets/${encodeURIComponent(newId)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(copy), id: newId }) }))
+          for (const script of scripts) {
+            writeThrough('regex', 'regex script', j(`/regex/${encodeURIComponent(script.id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id: script.id }) }))
+          }
         }
         return newId
       },

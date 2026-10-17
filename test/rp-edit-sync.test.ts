@@ -11,6 +11,7 @@ const { useApp } = await import('../src/lib/store')
 const { cardToCharacter, characterToCard, enginePersonaToUI, enginePresetToUI, presetToEngine } = await import('../src/lib/engine')
 const { buildDefaultPreset, defaultSettings } = await import('../src/lib/seed')
 const { saves } = await import('../src/lib/save-queue')
+import type { RegexScript } from '../src/lib/types'
 const { engineMessageToUI, engineChatToUI } = await import('../src/lib/engine')
 useApp.persist.setOptions({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } })
 const originalFetch = globalThis.fetch
@@ -274,4 +275,23 @@ test('a preset saved without its studio sections is completed once, under its ow
   await useApp.getState().hydrate()
   await saves.settled()
   expect(puts).toEqual(['zeta'])
+})
+
+test('duplicating a preset copies its own regex scripts onto the copy', async () => {
+  const preset = { ...buildDefaultPreset(), id: 'source', name: 'Source', readOnly: false, isDefault: false }
+  const script: RegexScript = { id: 'rx_one', name: 'Tidy', scope: 'preset', scopeTargetId: 'source', find: 'a', replace: 'b', flags: 'g',
+    placements: { userInput: false, aiOutput: true, slash: false, wi: false, reasoning: false }, markdownOnly: true, promptOnly: false,
+    minDepth: null, maxDepth: null, trimStrings: [], runOnEdit: true, macroMode: 'none', enabled: true, order: 0 }
+  const global: RegexScript = { ...script, id: 'rx_global', scope: 'global', scopeTargetId: null }
+  useApp.setState({ presets: [preset], regexScripts: [script, global] })
+  const puts: string[] = []
+  globalThis.fetch = (async (input, init) => { if (init?.method === 'PUT') puts.push(new URL(String(input), 'http://x').pathname); return Response.json({ ok: true }) }) as typeof fetch
+  const copyId = useApp.getState().duplicatePreset('source')
+  await saves.settled()
+  const copied = useApp.getState().regexScripts.filter((r) => r.scopeTargetId === copyId)
+  expect(copied).toHaveLength(1)
+  expect(copied[0]).toMatchObject({ name: 'Tidy', find: 'a', enabled: true })
+  expect(copied[0]?.id).not.toBe('rx_one')
+  expect(useApp.getState().regexScripts).toHaveLength(3)
+  expect(puts.some((p) => p.endsWith(`/regex/${copied[0]?.id}`))).toBe(true)
 })
