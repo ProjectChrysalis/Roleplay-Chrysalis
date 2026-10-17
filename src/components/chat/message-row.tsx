@@ -335,7 +335,7 @@ export const MessageRow = memo(function MessageRow({
   const streamingOperation = useApp((s) => s.streaming?.messageId === message.id ? s.streaming.operation : undefined)
   const streamingStartedAt = useApp((s) => s.streaming?.messageId === message.id ? s.streaming.startedAt : null)
   const hasStream = streamingShown >= 0
-  const [shownSwipe, setShownSwipe] = useState(message.activeSwipe)
+  const [committedSwipe, setShownSwipe] = useState(message.activeSwipe)
   const [shownGeneration, setShownGeneration] = useState<number | null>(null)
   const isStreamingThis = hasStream && (streamingOperation !== 'swipe' || shownGeneration === streamingStartedAt)
   const [lockH, setLockH] = useState(0)
@@ -344,6 +344,12 @@ export const MessageRow = memo(function MessageRow({
   latestTarget.current = { swipe: message.activeSwipe, generation: streamingStartedAt }
   const hadStream = useRef(hasStream)
   const hadVisibleStream = useRef(isStreamingThis)
+  // The render where a visible stream lands comes before the layout effect
+  // below commits the landed swipe. Showing the swipe the stream replaced for
+  // that one render lays the row out at the old swipe's height, and a reader
+  // scrolled into a long reply is clamped back to its start.
+  const landing = hadStream.current && !hasStream && (!swipeBusy || hadVisibleStream.current)
+  const shownSwipe = landing ? message.activeSwipe : committedSwipe
   const swipeFxSkip = useApp((s) => s.swipeFxSkip)
   const consumeSwipeFxSkip = useApp((s) => s.consumeSwipeFxSkip)
   const swipe = message.swipes[shownSwipe]
@@ -601,9 +607,9 @@ export const MessageRow = memo(function MessageRow({
               Regenerate
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onClick={() => { void forkAndOpen(chat.id, message.id); toast.success('Branched from here') }}>
+          <DropdownMenuItem onClick={() => void forkAndOpen(chat.id, message.id)}>
             <GitBranch className="size-4" aria-hidden="true" />
-            Fork here
+            Create branch
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => message.translation ? setMessageTranslation(chat.id, message.id, null) : void translate()}>
             <Translate className="size-4" aria-hidden="true" />
@@ -1174,7 +1180,7 @@ function SwipeCard({ chatId, messageId, index, active, content, model, onPick }:
         {active && <Badge variant="secondary">active</Badge>}
         <div className="ml-auto flex gap-1">
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onPick}>Use</Button>
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => { void forkAndOpen(chatId, messageId); toast.success('Branched from swipe') }}>Branch</Button>
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => void forkAndOpen(chatId, messageId)}>Branch</Button>
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-destructive" onClick={() => deleteSwipe(chatId, messageId, index)}>Delete</Button>
         </div>
       </div>
