@@ -28,6 +28,16 @@ describe("message style scoping", () => {
     expect(scopeCss(face)).toBe(face);
   });
 
+  it("a comment or an @import before a rule never becomes part of its selector", () => {
+    const css = "/* box */\n@import url('https://fonts.example/x.css');\n/* wrap */\n.wrap { margin: 0 }\n/* phone */\n@media (max-width: 480px) { .box { height: 1px } }"
+    const out = scopeCss(css)
+    expect(out).not.toContain("@import")
+    expect(out).not.toContain("/*")
+    expect(out).toContain(".mes_text .wrap{ margin: 0 }")
+    expect(out).toMatch(/(^|\})\s*@media \(max-width: 480px\) \{/)
+    expect(out).toContain(".mes_text .box{ height: 1px }")
+  });
+
   it("cannot reach outside the message even when the selector aims there", () => {
     for (const sel of ["body", "html", ":root", "*", "#root"]) {
       expect(scopeCss(`${sel} { background: red }`)).toBe(`.mes_text ${sel}{ background: red }`);
@@ -37,7 +47,7 @@ describe("message style scoping", () => {
   it("survives an unclosed block without dropping into the page scope", () => {
     expect(scopeCss("p { color: red")).toBe(".mes_text p{ color: red}");
     expect(scopeCss("")).toBe("");
-    expect(scopeCss("/* just a comment */")).toBe("/* just a comment */");
+    expect(scopeCss("/* just a comment */")).toBe("");
   });
 
   it("rewrites under a caller-provided boundary", () => {

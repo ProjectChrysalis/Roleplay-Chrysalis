@@ -13,6 +13,10 @@ const NESTED_AT_RULE = /^@(media|supports|container|layer|scope)\b/i
  *  a message's styles leaking onto the whole page is the one thing this must
  *  not allow. */
 export function scopeCss(css: string, prefix = '.mes_text'): string {
+  // comments go first: one sitting before a rule became part of its
+  // selector, and before an @media block it hid the at-rule, so the
+  // browser dropped the whole block
+  css = css.replace(/\/\*[\s\S]*?\*\//g, '')
   let out = ''
   let i = 0
   while (i < css.length) {
@@ -27,9 +31,14 @@ export function scopeCss(css: string, prefix = '.mes_text'): string {
       else if (css[j] === '}') level--
     }
     const body = css.slice(open + 1, level === 0 ? j - 1 : j)
-    const trimmed = prelude.trim()
+    // statement at-rules (@import, @charset) end at a semicolon and are not
+    // part of the selector that follows them. @import is dropped: a message
+    // never loads a stylesheet from elsewhere
+    const statementsEnd = prelude.lastIndexOf(';') + 1
+    out += prelude.slice(0, statementsEnd).replace(/@import\b[^;]*;/gi, '')
+    const trimmed = prelude.slice(statementsEnd).trim()
     if (trimmed.startsWith('@')) {
-      out += prelude + '{' + (NESTED_AT_RULE.test(trimmed) ? scopeCss(body, prefix) : body) + '}'
+      out += prelude.slice(statementsEnd) + '{' + (NESTED_AT_RULE.test(trimmed) ? scopeCss(body, prefix) : body) + '}'
     } else {
       const scoped = trimmed
         .split(',')
