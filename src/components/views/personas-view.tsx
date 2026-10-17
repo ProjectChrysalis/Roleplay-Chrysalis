@@ -1,7 +1,7 @@
 import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
-import { useEffect, useRef, useState } from 'react'
-import { Plus, Trash, Copy, UploadSimple, DownloadSimple, SealCheck, ChartBar, CheckCircle, Lock, X } from '@phosphor-icons/react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Plus, Trash, Copy, UploadSimple, DownloadSimple, SealCheck, ChartBar, CheckCircle, Lock, X, SortAscending } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -90,7 +90,11 @@ export function PersonasView() {
     // years of use → thousands of personas; the sidebar pages through them
   const PERSONA_PAGE = 100
   const [personaPage, setPersonaPage] = useViewMemory('personas.page', 0)
-  const pagedPersonas = personas.slice(clampPage(personaPage, personas.length, PERSONA_PAGE) * PERSONA_PAGE, (clampPage(personaPage, personas.length, PERSONA_PAGE) + 1) * PERSONA_PAGE)
+  const [alphabetical, setAlphabetical] = useViewMemory('personas.alphabetical', false, true)
+  const listed = useMemo(() => alphabetical
+    ? [...personas].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }))
+    : personas, [personas, alphabetical])
+  const pagedPersonas = listed.slice(clampPage(personaPage, listed.length, PERSONA_PAGE) * PERSONA_PAGE, (clampPage(personaPage, listed.length, PERSONA_PAGE) + 1) * PERSONA_PAGE)
 
   return (
     <MasterDetail
@@ -105,7 +109,10 @@ export function PersonasView() {
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           <h1 className="text-sm font-semibold">Personas</h1>
           <Badge variant="secondary">{personas.length}</Badge>
-          <Button variant="ghost" size="sm" className="ml-auto size-7 p-0" onClick={() => setSelectedId(addPersona())} aria-label="New persona">
+          <Button variant="ghost" size="sm" className={cn('ml-auto size-7 p-0', alphabetical ? 'text-primary' : 'text-muted-foreground')} onClick={() => setAlphabetical((v) => !v)} aria-pressed={alphabetical} aria-label="Sort A to Z" title="Sort A to Z">
+            <SortAscending className="size-4" aria-hidden="true" />
+          </Button>
+          <Button variant="ghost" size="sm" className="size-7 p-0" onClick={() => setSelectedId(addPersona())} aria-label="New persona">
             <Plus className="size-4" aria-hidden="true" />
           </Button>
         </div>
