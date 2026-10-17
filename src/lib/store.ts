@@ -1218,7 +1218,7 @@ export const useApp = create<AppState>()(
         bumpMutate()
         const forked = engineChatToUI(r.meta, r.messages ?? [])
         set((s) => ({ chats: attachBranches([forked, ...s.chats]) }))
-        toast.success('Branch created')
+        toast.success('Forked into a new chat')
         return forked.id
       },
       forkAndOpen: async (chatId, messageId) => {

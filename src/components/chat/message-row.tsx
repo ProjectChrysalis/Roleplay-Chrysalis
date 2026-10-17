@@ -607,9 +607,9 @@ export const MessageRow = memo(function MessageRow({
               Regenerate
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onClick={() => void forkAndOpen(chat.id, message.id)}>
+          <DropdownMenuItem onClick={() => { void forkAndOpen(chat.id, message.id); toast.success('Branched from here') }}>
             <GitBranch className="size-4" aria-hidden="true" />
-            Create branch
+            Fork here
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => message.translation ? setMessageTranslation(chat.id, message.id, null) : void translate()}>
             <Translate className="size-4" aria-hidden="true" />
@@ -1180,7 +1180,7 @@ function SwipeCard({ chatId, messageId, index, active, content, model, onPick }:
         {active && <Badge variant="secondary">active</Badge>}
         <div className="ml-auto flex gap-1">
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onPick}>Use</Button>
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => void forkAndOpen(chatId, messageId)}>Branch</Button>
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => { void forkAndOpen(chatId, messageId); toast.success('Branched from swipe') }}>Branch</Button>
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-destructive" onClick={() => deleteSwipe(chatId, messageId, index)}>Delete</Button>
         </div>
       </div>

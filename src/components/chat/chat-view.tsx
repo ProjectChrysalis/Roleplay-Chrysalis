@@ -18,7 +18,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { estimateTokens, formatCost, knownCost, timeAgo } from '@/lib/tokens'
+import { estimateTokens, formatCost, knownCost } from '@/lib/tokens'
 import { fileToRawDataUrl, fetchWIStatus, type WIStatus } from '@/lib/engine'
 import { useApp, useChat, useCharacter, chatPresetId } from '@/lib/store'
 import { speakText, voiceFor } from '@/lib/tts'
@@ -26,7 +26,7 @@ import { ChatLorebooks } from './chat-lorebooks'
 import { ChatQuickSwitch } from '@/components/chat/chat-quick-bar'
 import { ChatsView } from '@/components/views/chats-view'
 import { sectionsFor } from '@/components/shell/sections'
-import type { Chat, ID } from '@/lib/types'
+import type { ID } from '@/lib/types'
 import { DEFAULT_AVATAR, cn, readableNameColor, shortModel } from '@/lib/utils'
 import { cssAttrValue, scopeCss } from '@/lib/scope-css'
 import { createToast } from '@/lib/notifications'
@@ -102,44 +102,6 @@ function captureAnchor(el: HTMLElement | null, doomed?: Set<ID>): ScrollAnchor |
     return { id, offset: box.top - fold }
   }
   return null
-}
-
-/** One line of what a chat last said, for the branch list. Tagged blocks
- *  (thinking, panels) are skipped when prose remains outside them. */
-function chatPreview(text: string): string {
-  const flat = (t: string) => t.replace(/<[^>]*>/g, ' ').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim()
-  const outside = flat(text.replace(/<([\w~-]+)[^>]*>[\s\S]*?<\/\1\s*>/g, ' '))
-  return (outside || flat(text)).slice(0, 160)
-}
-
-/** 1-based position of the message a branch split at, read off the chat it
- *  split from; unknown while that chat's messages are not loaded. */
-function branchPoint(parent: Chat, branch: Chat): number | null {
-  if (!branch.parentMessageId) return null
-  const at = parent.messages.findIndex((m) => m.id === branch.parentMessageId)
-  return at >= 0 ? at + 1 : null
-}
-
-function BranchRow({ chat, current = false, from = null, onOpen }: { chat: Chat; current?: boolean; from?: number | null; onOpen?: () => void }) {
-  const last = chat.messages.at(-1)
-  const preview = chatPreview(last?.swipes[last.activeSwipe]?.content ?? chat.preview ?? '')
-  const count = chat.messages.length > 0 ? chat.messages.length : chat.messageCount ?? 0
-  const body = (
-    <>
-      <span className="flex items-baseline gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{chat.title}</span>
-        <span className="shrink-0 text-xs text-muted-foreground">{timeAgo(chat.updatedAt)}</span>
-      </span>
-      {preview && <span className="line-clamp-2 text-xs text-muted-foreground">{preview}</span>}
-      <span className="text-xs text-muted-foreground">{count} {count === 1 ? 'message' : 'messages'}{from ? ` · from message ${from}` : ''}</span>
-    </>
-  )
-  if (current) return <div className="flex flex-col gap-0.5 rounded-md border border-primary/60 bg-accent p-2.5">{body}</div>
-  return (
-    <button type="button" onClick={onOpen} className="flex flex-col gap-0.5 rounded-md border border-border p-2.5 text-left hover:bg-accent">
-      {body}
-    </button>
-  )
 }
 
 export function ChatView() {
@@ -422,17 +384,6 @@ export function ChatView() {
     [chats, chat?.characterId],
   )
   const chatIndex = charChats.findIndex((c) => c.id === chat?.id)
-  // the branch neighborhood: the chat this one split from, what split off
-  // it, and the other branches taken from the same parent (newest first)
-  const parentChat = chat?.parentChatId ? chats.find((c) => c.id === chat.parentChatId) ?? null : null
-  const childBranches = useMemo(
-    () => charChats.filter((c) => c.parentChatId === chat?.id).sort((a, b) => b.updatedAt - a.updatedAt),
-    [charChats, chat?.id],
-  )
-  const siblingBranches = useMemo(
-    () => (parentChat ? charChats.filter((c) => c.parentChatId === parentChat.id && c.id !== chat?.id).sort((a, b) => b.updatedAt - a.updatedAt) : []),
-    [charChats, parentChat, chat?.id],
-  )
 
   // every occurrence, not every message: the counter and the arrows step
   // word by word the way browser find does
@@ -653,11 +604,6 @@ export function ChatView() {
       {!character.isGroup && (
         <DropdownMenuItem onClick={() => setConvertOpen(true)}>
           <UserPlus className="size-4" aria-hidden="true" /> Convert to group
-        </DropdownMenuItem>
-      )}
-      {parentChat && (
-        <DropdownMenuItem onClick={() => openChat(parentChat.id)}>
-          <ArrowLeft className="size-4" aria-hidden="true" /> Back to parent chat
         </DropdownMenuItem>
       )}
       <DropdownMenuItem onClick={() => setBranchesOpen(true)}>
@@ -1190,39 +1136,41 @@ export function ChatView() {
         </SheetContent>
       </Sheet>
 
-      {/* Branches: where this chat came from and what split off it */}
+      {/* Branch tree */}
       <Sheet open={branchesOpen} onOpenChange={setBranchesOpen}>
         <SheetContent side="right" className="w-full sm:max-w-md">
           <SheetHeader>
-            <SheetTitle>Branches</SheetTitle>
+            <SheetTitle>Branch tree</SheetTitle>
           </SheetHeader>
-          <div className="flex flex-col gap-4 px-4 pb-4">
-            {parentChat && (
-              <Button variant="outline" className="justify-start" onClick={() => { openChat(parentChat.id); setBranchesOpen(false) }}>
-                <ArrowLeft className="size-4" aria-hidden="true" />
-                <span className="truncate">Back to {parentChat.title}</span>
-              </Button>
-            )}
-            <section className="flex flex-col gap-1.5">
-              <h3 className="text-xs font-medium text-muted-foreground">This chat</h3>
-              <BranchRow chat={chat} current />
-            </section>
-            <section className="flex flex-col gap-1.5">
-              <h3 className="text-xs font-medium text-muted-foreground">Branches from this chat</h3>
-              {childBranches.length === 0
-                ? <p className="text-sm text-muted-foreground">None yet. Use Create branch on any message.</p>
-                : childBranches.map((c) => (
-                  <BranchRow key={c.id} chat={c} from={branchPoint(chat, c)} onOpen={() => { openChat(c.id); setBranchesOpen(false) }} />
-                ))}
-            </section>
-            {parentChat && siblingBranches.length > 0 && (
-              <section className="flex flex-col gap-1.5">
-                <h3 className="truncate text-xs font-medium text-muted-foreground">Other branches from {parentChat.title}</h3>
-                {siblingBranches.map((c) => (
-                  <BranchRow key={c.id} chat={c} from={branchPoint(parentChat, c)} onOpen={() => { openChat(c.id); setBranchesOpen(false) }} />
-                ))}
-              </section>
-            )}
+          <div className="flex flex-col gap-1 px-4 pb-4">
+            <div className="rounded-md border border-primary/60 bg-accent p-2.5 text-sm">
+              <span className="font-medium">{chat.title}</span>
+              <Badge variant="secondary" className="ml-2">current</Badge>
+              <p className="text-xs text-muted-foreground">{chat.messages.length} messages</p>
+            </div>
+            {/* the current chat's branch neighborhood: its forks, its sibling
+                branches (same fork point), and the chat it forked from */}
+            {charChats
+              .filter((c) =>
+                c.parentChatId === chat.id ||
+                (!!chat.parentChatId && (c.id === chat.parentChatId || (c.parentChatId === chat.parentChatId && c.id !== chat.id))),
+              )
+              .slice(0, 12)
+              .map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => { openChat(c.id); setBranchesOpen(false) }}
+                className={cn(
+                  'flex items-center gap-2 rounded-md border border-border p-2.5 text-left text-sm hover:bg-accent',
+                  c.parentChatId && 'ml-6',
+                )}
+              >
+                {c.parentChatId && <GitBranch className="size-3.5 text-muted-foreground" aria-hidden="true" />}
+                <span className="min-w-0 flex-1 truncate">{c.title}</span>
+                <span className="text-xs text-muted-foreground">{c.messages.length > 0 ? c.messages.length : c.messageCount ?? 0} msgs</span>
+              </button>
+            ))}
           </div>
         </SheetContent>
       </Sheet>
