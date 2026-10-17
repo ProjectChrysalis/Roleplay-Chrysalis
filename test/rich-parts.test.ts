@@ -69,6 +69,8 @@ describe("rich parts: typed blocks", () => {
     expect(json).toEqual([{ kind: "choices", title: "Pick one", options: ["Open the door", "Hide"] }]);
     const lines = splitRichBlocks("```choices\n- Follow her\n- Stay put\n```");
     expect(lines[0]).toMatchObject({ kind: "choices", options: ["Follow her", "Stay put"] });
+    const quoted = splitRichBlocks("```choices\n>Follow her\n> Stay put\n```");
+    expect(quoted[0]).toMatchObject({ kind: "choices", options: ["Follow her", "Stay put"] });
     const one = splitRichBlocks("```choices\nonly one\n```");
     expect(one[0]).toMatchObject({ kind: "code", lang: "choices" });
   });

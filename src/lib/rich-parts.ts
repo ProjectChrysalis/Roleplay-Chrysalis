@@ -125,13 +125,14 @@ export function splitRichBlocks(text: string): RichBlock[] {
     const title = info.slice(lang.length).trim() || null
     let typed = false
     if (close >= 0 && lang === 'choices') {
-      // JSON array of strings, or one option per line
+      // JSON array of strings, or one option per line (list, number and
+      // quote markers are dropped)
       let options: string[] | null = null
       try {
         const v = JSON.parse(body)
         if (Array.isArray(v) && v.every((e) => typeof e === 'string')) options = v.map((e) => e.trim()).filter(Boolean)
       } catch { options = null }
-      if (!options) options = body.split('\n').map((l) => l.replace(/^[-*\d.]+\s*/, '').trim()).filter(Boolean)
+      if (!options) options = body.split('\n').map((l) => l.replace(/^[>\-*\d.\s]+/, '').trim()).filter(Boolean)
       if (options.length >= 2) { out.push({ kind: 'choices', title, options }); typed = true }
     }
     if (close >= 0 && (lang === 'data' || lang === 'stat')) {
