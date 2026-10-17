@@ -128,6 +128,7 @@ export function PresetsView() {
   }
 
   return (
+    <>
     <MasterDetail
       resizeKey="presets"
       memoryKey={`presets.${selectedId}`}
@@ -363,8 +364,6 @@ export function PresetsView() {
             userText={composerDraft ?? undefined}
             title={`Prompt peek: ${preset.name}`}
           />
-          <RegexImportChoice open={!!pendingImport} count={pendingImport?.count ?? 0} preset busy={importBusy} onCancel={() => setPendingImport(null)} onChoose={(enabled) => { if (pendingImport) void finishImport(pendingImport.json, pendingImport.name, enabled) }} />
-          {confirmDialog}
           <PresetDiffDialog open={diffOpen} onOpenChange={setDiffOpen} preset={preset} />
         </div>
         ) : (
@@ -372,6 +371,11 @@ export function PresetsView() {
         )
       }
     />
+      {/* outside the panes: on mobile the detail pane is unmounted while the
+          list shows, and import and delete both start from the list */}
+      <RegexImportChoice open={!!pendingImport} count={pendingImport?.count ?? 0} preset busy={importBusy} onCancel={() => setPendingImport(null)} onChoose={(enabled) => { if (pendingImport) void finishImport(pendingImport.json, pendingImport.name, enabled) }} />
+      {confirmDialog}
+    </>
   )
 }
 
