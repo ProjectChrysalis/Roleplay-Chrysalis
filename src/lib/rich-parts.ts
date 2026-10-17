@@ -43,6 +43,47 @@ export function balanceStreamingMarkdown(text: string): string {
   return out
 }
 
+const HELD_BLOCK_RE = /^ {0,3}<(div|section|article|aside|header|footer|nav|address|figure|form|fieldset|table|dl|ol|ul|blockquote|pre|center)(?=[\s>/])/i
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/
+
+/** A block-level element written at a line start stays ONE raw HTML block up
+ *  to its matching close tag, blank lines included, the way cards and
+ *  presets expect it to render. Markdown ends an HTML block at the first
+ *  blank line, so a panel whose body has paragraphs fell apart: the rest
+ *  parsed as markdown (indented lines became code blocks) and the closing
+ *  tags landed outside it. Blank lines inside become an empty comment, which
+ *  renders as nothing and keeps the block open. An element whose close has
+ *  not arrived yet (mid-stream) is left alone. */
+export function holdHtmlBlocks(text: string): string {
+  if (!/\n[ \t]*\n/.test(text) || !text.includes('<')) return text
+  const lines = text.split('\n')
+  let fence: string | null = null
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    const marker = FENCE_RE.exec(line)?.[1]
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length) fence = null
+      continue
+    }
+    if (marker) { fence = marker; continue }
+    const tag = HELD_BLOCK_RE.exec(line)?.[1]?.toLowerCase()
+    if (!tag) continue
+    const tagRe = new RegExp(`<(/?)${tag}(?=[\\s>/])`, 'gi')
+    let depth = 0
+    let end = -1
+    for (let k = i; k < lines.length && end < 0; k++) {
+      for (const t of (lines[k] ?? '').matchAll(tagRe)) {
+        depth += t[1] ? -1 : 1
+        if (depth === 0) { end = k; break }
+      }
+    }
+    if (end < 0) continue
+    for (let k = i + 1; k < end; k++) if (!(lines[k] ?? '').trim()) lines[k] = '<!-- -->'
+    i = end
+  }
+  return lines.join('\n')
+}
+
 /** Card authors hide notes in greetings as an empty link whose title sits
  *  right against the URL, `[](#'note')`, which renders as nothing. Strict
  *  markdown wants a space before the title and shows the whole thing as

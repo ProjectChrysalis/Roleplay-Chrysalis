@@ -3,7 +3,7 @@
  * split that message rendering runs on every body (and every stream frame).
  */
 import { describe, it, expect } from "bun:test";
-import { splitRichBlocks, balanceStreamingMarkdown, separateLinkTitles } from "../src/lib/rich-parts.js";
+import { splitRichBlocks, balanceStreamingMarkdown, separateLinkTitles, holdHtmlBlocks } from "../src/lib/rich-parts.js";
 
 describe("rich parts: typed blocks", () => {
   it("plain text stays one markdown run", () => {
@@ -185,3 +185,25 @@ describe("rich parts: hidden link notes", () => {
     }
   });
 });
+
+describe("holdHtmlBlocks", () => {
+  it("keeps a block element one HTML block across blank lines", () => {
+    const text = '<div class="box">first\n\n    indented\n\nlast\n</div>\n\nafter'
+    expect(holdHtmlBlocks(text)).toBe('<div class="box">first\n<!-- -->\n    indented\n<!-- -->\nlast\n</div>\n\nafter')
+  });
+
+  it("matches nested elements of the same tag to the right close", () => {
+    const text = '<div><div class="a"></div>\n\nbody\n</div>\n\n<div>x</div>'
+    expect(holdHtmlBlocks(text)).toBe('<div><div class="a"></div>\n<!-- -->\nbody\n</div>\n\n<div>x</div>')
+  });
+
+  it("leaves an unclosed element, inline tags and fenced code alone", () => {
+    const open = '<div>\n\nstill streaming'
+    expect(holdHtmlBlocks(open)).toBe(open)
+    const inline = 'a <span>b\n\nc</span>'
+    expect(holdHtmlBlocks(inline)).toBe(inline)
+    const fenced = '```\n<div>\n\n</div>\n```'
+    expect(holdHtmlBlocks(fenced)).toBe(fenced)
+  });
+});
+
