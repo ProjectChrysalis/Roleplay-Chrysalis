@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { PuzzlePiece, Asterisk, Translate, Image, Waveform, Database, SquaresFour, DiceFive, Wrench, Lightning, BookOpenText, Plug } from '@phosphor-icons/react'
 import { useApp } from '@/lib/store'
 import { j } from '@/lib/engine'
+import { useViewMemory } from '@/lib/view-memory'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { RegexView } from '@/components/views/regex-view'
@@ -21,7 +22,10 @@ const PANEL_ICONS: Record<string, typeof DiceFive> = {
 }
 
 export function ExtensionsView() {
-  const [tab, setTab] = useState('regex')
+  // the tab last picked by hand comes back on the next visit
+  const [lastTab, setLastTab] = useViewMemory('tools.tab', '', true)
+  const [tab, setShownTab] = useState(lastTab || 'regex')
+  const setTab = (value: string) => { setShownTab(value); setLastTab(value) }
   // panels are PLUGIN-provided UI: every app plugin may export a uiPanel hook
   // (label, icon, items, fields); no plugin → no tabs
   const [panels, setPanels] = useState<PluginPanelDescriptor[]>([])
@@ -30,7 +34,7 @@ export function ExtensionsView() {
   // the visible "Regex flashes then jumps to Tool Calling" glitch
   const [ready, setReady] = useState(false)
   const focusRegexId = useApp((s) => s.focusRegexId)
-  const pickedTab = useRef(!!focusRegexId)
+  const pickedTab = useRef(!!focusRegexId || !!lastTab)
   useEffect(() => { if (focusRegexId) { pickedTab.current = true; setTab('regex') } }, [focusRegexId])
   const reloadPanels = () => j<{ panels: PluginPanelDescriptor[] }>('/__panels')
     .then((r) => { setPanels(Array.isArray(r.panels) ? r.panels : []); setReady(true) })
@@ -39,8 +43,12 @@ export function ExtensionsView() {
   // plugin tabs lead the strip, so a fresh Tools visit opens on the first one
   const firstPanelValue = panels[0] ? `panel:${panels[0].label}` : null
   useEffect(() => {
-    if (!pickedTab.current && firstPanelValue) setTab(firstPanelValue)
+    if (!pickedTab.current && firstPanelValue) setShownTab(firstPanelValue)
   }, [firstPanelValue])
+  // a remembered plugin tab whose plugin is gone falls back to the strip's first tab
+  useEffect(() => {
+    if (ready && tab.startsWith('panel:') && !panels.some((p) => `panel:${p.label}` === tab)) setShownTab(firstPanelValue ?? 'regex')
+  }, [ready, panels, tab, firstPanelValue])
 
   // The workspace shares the page scroll with the header and tab strip.
   const headerRow = (

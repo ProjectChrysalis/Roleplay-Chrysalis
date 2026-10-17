@@ -157,14 +157,14 @@ export function RegexView() {
   const deleteRegex = useApp((s) => s.deleteRegex)
   const focusRegexId = useApp((s) => s.focusRegexId)
   const activeChatId = useApp((s) => s.activeChatId)
-  const [selectedId, setSelectedId] = useViewMemory<string | null>('regex.selected', scripts[0]?.id ?? null)
+  const [selectedId, setSelectedId] = useViewMemory<string | null>('regex.selected', scripts[0]?.id ?? null, true)
   const [detailOpen, setDetailOpen] = useViewMemory('regex.detail', false)
   const [confirm, confirmDialog] = useConfirm()
   const [trimDraft, setTrimDraft] = useState("")
   const importRef = useRef<HTMLInputElement>(null)
   const [pendingImport, setPendingImport] = useState<Omit<RegexScript, 'id' | 'order'>[]>([])
   const [query, setQuery] = useState('')
-  const [openState, setOpenState] = useViewMemory<Record<string, boolean>>('regex.open', NO_OVERRIDES)
+  const [openState, setOpenState] = useViewMemory<Record<string, boolean>>('regex.open', NO_OVERRIDES, true)
   // by id: a large library holds thousands of scripts and cards, and a
   // search through the cards for each script made every keystroke crawl
   const names = useMemo(() => ({
