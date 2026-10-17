@@ -344,7 +344,8 @@ apps/roleplay/
 │                       image-gen.ts, lore-match.ts (which entries a text
 │                       switches on), utils.ts (cn)
 ├─ plugins/             engine/ (chats, characters, presets, generation) +
-│                       studio-import/ — import/marketplace backend
+│                       studio-import/ — import/marketplace backend; each
+│                       plugin.js only re-exports, the code is in its src/
 └─ data/                characters/, presets/, personas/, settings.json
 ```
 
@@ -369,6 +370,17 @@ replies). Chats are flat JSONL with swipes; each character is one card.json.
 src/lib/engine.ts owns every route call + the studio↔engine adapters; the store
 actions are thin wrappers (optimistic write → API call → refresh). A feature
 without a working backend is marked unavailable in the UI, never stubbed.
+
+Plugin code is split by concern, and the header of each plugin.js maps it.
+In the engine plugin, src/routes/index.js builds the request context
+(`req`, `fsx`, `id`, `op`, `ok`, `err`, `readJson`, `writeJson`, `body`, …) and
+tries each route group in order; a group returns a response, or `undefined`
+to let the next one look. Per-chat routes (chat-messages.js, generate.js,
+memory.js) get the loaded chat on the same object (`chat`, `meta`, `members`,
+`onSave`, …), listed in CHAT_ROUTES in chats.js. A new route is a function in
+the file it belongs to, added to ROUTES or CHAT_ROUTES. Values shared across
+modules for one call live on `state` (src/state.js): an imported binding
+cannot be assigned. Imports are relative and stay inside the plugin folder.
 
 ## Agent-editable data (live sync, v4.2)
 
