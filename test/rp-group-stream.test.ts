@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, expect, it } from 'bun:test'
 
 const previousBase = process.env.BASE_URL
 process.env.BASE_URL = '/app/alice/roleplay/'
-const keys = ['window', 'location', 'localStorage', 'WebSocket', 'requestAnimationFrame', 'cancelAnimationFrame'] as const
+const keys = ['window', 'document', 'location', 'localStorage', 'WebSocket', 'requestAnimationFrame', 'cancelAnimationFrame'] as const
 const descriptors = keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const)
 const storage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
 class Socket {
@@ -14,7 +14,7 @@ class Socket {
 }
 Object.defineProperty(globalThis, 'location', { configurable: true, value: { pathname: '/app/alice/roleplay/', protocol: 'http:', host: 'localhost:18878' } })
 Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
-Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: storage, matchMedia: () => ({ matches: false }) } })
+Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: storage, matchMedia: () => ({ matches: false }), addEventListener: () => {}, removeEventListener: () => {} } })
 Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: Socket })
 Object.defineProperty(globalThis, 'requestAnimationFrame', { configurable: true, value: (fn: () => void) => setTimeout(fn, 0) })
 Object.defineProperty(globalThis, 'cancelAnimationFrame', { configurable: true, value: clearTimeout })
@@ -22,6 +22,8 @@ const { useApp } = await import('../src/lib/store')
 const { engineChatToUI, presetToEngine } = await import('../src/lib/engine')
 const { buildDefaultPreset } = await import('../src/lib/seed')
 const { saves } = await import('../src/lib/save-queue')
+// after the imports: the toast module styles a document it finds at load
+Object.defineProperty(globalThis, 'document', { configurable: true, value: { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} } })
 useApp.persist.setOptions({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } })
 const originalFetch = globalThis.fetch
 const meta = { id: 'group-chat', title: 'Council', groupId: 'council' }
@@ -77,4 +79,14 @@ it('identifies a speaker before thinking or tool events and rejects nonmembers',
   expect(useApp.getState().chats[0]?.messages[0]?.characterId).toBe('owl')
   Socket.latest.emit({ speakerId: 'fox', name: 'Shared name', tool: { phase: 'start', name: 'lookup', args: {} } })
   expect(useApp.getState().chats[0]?.messages[0]?.characterId).toBe('fox')
+})
+
+it('keeps one stream socket across re-hydrates, so deltas sent meanwhile still land', async () => {
+  const socket = Socket.latest
+  await useApp.getState().hydrate()
+  expect(Socket.latest).toBe(socket)
+  useApp.setState({ streaming: { chatId: meta.id, messageId: 'pending-reply', operation: 'send', full: '', shown: 0, startedAt: Date.now() } })
+  socket.emit({ delta: 'still here' })
+  await idle()
+  expect(useApp.getState().streaming?.full).toBe('still here')
 })

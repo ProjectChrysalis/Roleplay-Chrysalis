@@ -605,11 +605,20 @@ export function connectStreams(
   let ws: WebSocket | null = null
   let closed = false
   let backoff = 800
+  let retry: ReturnType<typeof setTimeout> | undefined
+  let opened = false
   const open = () => {
     if (closed) return
-    ws = new WebSocket(`${proto}://${location.host}/v1/ws`)
-    ws.onopen = () => { backoff = 800 }
-    ws.onmessage = (ev) => {
+    clearTimeout(retry)
+    const sock = new WebSocket(`${proto}://${location.host}/v1/ws`)
+    ws = sock
+    sock.onopen = () => {
+      backoff = 800
+      // whatever changed while the socket was down sent no event: re-read once
+      if (opened) onDataChanged?.()
+      opened = true
+    }
+    sock.onmessage = (ev) => {
       try {
         const frame = JSON.parse(ev.data) as { type?: string; build?: unknown; payload?: { chatId?: string; name?: string; speakerId?: string; delta?: string; thinking?: string; tool?: StreamToolEvent; app?: string; paths?: string[] } }
         if (frame.type === 'app_stream' && frame.payload?.chatId) {
@@ -626,11 +635,33 @@ export function connectStreams(
         }
       } catch { /* not a frame we care about */ }
     }
-    ws.onclose = () => { if (!closed) { setTimeout(open, backoff); backoff = Math.min(backoff * 2, 15000) } }
-    ws.onerror = () => ws?.close()
+    sock.onclose = () => {
+      if (closed || ws !== sock) return
+      retry = setTimeout(open, backoff)
+      backoff = Math.min(backoff * 2, 15000)
+    }
+    sock.onerror = () => sock.close()
   }
+  // a phone drops the socket of a backgrounded tab; coming back waits for no
+  // backoff timer
+  const resume = () => {
+    if (closed || document.visibilityState !== 'visible') return
+    if (ws && ws.readyState <= WebSocket.OPEN) return
+    backoff = 800
+    open()
+  }
+  document.addEventListener('visibilitychange', resume)
+  window.addEventListener('pageshow', resume)
+  window.addEventListener('online', resume)
   open()
-  return () => { closed = true; ws?.close() }
+  return () => {
+    closed = true
+    clearTimeout(retry)
+    document.removeEventListener('visibilitychange', resume)
+    window.removeEventListener('pageshow', resume)
+    window.removeEventListener('online', resume)
+    ws?.close()
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

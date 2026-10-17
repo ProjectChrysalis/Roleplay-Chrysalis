@@ -652,8 +652,10 @@ export const useApp = create<AppState>()(
             }) }).catch(() => undefined)
             libraryOnDisk = libraryJson()
           }
-          // live generation deltas over the kernel WS bus
-          stopStreams?.()
+          // live generation deltas over the kernel WS bus. One stream per page:
+          // reopening it on every re-hydrate lost the deltas sent meanwhile,
+          // and the startup hooks below run once
+          if (stopStreams) return
           let deltaBuf = ''
           let thinkBuf = ''
           let deltaChatId: ID | null = null
