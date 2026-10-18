@@ -29,6 +29,24 @@ function ownHost(v, depth = 0) {
   return o;
 }
 
+/** One answer per lookup key per call. A group chat asks for the same few
+ *  names on every message, and each ask is a host call and a file read. Only
+ *  this import writes its tables, one call at a time. */
+function memoLookups(fsx) {
+  if (!fsx?.lookup) return fsx;
+  const seen = new Map();
+  const lookup = fsx.lookup;
+  return {
+    ...fsx,
+    lookup: (collection, key, value) => {
+      const k = collection + "\n" + String(key).toLowerCase();
+      if (value !== undefined) { const out = lookup(collection, key, value); seen.set(k, out); return out; }
+      if (!seen.has(k)) seen.set(k, lookup(collection, key));
+      return seen.get(k);
+    },
+  };
+}
+
 export function handleRoute(req, host) {
   host = ownHost(host);
   if (req.method !== "POST") return null;
@@ -209,8 +227,14 @@ export function handleRoute(req, host) {
     };
   }
 
-  const fsx = host.fs;
-  const writeJson = (rel, v) => fsx.write(rel, JSON.stringify(storeMedia(v, fsx), null, 2) + "\n");
+  const fsx = memoLookups(host.fs);
+  // Walking a record for inline images cost more than writing it, and by now
+  // they are rare: archive art goes through host.zip.image on the way in.
+  const writeJson = (rel, v) => {
+    const text = JSON.stringify(v, null, 2);
+    const walk = text.includes('"data:image/') || (v?.studio?.avatar !== undefined && v.studio.avatar === v.avatar);
+    fsx.write(rel, (walk ? JSON.stringify(storeMedia(v, fsx), null, 2) : text) + "\n");
+  };
   const readJson = (rel, fb) => { try { return JSON.parse(fsx.read(rel)); } catch { return fb; } };
   const summary = { characters: [], groups: [], lorebooks: [], presets: [], regex: [], personas: [], themes: [], quickReplies: [], chats: [], databank: [], errors: [] };
   let characterNames = null;
