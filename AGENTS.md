@@ -382,6 +382,12 @@ the file it belongs to, added to ROUTES or CHAT_ROUTES. Values shared across
 modules for one call live on `state` (src/state.js): an imported binding
 cannot be assigned. Imports are relative and stay inside the plugin folder.
 
+The plugins set `keepLoaded` in their manifests: the engine evaluates them
+once and calls them again in place, so module scope outlives a call. Keep
+module scope to constants; anything a call fills in goes on `state` and is
+reset where handleRoute starts. Never keep `host` past its call (the engine
+refuses a stale one).
+
 ## Agent-editable data (live sync, v4.2)
 
 EVERYTHING lives in `data/` — one directory, plain JSON. This section is the
