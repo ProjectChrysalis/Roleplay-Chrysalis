@@ -1622,11 +1622,23 @@ export async function uploadArchive(file: File, progress?: (stage: string, done:
   }
   try { localStorage.setItem(key, state.id) } catch { /* resume unavailable */ }
   const check = () => { if (signal?.aborted) throw new DOMException('Import cancelled', 'AbortError') }
+  let failures = 0
   while (state.uploaded < file.size) {
     check()
     progress?.('Uploading', state.uploaded, file.size)
     const part = file.slice(state.uploaded, state.uploaded + chunkBytes)
-    state = await j<ArchiveImportState>(`/__imports/${state.id}?offset=${state.uploaded}`, { method: 'PUT', body: part, headers: { 'Content-Type': 'application/octet-stream' } })
+    try {
+      state = await j<ArchiveImportState>(`/__imports/${state.id}?offset=${state.uploaded}`, { method: 'PUT', body: part, headers: { 'Content-Type': 'application/octet-stream' } })
+      failures = 0
+    } catch (error) {
+      // a dropped connection or a busy engine costs one chunk, not the
+      // upload: wait, ask where the upload stands and go on from there
+      const refused = error instanceof ApiError && error.status < 500 && !/offset changed/.test(error.message)
+      if (refused || ++failures > 5) throw error
+      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** failures))
+      check()
+      state = await j<ArchiveImportState>(`/__imports/${state.id}`)
+    }
   }
   while (state.status === 'indexing') {
     check()
