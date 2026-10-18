@@ -4039,3 +4039,30 @@ describe("rp studio: a foreign user folder imports linked up", () => {
     expect(r.json.regex).toEqual([]);
   }, 30_000);
 });
+
+describe("rp studio: an archive's chats find cards imported before it", () => {
+  it("links a chat to a card already in the library when its import did not bring the card", async () => {
+    fs.mkdirSync(path.join(root, "characters", "aria"), { recursive: true });
+    fs.writeFileSync(path.join(root, "characters", "aria", "card.json"), JSON.stringify({ name: "Aria Vale" }));
+    const entries = {
+      "chats/Aria Vale/Aria Vale - 2024-07-12@01h31m37s123ms.jsonl": [
+        JSON.stringify({ user_name: "You", character_name: "Aria Vale", create_date: "2024-07-12@01h31m37s123ms" }),
+        JSON.stringify({ name: "Aria Vale", is_user: false, mes: "hello", send_date: "July 12, 2024 1:31am" }),
+      ].join("\n"),
+    };
+    const m = mockHost();
+    const tables = new Map<string, unknown>();
+    (m.host.fs as { lookup?: unknown }).lookup = (collection: string, key: string, value?: unknown) => {
+      const k = collection + "|" + String(key).toLowerCase();
+      if (value === undefined) return tables.get(k) ?? null;
+      tables.set(k, value);
+      return value;
+    };
+    (m.host as { zip: unknown }).zip = { entries: () => entries, list: () => 1 };
+    const importId = "0b6a3c1e-7d2f-4a51-9c8e-2f1d3b4a5c6d";
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x", importId } }, m);
+    const chatId = (r.json.chats as string[])[0];
+    const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", `${chatId}.meta.json`), "utf8"));
+    expect(meta.characterId).toBe("aria");
+  }, 30_000);
+});

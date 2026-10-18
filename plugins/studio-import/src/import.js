@@ -217,10 +217,17 @@ export function handleRoute(req, host) {
   let written = null;
   const localLookups = {};
   const used = new Set();
+  // A card's name by id, null when there is none. Chats and group members ask
+  // for the same few cards over and over, and a card carrying a large
+  // lorebook is slow to read.
+  const cardNames = new Map();
+  const cardName = (id) => {
+    if (!cardNames.has(id)) cardNames.set(id, readJson("characters/" + id + "/card.json", null)?.name ?? null);
+    return cardNames.get(id);
+  };
   // Id collision guard: dedupes within THIS import batch AND against what
   // already exists on disk — re-importing the same card must never silently
   // overwrite the earlier one (its gallery/edits would be lost).
-  const taken = (rel) => { try { fsx.read(rel); return true; } catch { return false; } };
   // One listing per folder per call: a library holding fifty scripts of one
   // name made every new copy read fifty files to find a free id.
   const listed = new Map();
@@ -504,8 +511,33 @@ export function handleRoute(req, host) {
    *  imported from settings.json either. */
   const wants = (collection) => !Array.isArray(req.body?.include) || req.body.include.includes(collection);
 
+  // A name this import has not written may be a card already in the library
+  // (chats imported in a later run than their cards): the library's names are
+  // read once per import, on the first miss.
+  let importNames = null;
   const charIdByName = () => {
-    if (importId && fsx.lookup) return lookup("characters");
+    if (importId && fsx.lookup) {
+      if (importNames) return importNames;
+      const own = lookup("characters");
+      const library = lookup("library");
+      const indexLibrary = () => {
+        if (library.get("__indexed")) return;
+        let ids = [];
+        try { ids = fsx.list("characters"); } catch {}
+        for (const cid of ids) {
+          const card = readJson("characters/" + cid + "/card.json", null);
+          if (!card || !card.name) continue;
+          if (!library.get(lower(card.name))) library.set(lower(card.name), cid);
+          if (!library.get(slug(card.name))) library.set(slug(card.name), cid);
+        }
+        library.set("__indexed", 1);
+      };
+      importNames = {
+        get: (key) => { const hit = own.get(key); if (hit || String(key).startsWith("file:")) return hit; indexLibrary(); return library.get(key); },
+        set: (key, value) => own.set(key, value),
+      };
+      return importNames;
+    }
     if (characterNames) return characterNames;
     const m = new Map();
     characterNames = m;
@@ -630,15 +662,19 @@ export function handleRoute(req, host) {
    *  persona, which is exactly what a move to a second device looked like. */
   const AN_POSITION = { 0: "after-system", 1: "in-chat", 2: "before-system" };
   const AN_ROLE = { 0: "system", 1: "user", 2: "assistant" };
+  let currentUserName = null;
   const writeChat = (n, characterId, groupId, saved) => {
     const id = uid(slug(n.title), "chats");
     // unlocked, like a chat made in the app: it follows the current preset
     // and persona, and starts under the current persona's name
-    const personaId = readJson("settings.json", {}).personaId || null;
-    const persona = personaId ? readJson("personas/" + personaId + ".json", null) : null;
+    if (currentUserName === null) {
+      const personaId = readJson("settings.json", {}).personaId || null;
+      const persona = personaId ? readJson("personas/" + personaId + ".json", null) : null;
+      currentUserName = (persona && persona.name) || "User";
+    }
     const meta = {
       id, title: n.title, characterId: characterId || null, groupId: groupId || null,
-      presetId: null, personaId: null, model: null, userName: (persona && persona.name) || "User",
+      presetId: null, personaId: null, model: null, userName: currentUserName,
       authorNote: null, lorebookIds: [], createdAt: Date.now(), updatedAt: Date.now(), tainted: true,
     };
     if (saved && typeof saved === "object") {
@@ -779,7 +815,7 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex", "regex"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "library", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex", "regex"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
@@ -858,7 +894,24 @@ export function handleRoute(req, host) {
     // a folder's own files before its subfolders: cards before sprite sets
     const depth = (n) => n.split("/").length;
     const orderedNames = Object.keys(entries).sort((a, b) => phaseOf(a) - phaseOf(b) || depth(a) - depth(b) || (a < b ? -1 : a > b ? 1 : 0));
+    // A card's sprites collect here and the card is written once: a card
+    // carrying a large lorebook, rewritten for every picture of a big sprite
+    // set, ran a batch past the plugin's time limit.
+    const spriteCards = new Map();
+    const writeSprites = () => {
+      for (const target of spriteCards.values()) {
+        if (!target) continue;
+        try {
+          target.card.studio = { ...target.card.studio, expressions: [...target.expressions.values()] };
+          writeJson("characters/" + target.id + "/card.json", target.card);
+        } catch (error) { summary.errors.push("sprites failed: " + target.id + ": " + String(error.message || error)); }
+      }
+      spriteCards.clear();
+    };
+    const SPRITE = /^characters\/([^/]+)\/([^/]+)\.(?:png|webp|gif|jpe?g)$/i;
     for (const name of orderedNames) {
+      // later entries may rewrite the same cards (a book linking to one)
+      if (spriteCards.size && !SPRITE.test(name)) writeSprites();
       if (entries[name]?.error) { summary.errors.push(name + ": " + entries[name].error); continue; }
       // A foreign tool keeps its personas, global regex scripts and the quick
       // reply sets on show in its settings file. It runs in order: personas
@@ -911,18 +964,19 @@ export function handleRoute(req, host) {
         continue;
       }
       // characters/<card name>/<expression>.png is that card's sprite set
-      const sprite = /^characters\/([^/]+)\/([^/]+)\.(?:png|webp|gif|jpe?g)$/i.exec(name);
+      const sprite = SPRITE.exec(name);
       if (sprite) {
         try {
-          const id = charIdByName().get(lower(sprite[1])) || charIdByName().get("file:" + lower(sprite[1]));
-          const card = id ? readJson("characters/" + id + "/card.json", null) : null;
-          const url = entries[name]?.__image__ && host.zip.image ? host.zip.image(originalNames[name]).url
-            : entryBase64(entries[name]) ? "data:image/" + (/\.webp$/i.test(name) ? "webp" : /\.gif$/i.test(name) ? "gif" : /\.jpe?g$/i.test(name) ? "jpeg" : "png") + ";base64," + entryBase64(entries[name]) : null;
-          if (card && url) {
-            const expressions = (card.studio?.expressions || []).filter((e) => e && e.name !== sprite[2]);
-            card.studio = { ...card.studio, expressions: [...expressions, { name: sprite[2], url }] };
-            writeJson("characters/" + id + "/card.json", card);
+          const folder = lower(sprite[1]);
+          if (!spriteCards.has(folder)) {
+            const id = charIdByName().get(folder) || charIdByName().get("file:" + folder);
+            const card = id ? readJson("characters/" + id + "/card.json", null) : null;
+            spriteCards.set(folder, card ? { id, card, expressions: new Map((card.studio?.expressions || []).filter(Boolean).map((e) => [e.name, e])) } : null);
           }
+          const target = spriteCards.get(folder);
+          const url = !target ? null : entries[name]?.__image__ && host.zip.image ? host.zip.image(originalNames[name]).url
+            : entryBase64(entries[name]) ? "data:image/" + (/\.webp$/i.test(name) ? "webp" : /\.gif$/i.test(name) ? "gif" : /\.jpe?g$/i.test(name) ? "jpeg" : "png") + ";base64," + entryBase64(entries[name]) : null;
+          if (url) { target.expressions.delete(sprite[2]); target.expressions.set(sprite[2], { name: sprite[2], url }); }
         } catch (error) { summary.errors.push("sprite failed: " + name + ": " + String(error.message || error)); }
         continue;
       }
@@ -1024,7 +1078,7 @@ export function handleRoute(req, host) {
           // group lists, then by the exported _memberNames
           const sourceMembers = g.memberIds || g.members || [];
           const resolvedMembers = sourceMembers.map((mid, i) => {
-            if (taken("characters/" + mid + "/card.json")) return mid;
+            if (cardName(mid)) return mid;
             const file = (g._memberFiles || [])[i] || String(mid).replace(/\.png$/i, "");
             const byFile = charIdByName().get("file:" + lower(file));
             if (byFile) return byFile;
@@ -1154,9 +1208,8 @@ export function handleRoute(req, host) {
               } catch {}
             }
             // title prefix from the resolved owner, not the zip folder slug
-            const ownerCard = characterId ? readJson("characters/" + characterId + "/card.json", null) : null;
-            const ownerGroup = groupId ? readJson("groups/" + groupId + ".json", null) : null;
-            const ownerName = ownerCard?.name || ownerGroup?.name;
+                        const ownerGroup = groupId ? readJson("groups/" + groupId + ".json", null) : null;
+            const ownerName = (characterId && cardName(characterId)) || ownerGroup?.name;
             // the slug filename is a lossy echo of the title (no case, no
             // punctuation); the sidecar has the real one, so only fall back
             // to un-slugging when there is no sidecar to read
@@ -1173,7 +1226,7 @@ export function handleRoute(req, host) {
               // messages map one to one onto the lines that carry text
               const said = lines.filter((l) => l && typeof l.mes === "string");
               n.msgs.forEach((m, i) => {
-                if (m.charId && taken("characters/" + m.charId + "/card.json")) return;
+                if (m.charId && cardName(m.charId)) return;
                 const file = said[i] && typeof said[i].original_avatar === "string" ? said[i].original_avatar.replace(/\.png$/i, "") : "";
                 m.charId = (file && byName.get("file:" + lower(file))) || (m.name && byName.get(String(m.name).toLowerCase())) || null;
               });
@@ -1184,6 +1237,7 @@ export function handleRoute(req, host) {
         continue;
       }
     }
+    writeSprites();
 
     mergeLibrary(libraryAdds);
 
