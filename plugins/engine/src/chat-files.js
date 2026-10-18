@@ -29,10 +29,19 @@ export function loadChat(fsx, id) {
   if (!meta) return null;
   meta.presetId = chatPresetId(fsx, meta);
   meta.personaId = chatPersonaId(fsx, meta);
-  let msgs = [];
-  try {
-    msgs = fsx.read("chats/" + id + ".jsonl").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
-  } catch { /* new chat */ }
+  // Only a transcript that is not there is a new chat. One that could not be
+  // read (too big for this call, or the disk said no) must fail the route:
+  // taken for empty, the next save would write the chat over with nothing.
+  let text = "";
+  try { text = fsx.read("chats/" + id + ".jsonl"); } catch (error) {
+    if (!/ENOENT|no such file/i.test(String(error?.message || error))) throw error;
+  }
+  const msgs = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    // a line torn by a crash costs that line, not the chat
+    try { msgs.push(JSON.parse(line)); } catch { /* unreadable line */ }
+  }
   return { meta, msgs };
 }
 export function saveChat(fsx, id, meta, msgs) {
