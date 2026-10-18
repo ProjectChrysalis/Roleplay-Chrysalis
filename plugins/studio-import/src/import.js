@@ -451,7 +451,9 @@ export function handleRoute(req, host) {
   function writeCard(card) {
     const id = uid(slug(card.name), "characters");
     const importedAt = Date.now();
-    card.studio = { ...card.studio, createdAt: card.studio?.createdAt || importedAt, importedAt };
+    // a foreign card keeps its favourite mark in extensions.fav (true or "true")
+    const fav = card.extensions?.fav === true || card.extensions?.fav === "true";
+    card.studio = { ...card.studio, createdAt: card.studio?.createdAt || importedAt, importedAt, ...(fav && card.studio?.favorite === undefined ? { favorite: true } : {}) };
     writeJson("characters/" + id + "/card.json", card);
     summary.characters.push(id);
     written = id;
