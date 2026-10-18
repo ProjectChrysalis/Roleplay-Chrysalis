@@ -213,6 +213,10 @@ as `{ __b64__: true, base64 }` — use `entryBase64`, never the raw key.
 Entries are handled in phase order (characters → books → presets → regex →
 personas → groups → chats → databank), because the later phases resolve the
 earlier ones by name.
+Foreign settings restore personal tag names, colors and folder display, plus
+global and auxiliary character lorebook links. `user/images/` imports before
+chats; both legacy image fields and media arrays resolve to stored attachments.
+The `chatImages` lookup outlives batches and is removed at finish.
 
 ## Memory, pictures, regex, groups, MCP (how they work now)
 
@@ -441,8 +445,9 @@ media just because one character was deleted.
 Archive imports use the engine's `/__imports` upload jobs: 8 MB raw chunks,
 disk-backed archive indexing, phase-ordered bounded entry batches, progress,
 pause and resume by reselecting the same file. Limits are 32 GB compressed,
-256 GB expanded, one million files, and 64 MB per entry or card package. Large
-entries are reported rather than silently dropped. Temporary name lookups live
+256 GB expanded and one million files. Large text entries are read in slices;
+card images are limited to 64 MB and other binary entries to 256 MB. Oversized
+images are reported rather than silently dropped. Temporary name lookups live
 in `data/__lookup/` and are removed after import. Old engines use the legacy
 path only for archives up to 16 MB; larger imports request an engine update.
 
