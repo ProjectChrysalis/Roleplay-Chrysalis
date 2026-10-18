@@ -22,11 +22,13 @@ export function chatTime(v) {
 }
 
 export function normalizeChatLines(raw) {
-  // raw: {character?: string, file?: string, lines: [public chat-line objects]}
+  // raw: {character?: string, file?: string, lines: [public chat-line objects],
+  // startAt?: the time of the message before these lines, for a transcript
+  // read in slices}
   if (!raw || !Array.isArray(raw.lines) || !raw.lines.length) return null;
   const uid = (p) => p + Math.random().toString(36).slice(2, 9);
   const header = raw.lines[0] && typeof raw.lines[0].mes !== "string" ? raw.lines[0] : null;
-  let last = (header && chatTime(header.create_date)) ?? Date.now();
+  let last = raw.startAt ?? (header && chatTime(header.create_date)) ?? Date.now();
   const msgs = [];
   for (const l of raw.lines) {
     if (!l || typeof l.mes !== "string") continue;

@@ -687,8 +687,12 @@ export function handleRoute(req, host) {
   const AN_POSITION = { 0: "after-system", 1: "in-chat", 2: "before-system" };
   const AN_ROLE = { 0: "system", 1: "user", 2: "assistant" };
   let currentUserName = null;
-  const writeChat = (n, characterId, groupId, saved) => {
-    const id = uid(slug(n.title), "chats");
+  /** `streamed` is a transcript already appended to chats/<id>.jsonl a slice
+   *  at a time: {id, count, first, last, hasUser}. */
+  const writeChat = (n, characterId, groupId, saved, streamed = null) => {
+    const id = streamed ? streamed.id : uid(slug(n.title), "chats");
+    const first = streamed ? streamed.first : n.msgs[0];
+    const last = streamed ? streamed.last : n.msgs[n.msgs.length - 1];
     // unlocked, like a chat made in the app: it follows the current preset
     // and persona, and starts under the current persona's name
     if (currentUserName === null) {
@@ -750,15 +754,18 @@ export function handleRoute(req, host) {
       }
       const book = typeof cm.world_info === "string" && cm.world_info ? bookIdByName.get(lower(cm.world_info)) : null;
       if (book) meta.chatLorebookIds = [book];
-      const started = chatTime(n.header.create_date) ?? n.msgs[0]?.at;
+      const started = chatTime(n.header.create_date) ?? first?.at;
       if (typeof started === "number") meta.createdAt = started;
-      const latest = n.msgs[n.msgs.length - 1]?.at;
+      const latest = last?.at;
       if (typeof latest === "number") meta.updatedAt = latest;
     }
-    fsx.write("chats/" + id + ".jsonl", n.msgs.map((m) => JSON.stringify(m)).join("\n") + "\n");
+    if (!streamed) fsx.write("chats/" + id + ".jsonl", n.msgs.map((m) => JSON.stringify(m)).join("\n") + "\n");
     // what the chat list shows, so it never has to read the transcript
-    const last = n.msgs[n.msgs.length - 1];
-    meta.listing = { messageCount: n.msgs.length, preview: last ? String(last.text || "").slice(0, 160) : "", hasUser: n.msgs.some((m) => m && m.role === "user") };
+    meta.listing = {
+      messageCount: streamed ? streamed.count : n.msgs.length,
+      preview: last ? String(last.text || "").slice(0, 160) : "",
+      hasUser: streamed ? streamed.hasUser : n.msgs.some((m) => m && m.role === "user"),
+    };
     writeJson("chats/" + id + ".meta.json", meta);
     if (Array.isArray(n.memories) && n.memories.length) {
       writeJson("chats/" + id + ".memories.json", n.memories);
@@ -862,6 +869,24 @@ export function handleRoute(req, host) {
       if (raw.endsWith(".charx")) continue; // handled as files, not zips
       const name = normalizeEntryName(raw);
       if (entries[name] === undefined) { entries[name] = rawEntries[raw]; originalNames[name] = raw; }
+    }
+    // A transcript is read a line at a time further down; any other large
+    // text (a lorebook, settings) has to be parsed whole, so its slices are
+    // joined back together here.
+    for (const name of Object.keys(entries)) {
+      if (entries[name]?.__large__ !== true || name.endsWith(".jsonl") || !host.zip.read) continue;
+      try {
+        const parts = [];
+        for (let next = 0; next !== null;) {
+          const slice = host.zip.read(originalNames[name], next, 64 * 1024 * 1024);
+          parts.push(slice.text);
+          next = slice.next;
+        }
+        entries[name] = parts.join("");
+      } catch (error) {
+        summary.errors.push(name + ": " + String(error?.message || error));
+        delete entries[name];
+      }
     }
 
     // charx package: card.json at the root + assets/ entries the card
@@ -1056,7 +1081,7 @@ export function handleRoute(req, host) {
             for (const book of Array.isArray(books.linked) ? books.linked : []) if (typeof book === "string") addBookLink("worldLinks", book, id);
             if (typeof books.embedded === "string" && books.embedded) addBookLink("embeddedLinks", books.embedded, id);
           }
-        } catch { summary.errors.push("card failed: " + name); }
+        } catch (error) { summary.errors.push("card failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if ((name.startsWith("worlds/") || name.startsWith("lorebooks/")) && name.endsWith(".json") && isText(entries[name])) {
@@ -1064,7 +1089,7 @@ export function handleRoute(req, host) {
           const fallback = name.split("/").pop().replace(/\.json$/i, "");
           const raw = JSON.parse(entries[name]);
           writeBook(normalizeBook(raw, fallback), fallback, raw && raw._studio);
-        } catch { summary.errors.push("world failed: " + name); }
+        } catch (error) { summary.errors.push("world failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       // A foreign tool files chat-completion and text-completion presets under
@@ -1073,14 +1098,14 @@ export function handleRoute(req, host) {
         try {
           const n = restorePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
           if (n) writePreset(n);
-        } catch { summary.errors.push("preset failed: " + name); }
+        } catch (error) { summary.errors.push("preset failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if ((name.startsWith("regex/") || name.startsWith("User Settings/regex/")) && name.endsWith(".json") && isText(entries[name])) {
         try {
           const raw = JSON.parse(entries[name]);
           for (const one of Array.isArray(raw) ? raw : [raw]) writeRegex(normalizeRegex(one));
-        } catch { summary.errors.push("regex failed: " + name); }
+        } catch (error) { summary.errors.push("regex failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name.startsWith("databank/") && name.endsWith(".json") && isText(entries[name])) {
@@ -1091,7 +1116,7 @@ export function handleRoute(req, host) {
             writeJson("databank/" + did + ".json", { ...d, id: did });
             summary.databank.push(did);
           }
-        } catch { summary.errors.push("databank failed: " + name); }
+        } catch (error) { summary.errors.push("databank failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name.startsWith("groups/") && name.endsWith(".json") && isText(entries[name])) {
@@ -1126,11 +1151,11 @@ export function handleRoute(req, host) {
           });
           for (const key of [g.name, g.id, g.chat_id, gid, ...(Array.isArray(groupChats) ? groupChats : [])]) if (key) { groupIdByName.set(lower(key), gid); groupIdByName.set(slug(key), gid); }
           summary.groups.push(gid);
-        } catch { summary.errors.push("group failed: " + name); }
+        } catch (error) { summary.errors.push("group failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name.startsWith("extensions/regex/") && name.endsWith(".json") && isText(entries[name])) {
-        try { writeRegex(normalizeRegex(JSON.parse(entries[name]))); } catch { summary.errors.push("regex failed: " + name); }
+        try { writeRegex(normalizeRegex(JSON.parse(entries[name]))); } catch (error) { summary.errors.push("regex failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name === "personas.json" && isText(entries[name])) {
@@ -1140,7 +1165,7 @@ export function handleRoute(req, host) {
           for (const [pname, p] of Object.entries(map || {})) {
             writePersona(pname, typeof p === "string" ? p : String((p && p.description) || (p && p.position !== undefined && p.text) || ""));
           }
-        } catch { summary.errors.push("personas failed: " + name); }
+        } catch (error) { summary.errors.push("personas failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name.startsWith("personas/") && name.endsWith(".json") && isText(entries[name])) {
@@ -1148,14 +1173,14 @@ export function handleRoute(req, host) {
           const p = JSON.parse(entries[name]);
           // the whole record, not just the two fields the flat map carries
           writePersona(String(p.name || name.split("/").pop().replace(/\.json$/, "")), String(p.description || ""), p);
-        } catch { summary.errors.push("persona failed: " + name); }
+        } catch (error) { summary.errors.push("persona failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name.startsWith("presets/") && name.endsWith(".json") && isText(entries[name])) {
         try {
           const n = restorePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
           if (n) writePreset(n);
-        } catch { summary.errors.push("preset failed: " + name); }
+        } catch (error) { summary.errors.push("preset failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       // a persona's picture, filed under the name its settings entry gave it
@@ -1174,7 +1199,7 @@ export function handleRoute(req, host) {
         try {
           const theme = themeFromForeign(JSON.parse(entries[name]));
           if (theme) libraryAdds.themes.push(theme);
-        } catch { summary.errors.push("theme failed: " + name); }
+        } catch (error) { summary.errors.push("theme failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       if (name.startsWith("quickreplies/") && name.endsWith(".json") && isText(entries[name])) {
@@ -1182,7 +1207,7 @@ export function handleRoute(req, host) {
           const raw = JSON.parse(entries[name]);
           const set = quickReplySetFromForeign(raw, !qrVisible.get("__listed") || qrVisible.get(lower(raw?.name)) === true);
           if (set) libraryAdds.qrSets.push(set);
-        } catch { summary.errors.push("quick replies failed: " + name); }
+        } catch (error) { summary.errors.push("quick replies failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
       // an instruct template becomes a preset of its own, its turn markers
@@ -1192,16 +1217,26 @@ export function handleRoute(req, host) {
         try {
           const n = normalizePreset(JSON.parse(entries[name]), name.split("/").pop().replace(/\.json$/i, ""));
           if (n) writePreset(n);
-        } catch { summary.errors.push("template failed: " + name); }
+        } catch (error) { summary.errors.push("template failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
-      if ((name.startsWith("chats/") || name.startsWith("group chats/")) && name.endsWith(".jsonl") && isText(entries[name])) {
+      // a transcript too big to hand over whole arrives as a handle, read a
+      // slice at a time and written as it goes
+      const sliced = entries[name]?.__large__ === true && !!host.zip.read;
+      if ((name.startsWith("chats/") || name.startsWith("group chats/")) && name.endsWith(".jsonl") && (isText(entries[name]) || sliced)) {
         try {
           const parts = name.split("/");
           const character = (parts[1] || "").replace(/\.jsonl$/i, "");
           const file = (parts[2] || parts[1] || "chat").replace(/\.jsonl$/i, "");
-          const lines = entries[name].split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
-          const n = normalizeChatLines({ character, file, lines });
+          const parseLines = (text) => text.split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+          let slice = sliced ? host.zip.read(originalNames[name], 0) : null;
+          const lines = parseLines(sliced ? slice.text : entries[name]);
+          let n = normalizeChatLines({ character, file, lines });
+          while (sliced && !n && slice.next !== null) {
+            slice = host.zip.read(originalNames[name], slice.next);
+            for (const line of parseLines(slice.text)) lines.push(line);
+            n = normalizeChatLines({ character, file, lines });
+          }
           // sidecars our own backups write next to the transcript: everything
           // ABOUT the chat, and its facts vault
           const sidecar = name.replace(/\.jsonl$/i, ".meta.json");
@@ -1245,19 +1280,42 @@ export function handleRoute(req, host) {
             else if (ownerName) n.title = ownerName + ": " + unslugTitle(file);
             // group message attribution: engine ids changed on restore —
             // remap each msg.charId by id, then by the speaker name
-            if (groupId) {
+            const attribute = (msgs, from) => {
+              if (!groupId) return;
               const byName = charIdByName();
               // messages map one to one onto the lines that carry text
-              const said = lines.filter((l) => l && typeof l.mes === "string");
-              n.msgs.forEach((m, i) => {
+              const said = from.filter((l) => l && typeof l.mes === "string");
+              msgs.forEach((m, i) => {
                 if (m.charId && cardName(m.charId)) return;
                 const file = said[i] && typeof said[i].original_avatar === "string" ? said[i].original_avatar.replace(/\.png$/i, "") : "";
                 m.charId = (file && byName.get("file:" + lower(file))) || (m.name && byName.get(String(m.name).toLowerCase())) || null;
               });
+            };
+            attribute(n.msgs, lines);
+            if (!sliced) writeChat(n, characterId, groupId, saved);
+            else {
+              const id = uid(slug(n.title), "chats");
+              const transcript = "chats/" + id + ".jsonl";
+              const streamed = { id, count: 0, first: n.msgs[0], last: null, hasUser: false };
+              const put = (msgs) => {
+                fsx.append(transcript, msgs.map((m) => JSON.stringify(m)).join("\n") + "\n");
+                streamed.count += msgs.length;
+                streamed.last = msgs[msgs.length - 1];
+                if (!streamed.hasUser) streamed.hasUser = msgs.some((m) => m.role === "user");
+              };
+              put(n.msgs);
+              while (slice.next !== null) {
+                slice = host.zip.read(originalNames[name], slice.next);
+                const more = parseLines(slice.text);
+                const part = more.length ? normalizeChatLines({ character, file, lines: more, startAt: streamed.last.at }) : null;
+                if (!part) continue;
+                attribute(part.msgs, more);
+                put(part.msgs);
+              }
+              writeChat(n, characterId, groupId, saved, streamed);
             }
-            writeChat(n, characterId, groupId, saved);
           }
-        } catch { summary.errors.push("chat failed: " + name); }
+        } catch (error) { summary.errors.push("chat failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }
     }

@@ -4066,3 +4066,60 @@ describe("rp studio: an archive's chats find cards imported before it", () => {
     expect(meta.characterId).toBe("aria");
   }, 30_000);
 });
+
+describe("rp studio: a transcript too big to hand over whole", () => {
+  it("reads it a slice at a time and writes it as it goes", async () => {
+    fs.mkdirSync(path.join(root, "characters", "aria"), { recursive: true });
+    fs.writeFileSync(path.join(root, "characters", "aria", "card.json"), JSON.stringify({ name: "Aria Vale" }));
+    const name = "chats/Aria Vale/Aria Vale - 2024-07-12@01h31m37s123ms.jsonl";
+    const lines = [JSON.stringify({ user_name: "You", character_name: "Aria Vale", create_date: "2024-07-12@01h31m37s123ms" })];
+    for (let i = 0; i < 500; i++) lines.push(JSON.stringify({ name: i % 2 ? "You" : "Aria Vale", is_user: i % 2 === 1, mes: "line " + i, send_date: "July 12, 2024 1:31am" }));
+    const text = lines.join("\n") + "\n";
+    const m = mockHost();
+    const fsx = m.host.fs as Record<string, unknown>;
+    fsx.append = (rel: string, content: string) => { fs.mkdirSync(path.dirname(path.resolve(root, rel)), { recursive: true }); fs.appendFileSync(path.resolve(root, rel), content); };
+    let reads = 0;
+    (m.host as { zip: unknown }).zip = {
+      entries: () => ({ [name]: { __large__: true, size: text.length } }),
+      list: () => 1,
+      // slices of about 2 KB, cut after a newline
+      read: (entry: string, offset = 0) => {
+        expect(entry).toBe(name);
+        reads++;
+        const end = offset + 2048 >= text.length ? text.length : text.lastIndexOf("\n", offset + 2048) + 1;
+        return { text: text.slice(offset, end), next: end >= text.length ? null : end };
+      },
+    };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { zipBase64: "x" } }, m);
+    expect(r.json.errors).toEqual([]);
+    const chatId = (r.json.chats as string[])[0];
+    const saved = fs.readFileSync(path.join(root, "chats", `${chatId}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(saved.map((msg) => msg.text)).toEqual(Array.from({ length: 500 }, (_, i) => "line " + i));
+    expect(reads).toBeGreaterThan(5);
+    const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", `${chatId}.meta.json`), "utf8"));
+    expect(meta.characterId).toBe("aria");
+    expect(meta.listing).toEqual({ messageCount: 500, preview: "line 499", hasUser: true });
+  }, 30_000);
+});
+
+describe("rp studio: a transcript that cannot be read", () => {
+  it("fails the request instead of treating the chat as empty", async () => {
+    const { loadChat } = await import("../plugins/engine/src/chat-files.js");
+    const files: Record<string, string> = { "chats/c.meta.json": JSON.stringify({ id: "c", title: "C" }) };
+    let failing = true;
+    const fsx = {
+      read: (rel: string) => {
+        if (rel === "chats/c.jsonl" && failing) throw new Error("out of memory");
+        if (rel in files) return files[rel];
+        throw new Error("ENOENT: no such file or directory (" + rel + ")");
+      },
+      list: () => [],
+    };
+    expect(() => loadChat(fsx, "c")).toThrow("out of memory");
+    failing = false;
+    files["chats/c.jsonl"] = '{"id":"a","text":"kept"}\n{"id":"b","te\n{"id":"c","text":"also kept"}\n';
+    expect(loadChat(fsx, "c")?.msgs.map((msg: { id: string }) => msg.id)).toEqual(["a", "c"]);
+    delete files["chats/c.jsonl"];
+    expect(loadChat(fsx, "c")?.msgs).toEqual([]);
+  });
+});
