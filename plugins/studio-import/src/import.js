@@ -39,7 +39,7 @@ function memoLookups(fsx) {
   return {
     ...fsx,
     lookup: (collection, key, value) => {
-      const k = collection + "\n" + String(key).toLowerCase();
+      const k = collection + "\n" + String(key);
       if (value !== undefined) { const out = lookup(collection, key, value); seen.set(k, out); return out; }
       if (!seen.has(k)) seen.set(k, lookup(collection, key));
       return seen.get(k);
@@ -486,15 +486,34 @@ export function handleRoute(req, host) {
     if (/^[a-f0-9-]{36}$/.test(id) && fsx.lookup) return { get: (key) => fsx.lookup(id + "_" + collection, key), set: (key, value) => fsx.lookup(id + "_" + collection, key, value) };
     return (localLookups[collection] ??= new Map());
   }
-  /** World book name → the cards that name it. */
-  const worldLinks = () => carried("worldLinks");
-  /** Book name → cards waiting for it, as a linked book or as their own
-   *  embedded one ("embeddedLinks"). */
+  /** A lookup value is limited to 4 KB; pages keep every waiting link while
+   *  bounding the bytes read and rewritten for each added character. */
   function addBookLink(collection, bookName, cardId) {
     const key = String(bookName).trim().toLowerCase();
-    const ids = [...(carried(collection).get(key) || []), cardId];
-    while (JSON.stringify(ids).length > 4000) ids.shift();
-    carried(collection).set(key, ids);
+    const table = carried(collection);
+    const pages = carried(collection + "_pages");
+    let index = table.get(key);
+    if (Array.isArray(index)) {
+      const old = index;
+      index = { pages: Math.max(1, Math.ceil(old.length / 64)) };
+      for (let i = 0; i < index.pages; i++) pages.set(JSON.stringify([key, i]), old.slice(i * 64, (i + 1) * 64));
+    }
+    index = index || { pages: 1 };
+    let page = index.pages - 1;
+    let ids = pages.get(JSON.stringify([key, page])) || [];
+    if (ids.length >= 64) { page++; index = { pages: page + 1 }; ids = []; }
+    pages.set(JSON.stringify([key, page]), [...ids, cardId]);
+    table.set(key, index);
+  }
+  function waitingBookLinks(collection, bookName) {
+    const key = String(bookName).trim().toLowerCase();
+    const table = carried(collection);
+    const pages = carried(collection + "_pages");
+    const index = table.get(key);
+    if (!index || Array.isArray(index)) return index;
+    const ids = [];
+    for (let i = 0; i < index.pages; i++) ids.push(...(pages.get(JSON.stringify([key, i])) || []));
+    return ids;
   }
   /** Cards may embed a lorebook — write it as a book file and link it via
    *  the card's studio bag so the app scopes it to that character. charx
@@ -593,7 +612,7 @@ export function handleRoute(req, host) {
             : {}),
         }
       : {};
-    const waiting = (collection) => carried(collection).get(lower(n.name || fallback)) || (fallback ? carried(collection).get(lower(fallback)) : null) || [];
+    const waiting = (collection) => waitingBookLinks(collection, n.name || fallback) || (fallback ? waitingBookLinks(collection, fallback) : null) || [];
     const linked = waiting("worldLinks");
     if (!extra.linkedCharacterIds && linked.length) extra.linkedCharacterIds = linked;
     writeJson("lorebooks/" + id + ".json", { ...n, ...extra, id });
@@ -922,18 +941,20 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "library", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex", "regex", "chatImages"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "library", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "worldLinks_pages", "embeddedLinks", "embeddedLinks_pages", "cardRegex", "regex", "chatImages"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
   if (req.path === "/import/zip") {
     const rawEntries = host.zip.entries();
     const libraryAdds = { themes: [], qrSets: [] };
+    // Lookup keys are case-insensitive; encode paths to keep distinct files.
+    const imageKey = (name) => Array.from(name, (c) => c.codePointAt(0).toString(16)).join("-");
     const resolveImage = (url) => {
       if (typeof url !== "string") return null;
       let file;
       try { file = decodeURIComponent(url.split(/[?#]/)[0]).replace(/^\/+/, ""); } catch { return null; }
-      return file.startsWith("user/images/") ? carried("chatImages").get(file) || null : null;
+      return file.startsWith("user/images/") ? carried("chatImages").get(imageKey(file)) || null : null;
     };
 
     const entries = {};
@@ -1051,7 +1072,7 @@ export function handleRoute(req, host) {
           const url = entries[name]?.__image__ && host.zip.image ? host.zip.image(originalNames[name]).url
             : b64 ? "data:image/" + (/\.jpe?g$/i.test(name) ? "jpeg" : name.split(".").pop().toLowerCase()) + ";base64," + b64 : null;
           if (!url) throw new Error("Unreadable image");
-          carried("chatImages").set(name, url);
+          carried("chatImages").set(imageKey(name), url);
         } catch (error) { summary.errors.push("chat image failed: " + name + ": " + String(error?.message || error)); }
         continue;
       }

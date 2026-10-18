@@ -33,7 +33,7 @@ beforeEach(() => {
   transcript = [{ id: 'old-reply', role: 'char', charId: 'aria', name: 'Aria', text: 'Previous reply', at: 1, swipes: ['Previous reply'], swipe: 0 }]
   useApp.setState({ chats: [engineChatToUI(meta, transcript)], streaming: null, model: null })
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input)
+    const url = String(input).split('?')[0]!
     if (/\/(send|continue|swipe)$/.test(url)) {
       return new Promise<Response>((resolve, reject) => {
         finish = resolve

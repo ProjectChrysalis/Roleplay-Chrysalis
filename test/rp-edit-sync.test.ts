@@ -303,3 +303,100 @@ test('a group names only its own members, whatever list it is built from', () =>
   expect(group.firstMessage).toBe('*Cy, Ann are here.*')
   expect(group.avatar).toBe(library[2]?.avatar)
 })
+
+test('opening a chat during a library refresh keeps its loaded messages', async () => {
+  const meta = { id: 'opened-during-load', title: 'Opened', characterId: 'test', createdAt: 1, messageCount: 2, hasUser: true }
+  const message = { id: 'loaded-reply', name: 'Test', charId: 'test', role: 'char' as const, text: 'Still here', at: 1 }
+  const preset = { ...presetToEngine(buildDefaultPreset()), id: 'default' }
+  let deliver!: () => void
+  let started!: () => void
+  const reading = new Promise<void>((resolve) => { started = resolve })
+  globalThis.fetch = (async (input) => {
+    const url = String(input)
+    if (url.includes('/bootstrap')) {
+      started()
+      return new Promise<Response>((resolve) => { deliver = () => resolve(Response.json({
+        settings: { model: null, personaId: null, ui: defaultSettings() },
+        library: { qrSets: [], themes: [], backgrounds: [], tags: [], folders: [], connectionProfiles: [] },
+        characters: [{ id: 'test', name: 'Test' }], presets: [preset], personas: [], groups: [], lorebooks: [], regex: [],
+        chats: [meta], databank: { files: [] }, activeChat: null,
+      })) })
+    }
+    return Response.json(url.endsWith('/models') ? { models: [] } : { connections: [] })
+  }) as typeof fetch
+  useApp.setState({ boot: 'ready', activeChatId: null, chats: [engineChatToUI(meta, [])] })
+  const hydrate = useApp.getState().hydrate()
+  await reading
+  useApp.setState({ activeChatId: meta.id, chats: [{ ...engineChatToUI(meta, [message]), cursor: 'loaded-version' }] })
+  deliver()
+  await hydrate
+  const chat = useApp.getState().chats.find((c) => c.id === meta.id)
+  expect(chat?.messages.map((m) => m.swipes[m.activeSwipe]?.content)).toEqual(['Still here'])
+  expect(chat?.cursor).toBe('loaded-version')
+})
+
+test('an upload resumes at the server offset after a lost chunk acknowledgement', async () => {
+  const { uploadArchive } = await import('../src/lib/engine')
+  const file = new File([new Uint8Array(24 * 1024 * 1024 + 1)], 'retry.zip')
+  const state = { id: 'upload-probe', status: 'uploading', uploaded: 0, size: file.size, files: 1 }
+  const offsets: number[] = []
+  let stateReads = 0
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input), 'http://localhost')
+    if (url.pathname.endsWith('/new')) return Response.json(state)
+    if (init?.method === 'PUT') {
+      const offset = Number(url.searchParams.get('offset'))
+      expect(offset).toBe(state.uploaded)
+      offsets.push(offset)
+      state.uploaded += (init.body as Blob).size
+      if (state.uploaded === state.size) state.status = 'ready'
+      if (offsets.length === 3) throw new TypeError('Connection lost after the write')
+      return Response.json(state)
+    }
+    stateReads++
+    return Response.json(state)
+  }) as typeof fetch
+  const result = await uploadArchive(file)
+  expect('state' in result && result.state.uploaded).toBe(file.size)
+  expect(offsets).toEqual([0, 8 * 1024 * 1024, 16 * 1024 * 1024, 24 * 1024 * 1024])
+  expect(stateReads).toBe(1)
+})
+
+test('boot reads the active transcript separately from library collections', async () => {
+  const { fetchBootstrap } = await import('../src/lib/engine')
+  const paths: string[] = []
+  const transcript = { meta: { id: 'huge-chat' }, messages: [], version: 'current', from: 2, total: 2 }
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input), 'http://localhost')
+    paths.push(url.pathname + url.search)
+    if (url.pathname.endsWith('/bootstrap')) {
+      expect(url.searchParams.has('chat')).toBe(false)
+      return Response.json({ characters: [], groups: [], personas: [], presets: [], lorebooks: [], regex: [], chats: [], activeChat: null })
+    }
+    return Response.json(transcript)
+  }) as typeof fetch
+  const boot = await fetchBootstrap('huge-chat', 'held-version')
+  expect(paths).toEqual(['/v1/apps/roleplay/bootstrap?paged=1', '/v1/apps/roleplay/chats/huge-chat?page=1&since=held-version'])
+  expect(boot.activeChat).toEqual(transcript)
+})
+
+test('transcript loading assembles pages and restarts if a write changes the version', async () => {
+  const { readChatTranscript } = await import('../src/lib/engine')
+  const meta = { id: 'paged' }
+  let restarted = false
+  const requests: string[] = []
+  globalThis.fetch = (async (input) => {
+    const url = new URL(String(input), 'http://localhost')
+    requests.push(url.search)
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    if (offset === 1 && !restarted) { restarted = true; return Response.json({ error: 'Chat changed' }, { status: 409 }) }
+    const version = restarted ? 'new' : 'old'
+    return Response.json({ meta, messages: [{ id: String(offset), text: version }], from: offset, total: 3,
+      beforeId: offset ? String(offset - 1) : null, version, next: offset < 2 ? offset + 1 : null })
+  }) as typeof fetch
+  const result = await readChatTranscript('paged')
+  expect(result.messages.map((message) => message.id)).toEqual(['0', '1', '2'])
+  expect(result.messages.map((message) => message.text)).toEqual(['new', 'new', 'new'])
+  expect(result.from).toBeUndefined()
+  expect(requests).toHaveLength(5)
+})

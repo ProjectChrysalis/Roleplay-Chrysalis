@@ -33,7 +33,7 @@ const idle = () => new Promise(resolve => setTimeout(resolve, 15))
 beforeEach(async () => {
   cancelled = []
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input)
+    const url = String(input).split('?')[0]!
     if (url.includes('/bootstrap')) return Response.json({
       characters: [{ id: 'fox', name: 'Shared name' }, { id: 'owl', name: 'Shared name' }],
       groups: [{ id: 'council', name: 'Council', memberIds: ['fox', 'owl'] }],

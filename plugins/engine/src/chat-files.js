@@ -57,7 +57,7 @@ function openTranscript(fsx, file) {
   const parsed = parseRecords(tail.lines);
   if (!parsed) return null;
   const target = new Array(tail.total);
-  const st = { file, target, offset: tail.from, total: tail.total, raw: new Array(tail.total), version: tail.version, aligned: true };
+  const st = { file, target, offset: tail.from, total: tail.total, raw: new Array(tail.total), version: tail.version, aligned: true, read: (from, to) => fsx.lines(file, from, to) };
   if (st.offset > 0) target.fill(UNREAD, 0, st.offset);
   for (let i = 0; i < parsed.length; i++) { target[st.offset + i] = parsed[i]; st.raw[st.offset + i] = tail.lines[i]; }
   // reading earlier: twice what is loaded each time, so walking back from
@@ -150,10 +150,28 @@ export function transcriptVersion(msgs) {
   return st ? st.version : null;
 }
 
+/** A bounded range without materializing the messages between it and the tail. */
+export function transcriptPage(msgs, from, limit) {
+  const total = msgs.length;
+  from = Math.max(0, Math.min(total, Math.floor(Number(from) || 0)));
+  const end = Math.min(total, from + limit);
+  const st = transcripts.get(msgs);
+  const read = (start, stop) => {
+    if (!st) return msgs.slice(start, stop);
+    const got = st.read(start, stop);
+    if (got.version !== st.version) throw new Error("This chat changed on disk while it was open. Try again.");
+    const records = parseRecords(got.lines);
+    if (!records) throw new Error("This chat contains an unreadable message.");
+    return records;
+  };
+  return { from, messages: read(from, end), total, beforeId: from > 0 ? read(from - 1, from)[0]?.id ?? null : null,
+    version: st?.version, next: end < total ? end : null };
+}
+
 /** What changed since a client read the transcript at `since`: the messages
  *  from the first one any save since then touched, or null when that is not
  *  known (an older version, or a write that went around saveChat). */
-export function transcriptSince(msgs, since) {
+export function transcriptSince(msgs, since, limit) {
   const st = transcripts.get(msgs);
   if (!st || typeof since !== "string" || !since) return null;
   let from;
@@ -168,6 +186,7 @@ export function transcriptSince(msgs, since) {
     if (!Number.isInteger(from) || from < 0) return null;
   }
   from = Math.min(from, msgs.length);
+  if (limit) return transcriptPage(msgs, from, limit);
   return { from, messages: msgs.slice(from), total: msgs.length, beforeId: from > 0 ? msgs[from - 1]?.id ?? null : null, version: st.version };
 }
 

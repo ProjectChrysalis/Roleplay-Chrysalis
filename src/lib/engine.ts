@@ -270,6 +270,32 @@ export interface EngineTranscript {
   from?: number
   total?: number
   beforeId?: string | null
+  next?: number | null
+}
+
+/** Assemble bounded responses before exposing a transcript to the store. */
+export async function readChatTranscript(chatId: string, since?: string): Promise<EngineTranscript> {
+  const path = `/chats/${encodeURIComponent(chatId)}`
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const first = await j<EngineTranscript>(`${path}?page=1${since ? `&since=${encodeURIComponent(since)}` : ''}`)
+      const messages = [...first.messages]
+      let next = first.next
+      while (next != null) {
+        const page = await j<EngineTranscript>(`${path}?page=1&offset=${next}${first.version ? `&version=${encodeURIComponent(first.version)}` : ''}`)
+        if (page.from !== next || page.version !== first.version || page.total !== first.total || (page.next != null && page.next <= next)) throw new Error('Chat changed while loading, try again')
+        messages.push(...page.messages)
+        next = page.next
+      }
+      if (typeof first.from === 'number' && messages.length + first.from !== first.total) throw new Error('Chat response is incomplete, try again')
+      const { next: _next, ...result } = first
+      if (!since) { delete result.from; delete result.beforeId }
+      return { ...result, messages }
+    } catch (error) {
+      if (attempt || !(error instanceof ApiError) || error.status !== 409) throw error
+      since = undefined
+    }
+  }
 }
 
 /** The collections bootstrap sends a page at a time, and the field each
@@ -280,14 +306,10 @@ const PAGED = {
 } as const
 type PagedKey = keyof typeof PAGED
 
-/** `chatId` asks for that chat's transcript inline — pass the one about to be
- *  shown so the first paint needs no follow-up fetch. A library too big for
- *  one plugin call comes in pages: bootstrap carries the first page of each
- *  collection, `more` says where the rest starts. */
+/** Collections and the active transcript use separate plugin calls so a
+ *  large chat does not share the library's sandbox memory budget. */
 export async function fetchBootstrap(chatId?: string | null, since?: string): Promise<EngineBootstrap> {
   const query = new URLSearchParams({ paged: '1' })
-  if (chatId) query.set('chat', chatId)
-  if (chatId && since) query.set('since', since)
   const boot = await j<EngineBootstrap & { more?: Partial<Record<PagedKey, { next: number; total: number }>> }>(`/bootstrap?${query}`)
   // a big collection splits into ranges read side by side; each range keeps
   // its place, so the collection comes back in the engine's order
@@ -297,14 +319,22 @@ export async function fetchBootstrap(chatId?: string | null, since?: string): Pr
     const size = Math.ceil((more.total - more.next) / count)
     for (let from = more.next; from < more.total; from += size) ranges.push({ key, from, end: Math.min(more.total, from + size), items: [] })
   }
-  await Promise.all(ranges.map(async (range) => {
+  const readActive = async () => {
+    if (!chatId) return
+    try {
+      boot.activeChat = await readChatTranscript(chatId, since)
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error
+    }
+  }
+  await Promise.all([readActive(), ...ranges.map(async (range) => {
     const [route, field] = PAGED[range.key]
     for (let next: number | null | undefined = range.from; next != null;) {
       const page: Record<string, unknown> & { next?: number | null } = await j(`${route}?offset=${next}&end=${range.end}`)
       range.items.push(...((page[field] as unknown[] | undefined) ?? []))
       next = page.next
     }
-  }))
+  })])
   for (const range of ranges) (boot[range.key] as unknown[]).push(...range.items)
   const updated = (m: EngineChatMeta) => m.updatedAt || m.createdAt || 0
   boot.chats.sort((a, b) => updated(b) - updated(a))
@@ -1669,7 +1699,7 @@ export async function uploadArchive(file: File, progress?: (stage: string, done:
     } catch (error) {
       // a dropped connection or a busy engine costs one chunk, not the
       // upload: wait, ask where the upload stands and go on from there
-      const refused = error instanceof ApiError && error.status < 500 && !/offset changed/.test(error.message)
+      const refused = error instanceof ApiError && error.status > 0 && error.status < 500 && !/offset changed/.test(error.message)
       if (refused || ++failures > 5) throw error
       await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** failures))
       check()

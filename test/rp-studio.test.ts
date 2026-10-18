@@ -4218,6 +4218,32 @@ describe("rp studio: long transcripts are read and written from the end", () => 
   };
   const transcript = (id: string) => fs.readFileSync(path.join(root, "chats", id + ".jsonl"), "utf8");
 
+  it("pages the whole transcript without reading the intervening history or mixing versions", async () => {
+    const id = seed(10000);
+    const m = mockHost();
+    const seen = withRecords(m);
+    const before = transcript(id);
+    const first = await drive(engineUrl, { method: "GET", path: `/chats/${id}?page=1` }, m);
+    expect(first.json).toMatchObject({ from: 0, total: 10000, next: 4000 });
+    expect(seen.records).toBeLessThanOrEqual(4400);
+    const version = String(first.json.version);
+    const ids = (first.json.messages as EngineMessage[]).map((message) => message.id);
+    for (const offset of [4000, 8000]) {
+      seen.records = 0;
+      const page = await drive(engineUrl, { method: "GET", path: `/chats/${id}?page=1&offset=${offset}&version=${encodeURIComponent(version)}` }, m);
+      expect(page.json.from).toBe(offset);
+      expect(seen.records).toBeLessThanOrEqual(4401);
+      ids.push(...(page.json.messages as EngineMessage[]).map((message) => message.id));
+    }
+    expect(ids).toEqual(Array.from({ length: 10000 }, (_, i) => "m" + i));
+    expect(transcript(id)).toBe(before);
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/m9999`, body: { text: "changed" } }, m);
+    expect((await drive(engineUrl, { method: "GET", path: `/chats/${id}?page=1&offset=4000&version=${encodeURIComponent(version)}` }, m)).status).toBe(409);
+    const changed = await drive(engineUrl, { method: "GET", path: `/chats/${id}?page=1&since=${encodeURIComponent(version)}` }, m);
+    expect(changed.json).toMatchObject({ from: 9999, total: 10000, next: null });
+    expect((changed.json.messages as EngineMessage[]).map((message) => message.text)).toEqual(["changed"]);
+  }, 30_000);
+
   it("edits near the end without reading the rest, and a client catches up from its version", async () => {
     const id = seed(3000);
     const m = mockHost();
@@ -4371,5 +4397,56 @@ describe("rp studio: archive organization and chat images", () => {
     expect(messages[0].attachments).toEqual([expect.objectContaining({ name: "A view", type: "image/png", url: "/v1/apps/roleplay/__media/photo.png" })]);
     expect(messages[1].attachments).toHaveLength(1);
     expect(messages[1].attachments[0].name).toBe("Photo");
+  });
+});
+
+describe("rp studio: a shared book in a large archive", () => {
+  it("keeps every waiting character across bounded lookup records", async () => {
+    const m = mockHost();
+    const values = new Map<string, unknown>();
+    Object.assign(m.host.fs, { lookup: (collection: string, key: string, value?: unknown) => {
+      if (value !== undefined) {
+        if (Buffer.byteLength(JSON.stringify(value)) > 4096) throw new Error("lookup value too large");
+        values.set(collection + ":" + key, value);
+      }
+      return values.get(collection + ":" + key) ?? null;
+    } });
+    const importId = "e8256ac0-4a48-488e-872c-dbd3a6a92177";
+    const expected: string[] = [];
+    for (let batch = 0; batch < 10; batch++) {
+      const entries = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`characters/card-${batch}-${i}.json`, JSON.stringify({ name: `Character with a long library name ${batch}-${i}`, extensions: { world: "Shared world" } })]));
+      (m.host as { zip: unknown }).zip = { entries: () => entries };
+      const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { importId } }, m);
+      expect(r.json.errors).toEqual([]);
+      expected.push(...r.json.characters as string[]);
+    }
+    (m.host as { zip: unknown }).zip = { entries: () => ({ "worlds/Shared world.json": JSON.stringify({ entries: { 0: { key: ["shared"], content: "Shared lore" } } }) }) };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { importId } }, m);
+    expect(r.json.errors).toEqual([]);
+    const bid = (r.json.lorebooks as string[])[0]!;
+    const book = JSON.parse(fs.readFileSync(path.join(root, `lorebooks/${bid}.json`), "utf8"));
+    expect(book.linkedCharacterIds).toEqual(expected);
+    for (const cid of expected) expect(JSON.parse(fs.readFileSync(path.join(root, `characters/${cid}/card.json`), "utf8")).studio.linkedLorebookIds).toEqual([bid]);
+  });
+});
+
+describe("rp studio: case-sensitive archive media", () => {
+  it("keeps pictures whose file names differ only in case distinct", async () => {
+    const m = mockHost();
+    const entries = {
+      "user/images/scene.png": { __image__: true },
+      "user/images/Scene.png": { __image__: true },
+      "chats/Aria/test.jsonl": JSON.stringify({ name: "Aria", mes: "Pictures", extra: { media: [{ type: "image", url: "/user/images/scene.png" }, { type: "image", url: "/user/images/Scene.png" }] } }),
+    };
+    const values = new Map<string, unknown>();
+    Object.assign(m.host.fs, { lookup: (collection: string, key: string, value?: unknown) => {
+      if (value !== undefined) values.set(collection + ":" + key.toLowerCase(), value);
+      return values.get(collection + ":" + key.toLowerCase()) ?? null;
+    } });
+    (m.host as { zip: unknown }).zip = { entries: () => entries, image: (name: string) => ({ url: name.endsWith("/Scene.png") ? "/blue.png" : "/red.png" }) };
+    const r = await drive(stUrl, { method: "POST", path: "/import/zip", body: { importId: "720d18b8-143a-454b-8c72-c2d018ec8af7" } }, m);
+    const id = (r.json.chats as string[])[0]!;
+    const message = JSON.parse(fs.readFileSync(path.join(root, `chats/${id}.jsonl`), "utf8"));
+    expect(message.attachments.map((a: { url: string }) => a.url)).toEqual(["/red.png", "/blue.png"]);
   });
 });

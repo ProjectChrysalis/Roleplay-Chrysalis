@@ -1,4 +1,4 @@
-import { saveChat, transcriptSince, transcriptVersion, wholeTranscript } from "../chat-files.js";
+import { saveChat, transcriptPage, transcriptSince, transcriptVersion, wholeTranscript } from "../chat-files.js";
 import { expandMacros } from "../macros.js";
 import { applyStashVars } from "../passes.js";
 import { chatPersona, chatUserName } from "../prompt.js";
@@ -9,13 +9,16 @@ import { uid } from "../util.js";
 import { globalVars, transcriptMacros } from "../variables.js";
 
 export function getChatRoute(c) {
-  const { req, op, ok, chat, meta, members } = c;
+  const { req, op, ok, err, chat, meta, members } = c;
   if (!op && req.method === "GET") {
     const memberList = members.map((m) => ({ id: m.id, name: m.name }));
     // ?since=<version>: only what changed after the copy the client holds
-    const part = req.query?.since ? transcriptSince(chat.msgs, String(req.query.since)) : null;
-    if (part) return ok({ meta, ...part, members: memberList });
+    const paged = req.query?.page === "1";
     const version = transcriptVersion(chat.msgs);
+    if (req.query?.version && req.query.version !== version) return err(409, "Chat changed while loading, try again");
+    const part = req.query?.since ? transcriptSince(chat.msgs, String(req.query.since), paged ? 4000 : undefined) : null;
+    if (part) return ok({ meta, ...part, members: memberList });
+    if (paged) return ok({ meta, ...transcriptPage(chat.msgs, req.query?.offset, 4000), members: memberList });
     return ok({ meta, messages: wholeTranscript(chat.msgs), ...(version ? { version } : {}), members: memberList });
   }
 }

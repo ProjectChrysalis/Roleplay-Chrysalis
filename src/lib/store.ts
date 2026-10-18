@@ -28,8 +28,8 @@ import { DEFAULT_AVATAR } from './utils'
 import {
   j, fetchModels, fetchEngineConnections, fetchBootstrap, connectStreams, ApiError, reloadWithReason,
   cardToCharacter, characterToCard, groupToCharacter,
-  engineChatToUI, engineMessageToUI, chatPatchOf, transcriptToUI,
-  type EngineChatMeta, type EngineMessage, type EngineConnectionInfo, type EngineTranscript,
+  engineChatToUI, engineMessageToUI, chatPatchOf, transcriptToUI, readChatTranscript,
+  type EngineChatMeta, type EngineMessage, type EngineConnectionInfo,
   enginePersonaToUI, presetToEngine, enginePresetToUI,
   lorebookToEngine, engineLorebookToUI, regexToEngine, engineRegexToUI,
 } from './engine'
@@ -417,16 +417,9 @@ export const useApp = create<AppState>()(
         // every second would make the app look like it reloads endlessly.
         if (get().boot !== 'ready') set({ boot: 'loading', bootError: null })
         try {
-          // ONE plugin dispatch for the whole app state: every route call
-          // rebuilds the plugin sandbox, so the old shape (ten collection
-          // calls, then one transcript call per chat) paid that cost ~25
-          // times and took seconds. The engine's own model/connection lists
-          // are separate routes and stay parallel to it.
           const heldBefore = get().chats.find((c) => c.id === get().activeChatId)
           const activeSince = heldBefore?.messages.length ? heldBefore.cursor : undefined
           const [boot, models, engineConnections] = await Promise.all([
-            // the chat about to be shown rides along, so the first paint needs
-            // no follow-up fetch
             fetchBootstrap(get().activeChatId, activeSince),
             fetchModels(),
             fetchEngineConnections(),
@@ -492,9 +485,13 @@ export const useApp = create<AppState>()(
             : !activeSince ? transcriptToUI(boot.activeChat)
               : heldActive?.cursor === activeSince ? transcriptToUI(boot.activeChat, heldActive) : null
           const rereadId = inlineId && !inline ? inlineId : null
+          const openedDuringLoad = get().activeChatId !== heldBefore?.id
+            ? get().chats.find((c) => c.id === get().activeChatId) : undefined
           const chatsFull = boot.chats.map((m) =>
             inlineId && m.id === inlineId
               ? inline ?? { ...engineChatToUI(boot.activeChat!.meta, []), messages: heldActive?.messages ?? [] }
+              : openedDuringLoad?.id === m.id
+                ? { ...engineChatToUI(m, []), messages: openedDuringLoad.messages, cursor: openedDuringLoad.cursor }
               : engineChatToUI(m, []),
           )
           // abandoned empty chats (created, never touched — at most a
@@ -592,6 +589,7 @@ export const useApp = create<AppState>()(
             // engine-side UI settings (agent-editable, data/settings.json `ui`)
           })
           if (rereadId) void refreshChat(set, get, rereadId, true)
+          if (openedDuringLoad && !openedDuringLoad.messages.length) void get().ensureChatMessages(openedDuringLoad.id)
           if (settings.ui) {
             const ui = settings.ui as Record<string, unknown>
             // Object-valued bags (tts, translation, …) merge ONE level deep:
@@ -885,7 +883,7 @@ export const useApp = create<AppState>()(
         await saves.settled()
         const seqAtStart = mutateSeq
         try {
-          const r = await j<EngineTranscript>(`/chats/${encodeURIComponent(chatId)}`)
+          const r = await readChatTranscript(chatId)
           if (mutateSeq !== seqAtStart) return
           const loaded = transcriptToUI(r)
           if (loaded) set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? loaded : c)) }))
@@ -2029,7 +2027,7 @@ async function refreshChat(set: SetFn, get: GetFn, chatId: ID, whole = false) {
   try {
     const held = get().chats.find((c) => c.id === chatId)
     const since = !whole && held?.cursor && held.messages.length ? held.cursor : undefined
-    const read = (s?: string) => j<EngineTranscript>(`/chats/${encodeURIComponent(chatId)}${s ? `?since=${encodeURIComponent(s)}` : ''}`)
+    const read = (s?: string) => readChatTranscript(chatId, s)
     const r = await read(since)
     if (mutateSeq !== seqAtStart || interruptedChats.has(chatId)) return // an optimistic mutation is ahead of this snapshot
     const now = get().chats.find((c) => c.id === chatId)
