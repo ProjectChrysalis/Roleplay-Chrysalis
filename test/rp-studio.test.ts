@@ -4173,3 +4173,119 @@ describe("rp studio: the library leaves embedded lorebooks on disk", () => {
     expect((whole.json.characters as Record<string, unknown>[])[0]!.character_book).toEqual(book);
   }, 30_000);
 });
+
+/** fs.lines / fs.spliceLines as the engine answers them, counting how many
+ *  records the plugin read. */
+function withRecords(m: ReturnType<typeof mockHost>) {
+  const seen = { records: 0 };
+  const file = (rel: string) => path.join(root, rel);
+  const records = (rel: string) => {
+    try { return fs.readFileSync(file(rel), "utf8").split("\n").filter((l) => l.trim()).map((l) => l.replace(/\r$/, "")); } catch { return null; }
+  };
+  const version = (rel: string) => { try { return String(Bun.hash(fs.readFileSync(file(rel)))); } catch { return null; } };
+  Object.assign(m.host.fs as object, {
+    lines: (rel: string, from = 0, to?: number) => {
+      const all = records(rel);
+      if (!all) return { lines: [], from: 0, total: 0, version: null };
+      const clamp = (n: number) => Math.max(0, Math.min(all.length, n < 0 ? all.length + n : n));
+      const a = clamp(from), b = Math.max(a, to == null ? all.length : clamp(to));
+      seen.records += b - a;
+      return { lines: all.slice(a, b), from: a, total: all.length, version: version(rel) };
+    },
+    spliceLines: (rel: string, from: number, lines: string[]) => {
+      const all = records(rel) ?? [];
+      if (from < 0 || from > all.length) throw new Error("from out of range");
+      fs.writeFileSync(file(rel), all.slice(0, from).concat(lines).map((l) => l + "\n").join(""));
+      return { total: from + lines.length, version: version(rel) };
+    },
+  });
+  return seen;
+}
+
+describe("rp studio: long transcripts are read and written from the end", () => {
+  const seed = (count: number) => {
+    const id = "long";
+    const msgs = Array.from({ length: count }, (_, i) => ({ id: "m" + i, name: i % 2 ? "Aria" : "You", charId: i % 2 ? "aria" : null, role: i % 2 ? "char" : "user", text: "line " + i, at: i, swipes: ["line " + i], swipe: 0 }));
+    fs.writeFileSync(path.join(root, "chats", id + ".meta.json"), JSON.stringify({ id, characterId: "aria", title: "Long", userName: "You", createdAt: 1, tainted: true }));
+    fs.writeFileSync(path.join(root, "chats", id + ".jsonl"), msgs.map((x) => JSON.stringify(x)).join("\n") + "\n");
+    return id;
+  };
+  const transcript = (id: string) => fs.readFileSync(path.join(root, "chats", id + ".jsonl"), "utf8");
+
+  it("edits near the end without reading the rest, and a client catches up from its version", async () => {
+    const id = seed(3000);
+    const m = mockHost();
+    const seen = withRecords(m);
+    const opened = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
+    expect((opened.json.messages as EngineMessage[]).length).toBe(3000);
+    const v0 = opened.json.version as string;
+    expect(v0).toBeTruthy();
+
+    const before = transcript(id);
+    seen.records = 0;
+    expect((await drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/m2998`, body: { text: "edited" } }, m)).status).toBe(200);
+    expect(seen.records).toBeLessThan(1000);
+    const after = transcript(id);
+    const cut = before.indexOf('{"id":"m2998"');
+    expect(after.slice(0, cut)).toBe(before.slice(0, cut));
+    expect(JSON.parse(after.trim().split("\n")[2998]!).text).toBe("edited");
+
+    seen.records = 0;
+    const caught = await drive(engineUrl, { method: "GET", path: `/chats/${id}?since=${encodeURIComponent(v0)}` }, m);
+    expect(seen.records).toBeLessThan(1000);
+    expect(caught.json).toMatchObject({ from: 2998, total: 3000, beforeId: "m2997" });
+    expect((caught.json.messages as EngineMessage[]).map((x) => x.text)).toEqual(["edited", "line 2999"]);
+    const v1 = caught.json.version as string;
+    expect((await drive(engineUrl, { method: "GET", path: `/chats/${id}?since=${encodeURIComponent(v1)}` }, m)).json).toMatchObject({ from: 3000, messages: [] });
+    // a version the log never saw: the whole chat
+    expect((await drive(engineUrl, { method: "GET", path: `/chats/${id}?since=nope` }, m)).json.from).toBeUndefined();
+
+    // the agent rewrites an early message in the file: every older version reads everything
+    fs.writeFileSync(path.join(root, "chats", id + ".jsonl"), after.replace('"text":"line 5"', '"text":"agent edit"'));
+    const external = await drive(engineUrl, { method: "GET", path: `/chats/${id}?since=${encodeURIComponent(v1)}` }, m);
+    expect(external.json.from).toBeUndefined();
+    expect((external.json.messages as EngineMessage[])[5]!.text).toBe("agent edit");
+    // a save after it says so too: a client still on v1 must not merge past the agent's change
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/m2999`, body: { text: "after the agent" } }, m);
+    const merged = await drive(engineUrl, { method: "GET", path: `/chats/${id}?since=${encodeURIComponent(v1)}` }, m);
+    expect(merged.json.from).toBe(0);
+    expect((merged.json.messages as EngineMessage[])[5]!.text).toBe("agent edit");
+  }, 30_000);
+
+  it("send appends without rewriting history, and older engines keep the plain path", async () => {
+    const id = seed(1200);
+    const m = mockHost();
+    withRecords(m);
+    const before = transcript(id);
+    const r = await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "Hello again.", model: "mock/model" } }, m);
+    expect((r.json.reply as { text: string }).text).toBe("MOCK-REPLY");
+    const after = transcript(id);
+    expect(after.startsWith(before)).toBe(true);
+    expect(after.trim().split("\n")).toHaveLength(1202);
+    const meta = JSON.parse(fs.readFileSync(path.join(root, "chats", id + ".meta.json"), "utf8"));
+    expect(meta.listing).toMatchObject({ messageCount: 1202, preview: "MOCK-REPLY" });
+    expect(meta.transcriptLog.at(-1)[1]).toBe(1200);
+
+    const plain = mockHost();
+    const old = await drive(engineUrl, { method: "GET", path: `/chats/${id}?since=x` }, plain);
+    expect(old.json.from).toBeUndefined();
+    expect((old.json.messages as EngineMessage[]).length).toBe(1202);
+    await drive(engineUrl, { method: "PATCH", path: `/chats/${id}/messages/m0`, body: { text: "first, edited" } }, plain);
+    expect(JSON.parse(transcript(id).split("\n")[0]!).text).toBe("first, edited");
+  }, 30_000);
+
+  it("a torn line far back costs that line, and the next save repairs the file", async () => {
+    const id = seed(1000);
+    const lines = transcript(id).split("\n");
+    lines[10] = '{"id":"m10","text":"torn';
+    fs.writeFileSync(path.join(root, "chats", id + ".jsonl"), lines.join("\n"));
+    const m = mockHost();
+    withRecords(m);
+    // deleting an early message reaches the torn line
+    expect((await drive(engineUrl, { method: "DELETE", path: `/chats/${id}/messages/m3` }, m)).status).toBe(200);
+    const kept = transcript(id).trim().split("\n").map((l) => JSON.parse(l).id);
+    expect(kept).toHaveLength(998);
+    expect(kept.includes("m3") || kept.includes("m10")).toBe(false);
+    expect(kept.at(-1)).toBe("m999");
+  }, 30_000);
+});

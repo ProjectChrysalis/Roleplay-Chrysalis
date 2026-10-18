@@ -17,7 +17,7 @@ export function sendRoute(c) {
   const { req, host, fsx, id, op, ok, err, readJson, body, touch, chat, meta, members, group, modelOf, memoryModelOf, onSave, markGenerating, genUsage, generationPreset, swipeMetaEntry, stripEchoedName, toolX } = c;
   if (op === "send" && req.method === "POST") {
     const b = body();
-    const existingReply = b.replyMessageId && chat.msgs.find((m) => m.id === b.replyMessageId);
+    const existingReply = b.replyMessageId && chat.msgs.findLast((m) => m.id === b.replyMessageId);
     if (existingReply) return ok({ reply: existingReply });
     const typed = String(b.text || "").trim();
     if (!typed && b.allowEmpty !== true) return err(400, "text required");
@@ -45,7 +45,7 @@ export function sendRoute(c) {
       // replies the client runs read the plan from the stash
       let plan = null;
       if (group) {
-        const lastChar = [...chat.msgs].reverse().find((m) => m.role === "char" && !m.picture);
+        const lastChar = chat.msgs.findLast((m) => m.role === "char" && !m.picture);
         plan = groupTurnPlan(group, members, lastChar ? lastChar.charId : null, text).map((m) => m.id);
         speaker = members.find((m) => m.id === plan[0]) || null;
       }
@@ -118,14 +118,14 @@ export function sendRoute(c) {
     // the real cause (content filter, bad key, …). The client's refresh then
     // lands the user bubble instead of wiping its staged copy.
     if (reply.model === "error") {
-      if (userMsg && !chat.msgs.some((m) => m.id === userMsg.id)) {
+      if (userMsg && !chat.msgs.findLast((m) => m.id === userMsg.id)) {
         chat.msgs.push(userMsg);
         applyStashVars(req, meta);
         saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);
       }
       return err(503, llmFailReason(reply));
     }
-    if (userMsg && !chat.msgs.some((m) => m.id === userMsg.id)) chat.msgs.push(userMsg);
+    if (userMsg && !chat.msgs.findLast((m) => m.id === userMsg.id)) chat.msgs.push(userMsg);
     let speaker = members[0] || null;
     let replyText = String(reply.text || "").trim();
     const plan = group && req.stash && Array.isArray(req.stash.plan) ? req.stash.plan : null;
@@ -175,7 +175,7 @@ export function nextSpeakerRoute(c) {
   if (op === "next" && req.method === "POST") {
     if (!group) return err(400, "not a group chat");
     const b = body();
-    const existingReply = b.replyMessageId && chat.msgs.find((m) => m.id === b.replyMessageId);
+    const existingReply = b.replyMessageId && chat.msgs.findLast((m) => m.id === b.replyMessageId);
     if (existingReply) return ok({ reply: existingReply });
     const speaker = members.find((m) => m.id === b.charId) || null;
     if (!speaker) return err(400, "charId must be a member of this group");
@@ -295,8 +295,8 @@ export function cancelledRoute(c) {
   const { req, fsx, id, op, ok, err, readJson, body, touch, chat, meta, members, group, onSave, pushSwipeMeta, stripEchoedName } = c;
   if (op === "cancelled" && req.method === "POST") {
     const b = body();
-    if (b.replyMessageId && chat.msgs.some((m) => m.id === b.replyMessageId)) return ok({ ok: true });
-    const target = b.targetMessageId ? chat.msgs.find((m) => m.id === b.targetMessageId) : null;
+    if (b.replyMessageId && chat.msgs.findLast((m) => m.id === b.replyMessageId)) return ok({ ok: true });
+    const target = b.targetMessageId ? chat.msgs.findLast((m) => m.id === b.targetMessageId) : null;
     const speaker = members.find((m) => m.id === (target ? target.charId : b.charId)) || members[0] || null;
     const preset = readJson("presets/" + (meta.presetId || "default") + ".json", null);
     const text = b.operation === "continue"
@@ -329,7 +329,7 @@ export function cancelledRoute(c) {
       const userText = typeof b.userText === "string" ? onSave(b.userText.trim(), "user_input", members[0] || null).trim() : "";
       if (!keep && !userText) return err(400, "nothing to keep");
       if (keep && !speaker) return err(400, "chat has no participating characters");
-      if (userText && !(b.userMessageId && chat.msgs.some((m) => m.id === b.userMessageId))) {
+      if (userText && !(b.userMessageId && chat.msgs.findLast((m) => m.id === b.userMessageId))) {
         chat.msgs.push({
           id: b.userMessageId || uid(), name: chatUserName(fsx, meta), charId: null, role: "user",
           ...(chatPersona(fsx, meta).personaId ? { personaId: chatPersona(fsx, meta).personaId } : {}),
@@ -440,7 +440,7 @@ export function imagePromptRoute(c) {
     const mode = IMAGE_PROMPT_MODES[b.mode] ? b.mode : "scene";
     const reply = host.llm.results.imgprompt;
     if (!reply) {
-      const lastChar = [...chat.msgs].reverse().find((m) => m.role === "char" && !m.picture);
+      const lastChar = chat.msgs.findLast((m) => m.role === "char" && !m.picture);
       const who = members.find((m) => lastChar && m.id === lastChar.charId) || members[0] || null;
       const { persona, userName } = chatPersona(fsx, meta);
       const charName = who ? who.name : "the character";

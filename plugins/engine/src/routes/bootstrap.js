@@ -14,8 +14,8 @@ export function bootstrapRoute(c) {
     // pages from the routes below
     const paged = req.query && req.query.paged === "1";
     const more = {};
-    const sub = (p, key) => {
-      const r = handleRoute({ method: "GET", path: p, body: null, query: paged && key ? { offset: "0", budget: String(PAGE_BYTES / 4) } : {} }, host).json;
+    const sub = (p, key, query) => {
+      const r = handleRoute({ method: "GET", path: p, body: null, query: query || (paged && key ? { offset: "0", budget: String(PAGE_BYTES / 4) } : {}) }, host).json;
       if (paged && key && r && r.next != null) more[key] = { next: r.next, total: r.total };
       return r;
     };
@@ -23,8 +23,11 @@ export function bootstrapRoute(c) {
     const wanted = req.query && req.query.chat ? String(req.query.chat) : "";
     let activeChat = null;
     if (wanted) {
-      const full = sub("/chats/" + wanted);
-      if (full && full.meta) activeChat = { meta: full.meta, messages: full.messages ?? [] };
+      const full = sub("/chats/" + wanted, null, req.query.since ? { since: String(req.query.since) } : null);
+      if (full && full.meta) {
+        const { members: _members, ...transcript } = full;
+        activeChat = { ...transcript, messages: full.messages ?? [] };
+      }
     }
     return ok({
       characters: sub("/characters", "characters").characters ?? [],

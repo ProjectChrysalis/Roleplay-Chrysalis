@@ -25,13 +25,14 @@ export function saveGlobalVars(fsx) {
 /** Shared macro context for a chat's visible transcript (last-message
  *  macros, idle span) — used by assemble() and the swipe/greeting paths. */
 export function transcriptMacros(msgs, base) {
-  const vis = msgs.filter((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);
-  const lastUser = [...vis].reverse().find((m) => m.role === "user");
-  const lastChar = [...vis].reverse().find((m) => m.role === "char");
+  // read from the end: a long transcript loads only as far back as needed
+  const lastUser = msgs.findLast((m) => m.role === "user" && m.hidden !== true);
+  const lastChar = msgs.findLast((m) => m.role === "char" && m.hidden !== true);
+  const last = msgs.findLast((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);
   return {
     ...base,
     lastMessageId: msgs.length ? msgs.length - 1 : "",
-    lastMessage: vis.length ? String(vis[vis.length - 1].text || "") : "",
+    lastMessage: last ? String(last.text || "") : "",
     lastUserMessage: lastUser ? String(lastUser.text || "") : "",
     lastCharMessage: lastChar ? String(lastChar.text || "") : "",
     idleText: humanIdle(Date.now() - (lastUser ? lastUser.at || Date.now() : Date.now())),

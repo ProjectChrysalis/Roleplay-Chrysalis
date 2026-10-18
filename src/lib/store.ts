@@ -28,8 +28,8 @@ import { DEFAULT_AVATAR } from './utils'
 import {
   j, fetchModels, fetchEngineConnections, fetchBootstrap, connectStreams, ApiError, reloadWithReason,
   cardToCharacter, characterToCard, groupToCharacter,
-  engineChatToUI, engineMessageToUI, chatPatchOf,
-  type EngineChatMeta, type EngineMessage, type EngineConnectionInfo,
+  engineChatToUI, engineMessageToUI, chatPatchOf, transcriptToUI,
+  type EngineChatMeta, type EngineMessage, type EngineConnectionInfo, type EngineTranscript,
   enginePersonaToUI, presetToEngine, enginePresetToUI,
   lorebookToEngine, engineLorebookToUI, regexToEngine, engineRegexToUI,
 } from './engine'
@@ -422,10 +422,12 @@ export const useApp = create<AppState>()(
           // calls, then one transcript call per chat) paid that cost ~25
           // times and took seconds. The engine's own model/connection lists
           // are separate routes and stay parallel to it.
+          const heldBefore = get().chats.find((c) => c.id === get().activeChatId)
+          const activeSince = heldBefore?.messages.length ? heldBefore.cursor : undefined
           const [boot, models, engineConnections] = await Promise.all([
             // the chat about to be shown rides along, so the first paint needs
             // no follow-up fetch
-            fetchBootstrap(get().activeChatId),
+            fetchBootstrap(get().activeChatId, activeSince),
             fetchModels(),
             fetchEngineConnections(),
           ])
@@ -483,9 +485,16 @@ export const useApp = create<AppState>()(
           // messageCount off the meta, so nothing here needs the messages —
           // except the chat the user is about to look at, which rode along.
           const inlineId = boot.activeChat?.meta?.id ?? null
+          // only what changed since the copy held here rides along; one that
+          // no longer lines up is read whole once this hydrate lands
+          const heldActive = inlineId ? get().chats.find((c) => c.id === inlineId) : undefined
+          const inline = !boot.activeChat ? null
+            : !activeSince ? transcriptToUI(boot.activeChat)
+              : heldActive?.cursor === activeSince ? transcriptToUI(boot.activeChat, heldActive) : null
+          const rereadId = inlineId && !inline ? inlineId : null
           const chatsFull = boot.chats.map((m) =>
             inlineId && m.id === inlineId
-              ? engineChatToUI(boot.activeChat!.meta, boot.activeChat!.messages ?? [])
+              ? inline ?? { ...engineChatToUI(boot.activeChat!.meta, []), messages: heldActive?.messages ?? [] }
               : engineChatToUI(m, []),
           )
           // abandoned empty chats (created, never touched — at most a
@@ -582,6 +591,7 @@ export const useApp = create<AppState>()(
             boot: 'ready', hydrated: true, bootError: null,
             // engine-side UI settings (agent-editable, data/settings.json `ui`)
           })
+          if (rereadId) void refreshChat(set, get, rereadId, true)
           if (settings.ui) {
             const ui = settings.ui as Record<string, unknown>
             // Object-valued bags (tts, translation, …) merge ONE level deep:
@@ -875,9 +885,10 @@ export const useApp = create<AppState>()(
         await saves.settled()
         const seqAtStart = mutateSeq
         try {
-          const r = await j<{ meta: EngineChatMeta; messages: EngineMessage[] }>(`/chats/${encodeURIComponent(chatId)}`)
+          const r = await j<EngineTranscript>(`/chats/${encodeURIComponent(chatId)}`)
           if (mutateSeq !== seqAtStart) return
-          set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? engineChatToUI(r.meta, r.messages ?? []) : c)) }))
+          const loaded = transcriptToUI(r)
+          if (loaded) set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? loaded : c)) }))
         } catch { /* the list payload already gave us what it could */ }
       },
       closeChat: () => {
@@ -1036,7 +1047,7 @@ export const useApp = create<AppState>()(
             }))
           } catch (e) {
             toast.error(String((e as Error).message ?? e))
-            void refreshChat(set, get, chatId)
+            void refreshChat(set, get, chatId, true)
           }
         })()
       },
@@ -1061,7 +1072,7 @@ export const useApp = create<AppState>()(
         }) }))
         void saves.run(`${chatId}:thinking`, () => j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
           method: 'PATCH', body: JSON.stringify({ removeThinking: true, swipeIndex }),
-        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId, true) })
       },
       editReasoning: (chatId, messageId, text) => {
         const swipeIndex = get().chats.find((c) => c.id === chatId)?.messages.find((m) => m.id === messageId)?.activeSwipe
@@ -1075,7 +1086,7 @@ export const useApp = create<AppState>()(
         }) }))
         void saves.run(`${chatId}:thinking`, () => j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
           method: 'PATCH', body: JSON.stringify({ reasoning: text, swipeIndex }),
-        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId, true) })
       },
       editThinkPart: (chatId, messageId, partIndex, text) => {
         const swipeIndex = get().chats.find((c) => c.id === chatId)?.messages.find((m) => m.id === messageId)?.activeSwipe
@@ -1089,7 +1100,7 @@ export const useApp = create<AppState>()(
         }) }))
         void saves.run(`${chatId}:thinking`, () => j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
           method: 'PATCH', body: JSON.stringify({ think: { index: partIndex, text }, swipeIndex }),
-        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+        })).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId, true) })
       },
       editMessage: (chatId, messageId, content) => {
         bumpMutate()
@@ -1106,7 +1117,7 @@ export const useApp = create<AppState>()(
             })
           } catch (e) {
             toast.error(String((e as Error).message ?? e))
-            await refreshChat(set, get, chatId)
+            await refreshChat(set, get, chatId, true)
           }
         })()
       },
@@ -1128,7 +1139,7 @@ export const useApp = create<AppState>()(
             const scope = mode === 'this' ? 'one' : mode
             await j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}?scope=${scope}`, { method: 'DELETE' })
             void refreshLists(set, get)
-          } catch (e) { toast.error(String((e as Error).message ?? e)); await refreshChat(set, get, chatId) }
+          } catch (e) { toast.error(String((e as Error).message ?? e)); await refreshChat(set, get, chatId, true) }
         })()
       },
       deleteMessages: (chatId, messageIds) => {
@@ -1181,7 +1192,7 @@ export const useApp = create<AppState>()(
         }) }))
         void j(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/move`, {
           method: 'POST', body: JSON.stringify({ dir }),
-        }).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId) })
+        }).catch((e) => { toast.error(String((e as Error).message ?? e)); void refreshChat(set, get, chatId, true) })
       },
       impersonate: (chatId) => {
         if (get().streaming?.chatId === chatId || interruptedChats.has(chatId)) return
@@ -1997,7 +2008,7 @@ async function preserveInterruptedStream(
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         interruptedChats.delete(st.chatId)
-        await refreshChat(set, get, st.chatId)
+        await refreshChat(set, get, st.chatId, true)
       } else {
         toast.error(`Could not save the interrupted reply: ${String((e as Error).message ?? e)}`, {
           duration: Infinity, action: { label: 'Retry', onClick: () => { void save() } },
@@ -2008,14 +2019,28 @@ async function preserveInterruptedStream(
   await save()
 }
 
-async function refreshChat(set: SetFn, get: GetFn, chatId: ID) {
+/** The chat as the engine has it now. A chat whose messages came from the
+ *  engine asks only for what changed since; `whole` reads every message,
+ *  which a failed optimistic edit needs (the engine changed nothing there). */
+async function refreshChat(set: SetFn, get: GetFn, chatId: ID, whole = false) {
   if (interruptedChats.has(chatId)) return
   await saves.settled()
   const seqAtStart = mutateSeq
   try {
-    const r = await j<{ meta: EngineChatMeta; messages: EngineMessage[] }>(`/chats/${encodeURIComponent(chatId)}`)
+    const held = get().chats.find((c) => c.id === chatId)
+    const since = !whole && held?.cursor && held.messages.length ? held.cursor : undefined
+    const read = (s?: string) => j<EngineTranscript>(`/chats/${encodeURIComponent(chatId)}${s ? `?since=${encodeURIComponent(s)}` : ''}`)
+    const r = await read(since)
     if (mutateSeq !== seqAtStart || interruptedChats.has(chatId)) return // an optimistic mutation is ahead of this snapshot
-    set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? engineChatToUI(r.meta, r.messages ?? []) : c)) }))
+    const now = get().chats.find((c) => c.id === chatId)
+    let next = since && now?.cursor === since ? transcriptToUI(r, now) : since ? null : transcriptToUI(r)
+    if (!next) {
+      const full = await read()
+      if (mutateSeq !== seqAtStart || interruptedChats.has(chatId)) return
+      next = transcriptToUI(full)
+    }
+    const chat = next
+    if (chat) set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? chat : c)) }))
   } catch { /* chat may be gone */ }
   void refreshLists(set, get)
 }
@@ -2149,7 +2174,7 @@ async function runStream(
     flushStreamDeltas?.()
     const st = get().streaming
     if (st?.chatId === chatId) await preserveInterruptedStream(set, get, st)
-    else await refreshChat(set, get, chatId)
+    else await refreshChat(set, get, chatId, true)
   } finally {
     const ownsGeneration = activeGens.get(chatId) === ctrl
     if (ownsGeneration) activeGens.delete(chatId)

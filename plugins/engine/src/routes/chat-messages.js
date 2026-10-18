@@ -1,4 +1,4 @@
-import { saveChat } from "../chat-files.js";
+import { saveChat, transcriptSince, transcriptVersion, wholeTranscript } from "../chat-files.js";
 import { expandMacros } from "../macros.js";
 import { applyStashVars } from "../passes.js";
 import { chatPersona, chatUserName } from "../prompt.js";
@@ -10,7 +10,14 @@ import { globalVars, transcriptMacros } from "../variables.js";
 
 export function getChatRoute(c) {
   const { req, op, ok, chat, meta, members } = c;
-  if (!op && req.method === "GET") return ok({ meta, messages: chat.msgs, members: members.map((m) => ({ id: m.id, name: m.name })) });
+  if (!op && req.method === "GET") {
+    const memberList = members.map((m) => ({ id: m.id, name: m.name }));
+    // ?since=<version>: only what changed after the copy the client holds
+    const part = req.query?.since ? transcriptSince(chat.msgs, String(req.query.since)) : null;
+    if (part) return ok({ meta, ...part, members: memberList });
+    const version = transcriptVersion(chat.msgs);
+    return ok({ meta, messages: wholeTranscript(chat.msgs), ...(version ? { version } : {}), members: memberList });
+  }
 }
 export function patchChatRoute(c) {
   const { req, id, op, ok, readJson, writeJson, body, meta } = c;
@@ -57,7 +64,7 @@ export function forkChatRoute(c) {
   const { req, fsx, id, op, ok, err, body, chat, meta, forkTitle } = c;
   if (op === "fork" && req.method === "POST") {
     const b = body();
-    const idx = typeof b.messageId === "string" && b.messageId ? chat.msgs.findIndex((m) => m.id === b.messageId) : chat.msgs.length - 1;
+    const idx = typeof b.messageId === "string" && b.messageId ? chat.msgs.findLastIndex((m) => m.id === b.messageId) : chat.msgs.length - 1;
     if (idx < 0) return err(404, "message not found");
     const nid = uid("c");
     const nmeta = { ...meta, id: nid, title: forkTitle(fsx, meta.title), createdAt: Date.now(), updatedAt: Date.now(),
@@ -110,7 +117,7 @@ export function editMessageRoute(c) {
   const { req, fsx, seg, id, op, ok, err, body, touch, chat, meta, members } = c;
   if (op === "messages" && seg[3] && !seg[4] && req.method === "PATCH") {
     const mid = seg[3];
-    const idx = chat.msgs.findIndex((m) => m.id === mid);
+    const idx = chat.msgs.findLastIndex((m) => m.id === mid);
     if (idx < 0) return err(404, "message not found");
     const b = body();
     const msg = chat.msgs[idx];
@@ -189,7 +196,7 @@ export function deleteMessageRoute(c) {
   if (op === "messages" && seg[3] && !seg[4] && req.method === "DELETE") {
     const mid = seg[3];
     const scope = req.query && req.query.scope;
-    const idx = chat.msgs.findIndex((m) => m.id === mid);
+    const idx = chat.msgs.findLastIndex((m) => m.id === mid);
     if (idx < 0) return err(404, "message not found");
     // below keeps the anchor — only what comes after it dies
     const kept = scope === "below" ? chat.msgs.slice(0, idx + 1) : scope === "above" ? chat.msgs.slice(idx) : chat.msgs.filter((_, i) => i !== idx);
@@ -203,7 +210,7 @@ export function addSwipeRoute(c) {
   const { req, fsx, seg, id, op, ok, err, body, touch, chat, meta } = c;
   if (op === "messages" && seg[3] && seg[4] === "swipe" && req.method === "POST") {
     const mid = seg[3];
-    const idx = chat.msgs.findIndex((m) => m.id === mid);
+    const idx = chat.msgs.findLastIndex((m) => m.id === mid);
     if (idx < 0) return err(404, "message not found");
     const msg = chat.msgs[idx];
     const swipes = msg.swipes && msg.swipes.length ? msg.swipes : [msg.text];
@@ -222,7 +229,7 @@ export function deleteSwipeRoute(c) {
   if (op === "messages" && seg[3] && seg[4] === "swipes" && seg[5] && req.method === "DELETE") {
     const mid = seg[3];
     const sidx = Math.floor(Number(seg[5]));
-    const idx = chat.msgs.findIndex((m) => m.id === mid);
+    const idx = chat.msgs.findLastIndex((m) => m.id === mid);
     if (idx < 0) return err(404, "message not found");
     const msg = chat.msgs[idx];
     const swipes = msg.swipes && msg.swipes.length ? msg.swipes.slice() : [msg.text];
@@ -244,7 +251,7 @@ export function moveMessageRoute(c) {
   if (op === "messages" && seg[3] && seg[4] === "move" && req.method === "POST") {
     const mid = seg[3];
     const dir = body().dir === -1 ? -1 : 1;
-    const idx = chat.msgs.findIndex((m) => m.id === mid);
+    const idx = chat.msgs.findLastIndex((m) => m.id === mid);
     const to = idx + dir;
     if (idx < 0) return err(404, "message not found");
     if (to < 0 || to >= chat.msgs.length) return err(400, "cannot move past the end");

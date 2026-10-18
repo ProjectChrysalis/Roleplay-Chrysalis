@@ -258,7 +258,18 @@ export interface EngineBootstrap {
    *  load one chat at a time through /chats/:id (see ensureChatMessages). */
   chats: EngineChatMeta[]
   /** The chat the client asked for, so opening the app is still one request. */
-  activeChat: { meta: EngineChatMeta; messages: EngineMessage[] } | null
+  activeChat: EngineTranscript | null
+}
+
+/** A chat as GET /chats/:id answers it. With ?since, `from` says where the
+ *  changed messages start and `messages` holds only those. */
+export interface EngineTranscript {
+  meta: EngineChatMeta
+  messages: EngineMessage[]
+  version?: string
+  from?: number
+  total?: number
+  beforeId?: string | null
 }
 
 /** The collections bootstrap sends a page at a time, and the field each
@@ -273,9 +284,10 @@ type PagedKey = keyof typeof PAGED
  *  shown so the first paint needs no follow-up fetch. A library too big for
  *  one plugin call comes in pages: bootstrap carries the first page of each
  *  collection, `more` says where the rest starts. */
-export async function fetchBootstrap(chatId?: string | null): Promise<EngineBootstrap> {
+export async function fetchBootstrap(chatId?: string | null, since?: string): Promise<EngineBootstrap> {
   const query = new URLSearchParams({ paged: '1' })
   if (chatId) query.set('chat', chatId)
+  if (chatId && since) query.set('since', since)
   const boot = await j<EngineBootstrap & { more?: Partial<Record<PagedKey, { next: number; total: number }>> }>(`/bootstrap?${query}`)
   // a big collection splits into ranges read side by side; each range keeps
   // its place, so the collection comes back in the engine's order
@@ -785,6 +797,18 @@ export async function exportableCard(c: Character): Promise<EngineCard> {
   const book = card.character_book as { __omitted?: unknown } | undefined
   if (book && typeof book === 'object' && book.__omitted === true) delete card.character_book
   return { ...stored, ...card }
+}
+
+/** A chat answer as the store's chat. A partial answer keeps the messages
+ *  `held` already has before `from`; null when those do not line up with
+ *  what the engine has, and the whole chat must be read instead. */
+export function transcriptToUI(r: EngineTranscript, held?: Chat): Chat | null {
+  if (typeof r.from !== 'number') return { ...engineChatToUI(r.meta, r.messages ?? []), cursor: r.version }
+  if (!held || held.messages.length < r.from) return null
+  if (r.from > 0 && held.messages[r.from - 1]?.id !== r.beforeId) return null
+  const messages = held.messages.slice(0, r.from).concat((r.messages ?? []).map(engineMessageToUI))
+  if (messages.length !== r.total) return null
+  return { ...engineChatToUI(r.meta, []), messages, messageCount: messages.length, hasUser: messages.some((m) => m.role === 'user'), cursor: r.version }
 }
 
 /** `characters` may be the whole library: only the group's members, in

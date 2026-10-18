@@ -112,7 +112,7 @@ export function compactRoute(c) {
     const scfg = (readJson("settings.json", {}).ui || {}).summary || {};
     const history = Array.isArray(meta.compactions) ? meta.compactions : [];
     const parts = summaryParts(meta);
-    const indexOf = (mid) => (mid ? Math.max(0, chat.msgs.findIndex((m) => m.id === mid)) : 0);
+    const indexOf = (mid) => (mid ? Math.max(0, chat.msgs.findLastIndex((m) => m.id === mid)) : 0);
     const turnsIn = (from, to) => chat.msgs.slice(from, to).filter((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);
     const redo = b.redo === true;
     let fromIdx, toIdx;
@@ -123,19 +123,19 @@ export function compactRoute(c) {
       if (!last) return err(400, "nothing to redo");
       if (!last.to) return err(400, "the latest summary was not written from a stretch of messages");
       fromIdx = indexOf(last.from);
-      toIdx = chat.msgs.findIndex((m) => m.id === last.to);
+      toIdx = chat.msgs.findLastIndex((m) => m.id === last.to);
       if (toIdx < 0) return err(409, "the messages the latest summary covered are gone");
       earlier = parts.slice(0, -1);
     } else if (req.stash && req.stash.compact) {
       // pass B folds exactly the stretch pass A chose, even if a message
       // landed in between
       fromIdx = indexOf(req.stash.compact.from);
-      toIdx = chat.msgs.findIndex((m) => m.id === req.stash.compact.to);
+      toIdx = chat.msgs.findLastIndex((m) => m.id === req.stash.compact.to);
       if (toIdx < 0) return err(409, "the chat changed while summarizing; try again");
     } else {
       fromIdx = indexOf(meta.memoryCutoffMessageId);
       if (typeof b.upTo === "string" && b.upTo) {
-        toIdx = chat.msgs.findIndex((m) => m.id === b.upTo);
+        toIdx = chat.msgs.findLastIndex((m) => m.id === b.upTo);
         if (toIdx < 0) return err(404, "message not found");
       } else {
         // the newest `keep` turns stay verbatim; the cutoff lands on the
@@ -227,8 +227,8 @@ export function sceneRoute(c) {
   const { req, host, fsx, seg, op, ok, err, body, chat, meta, members, memoryModelOf } = c;
   if (op === "scene" && !seg[3] && req.method === "POST") {
     const b = body();
-    const a = chat.msgs.findIndex((m) => m.id === b.from);
-    const z = chat.msgs.findIndex((m) => m.id === b.to);
+    const a = chat.msgs.findLastIndex((m) => m.id === b.from);
+    const z = chat.msgs.findLastIndex((m) => m.id === b.to);
     if (a < 0 || z < 0) return err(404, "message not found");
     const span = chat.msgs.slice(Math.min(a, z), Math.max(a, z) + 1)
       .filter((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);

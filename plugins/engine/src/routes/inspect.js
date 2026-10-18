@@ -17,7 +17,7 @@ export function promptPreviewRoute(c) {
     // answer it); an assistant message excludes itself (its prompt ended at
     // the previous turn)
     if (b.messageId) {
-      const idx = chat.msgs.findIndex((m) => m.id === b.messageId);
+      const idx = chat.msgs.findLastIndex((m) => m.id === b.messageId);
       if (idx < 0) return err(404, "message not found");
       msgs = chat.msgs.slice(0, chat.msgs[idx].role === "user" ? idx + 1 : idx);
     }
@@ -50,8 +50,8 @@ export function promptPreviewRoute(c) {
     // the speaker a real generation from this point would use: the peeked
     // reply's own author, else the group's next in rotation
     const peekGroup = chat.meta.groupId ? readJson("groups/" + chat.meta.groupId + ".json", null) : null;
-    const peeked = b.messageId ? chat.msgs.find((m) => m.id === b.messageId) : null;
-    const lastReply = [...msgs].reverse().find((m) => m.role === "char" && !m.picture);
+    const peeked = b.messageId ? chat.msgs.findLast((m) => m.id === b.messageId) : null;
+    const lastReply = msgs.findLast((m) => m.role === "char" && !m.picture);
     const peekSpeaker = (peeked && peeked.role === "char" && members.find((m) => m.id === peeked.charId))
       || (peekGroup ? groupTurnPlan(peekGroup, members, lastReply ? lastReply.charId : null, b.userText || "", null)[0] : null)
       || members[0] || null;

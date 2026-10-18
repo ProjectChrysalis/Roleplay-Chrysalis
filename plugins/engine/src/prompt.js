@@ -390,7 +390,7 @@ export function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
   // message itself stays). Unknown cutoff ids drop nothing.
   let histMsgs = msgs;
   if (meta.memoryCutoffMessageId) {
-    const cut = msgs.findIndex((m) => m.id === meta.memoryCutoffMessageId);
+    const cut = msgs.findLastIndex((m) => m.id === meta.memoryCutoffMessageId);
     if (cut > 0) histMsgs = msgs.slice(cut);
   }
   const visibleHist = histMsgs.filter((m) => (m.role === "user" || m.role === "char") && m.hidden !== true);

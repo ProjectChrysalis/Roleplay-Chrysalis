@@ -206,6 +206,9 @@ export interface Chat {
   /** did the user ever speak here? From the meta, so it is known without
    *  loading the transcript (the boot sweep and Home both need it). */
   hasUser?: boolean
+  /** The engine's version of the transcript `messages` came from; a refresh
+   *  asks only for what changed after it. */
+  cursor?: string
   groupSettings?: {
     activation: 'natural' | 'list' | 'manual'
     generationMode?: 'swap' | 'append' // swap = individual character turns, append = merged card
