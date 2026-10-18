@@ -22,7 +22,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { useApp } from '@/lib/store'
 import { useBackClose } from '@/hooks/use-back-close'
 import { estimateTokens, formatTokens, uid } from '@/lib/tokens'
-import { characterToCard, fileToDataUrl, fetchEdgeVoices, j } from '@/lib/engine'
+import { exportableCard, fileToDataUrl, fetchEdgeVoices, j } from '@/lib/engine'
 import { dominantColor } from '@/lib/image-gen'
 import { STANDARD_EXPRESSIONS, expressionNameFromFile } from '@/lib/expressions'
 import { speakText, edgeVoiceLabel, ENGINE_VOICES } from '@/lib/tts'
@@ -108,7 +108,7 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
 
   const exportPng = async () => {
     try {
-      const bytes = await buildCardPng(c.avatar || DEFAULT_AVATAR, characterToCard(c))
+      const bytes = await buildCardPng(c.avatar || DEFAULT_AVATAR, await exportableCard(c))
       downloadCardPng(bytes, c.name)
       toast.success(`Exported ${c.name} as a PNG card`)
     } catch (e) { toast.error(String((e as Error).message ?? e)) }

@@ -775,6 +775,18 @@ export function characterToCard(c: Character): EngineCard {
   }
 }
 
+/** A character as a card file. The library holds only the fields it shows
+ *  (an embedded lorebook can be most of a card's size), so an export takes
+ *  the rest from the card on disk. */
+export async function exportableCard(c: Character): Promise<EngineCard> {
+  const { __stored, ...card } = characterToCard(c)
+  if (typeof __stored !== 'string') return card
+  const { id: _id, ...stored } = await j<EngineCard & { id?: string }>(`/characters/${encodeURIComponent(__stored)}`)
+  const book = card.character_book as { __omitted?: unknown } | undefined
+  if (book && typeof book === 'object' && book.__omitted === true) delete card.character_book
+  return { ...stored, ...card }
+}
+
 /** `characters` may be the whole library: only the group's members, in
  *  member order, name the group. */
 export function groupToCharacter(g: EngineGroup, characters: Character[]): Character {

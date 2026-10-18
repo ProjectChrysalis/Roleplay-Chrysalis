@@ -25,7 +25,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useApp } from '@/lib/store'
 import { estimateTokens, formatTokens } from '@/lib/tokens'
 import { DEFAULT_AVATAR, cn, readableNameColor } from '@/lib/utils'
-import { j, importCardFiles, downscaleRemoteImage, characterToCard } from '@/lib/engine'
+import { j, importCardFiles, downscaleRemoteImage, exportableCard } from '@/lib/engine'
 import { buildCardPng, downloadCardPng } from '@/lib/png-card'
 import { downloadJson } from '@/lib/interop'
 import { CharacterEditor } from '@/components/views/character-editor'
@@ -133,7 +133,7 @@ export function CharactersView() {
   /** Real export: V2 PNG card with the JSON spliced into a tEXt chunk. */
   const exportPng = async (c: (typeof characters)[number]) => {
     try {
-      const bytes = await buildCardPng(c.avatar || DEFAULT_AVATAR, characterToCard(c))
+      const bytes = await buildCardPng(c.avatar || DEFAULT_AVATAR, await exportableCard(c))
       downloadCardPng(bytes, c.name)
       toast.success(`Exported ${c.name} as a PNG card`)
     } catch (e) {
@@ -296,7 +296,7 @@ export function CharactersView() {
             <span className="text-xs text-muted-foreground">{selected.length} selected</span>
             <Button variant="outline" size="sm" className="h-6 text-xs" onClick={async () => {
               const picked = characters.filter((c) => selected.includes(c.id) && !c.isGroup)
-              try { await downloadJson(picked.map((c) => characterToCard(c)), `characters-${picked.length}`) }
+              try { await downloadJson(await Promise.all(picked.map((c) => exportableCard(c))), `characters-${picked.length}`) }
               catch (error) { toast.error((error as Error).message); return }
               setSelected([])
               toast.success(`Exported ${picked.length} card${picked.length === 1 ? '' : 's'} as JSON`)

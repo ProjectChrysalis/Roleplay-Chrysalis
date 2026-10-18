@@ -4123,3 +4123,53 @@ describe("rp studio: a transcript that cannot be read", () => {
     expect(loadChat(fsx, "c")?.msgs).toEqual([]);
   });
 });
+
+/** fs.query as the engine answers it, for the cards under characters/. */
+function cardQuery(spec: { files: string; fields: Record<string, string> }) {
+  const pick = (value: unknown, dotted: string) => {
+    const exists = dotted.endsWith("?");
+    let at: unknown = value;
+    for (const key of (exists ? dotted.slice(0, -1) : dotted).split(".")) {
+      if (at === null || typeof at !== "object" || !Object.hasOwn(at, key)) return exists ? false : null;
+      at = (at as Record<string, unknown>)[key];
+    }
+    return exists ? at != null : at ?? null;
+  };
+  expect(spec.files).toBe("characters/*/card.json");
+  const rows = fs.readdirSync(path.join(root, "characters")).filter((id) => fs.existsSync(path.join(root, "characters", id, "card.json"))).map((id) => {
+    const card = JSON.parse(fs.readFileSync(path.join(root, "characters", id, "card.json"), "utf8"));
+    return { path: `characters/${id}/card.json`, keys: [id], data: Object.fromEntries(Object.entries(spec.fields).map(([k, d]) => [k, pick(card, d)])) };
+  });
+  return { rows, total: rows.length };
+}
+
+describe("rp studio: the library leaves embedded lorebooks on disk", () => {
+  it("lists the shown fields only, and a save or a copy keeps the rest of the card", async () => {
+    const book = { name: "Lore", entries: Array.from({ length: 50 }, (_, i) => ({ keys: ["k" + i], content: "x".repeat(2000) })) };
+    fs.mkdirSync(path.join(root, "characters", "aria"), { recursive: true });
+    fs.mkdirSync(path.join(root, "characters", "kael"), { recursive: true });
+    fs.writeFileSync(path.join(root, "characters", "aria", "card.json"), JSON.stringify({ spec: "chara_card_v3", name: "Aria", description: "d", nickname: "Ari", character_book: book, studio: { favorite: true } }));
+    fs.writeFileSync(path.join(root, "characters", "kael", "card.json"), JSON.stringify({ name: "Kael", description: "k" }));
+    const m = mockHost();
+    (m.host.fs as { query?: unknown }).query = cardQuery;
+    const list = await drive(engineUrl, { method: "GET", path: "/characters" }, m);
+    const [aria, kael] = list.json.characters as Record<string, unknown>[];
+    expect(aria).toMatchObject({ id: "aria", name: "Aria", description: "d", version: "chara_card_v3", studio: { favorite: true }, character_book: { __omitted: true }, __stored: "aria" });
+    expect(aria!.nickname).toBeUndefined();
+    expect(kael!.character_book).toBeUndefined();
+    expect(JSON.stringify(list.json).length).toBeLessThan(2000);
+
+    // the client saves the whole card it holds, stand-in included
+    expect((await drive(engineUrl, { method: "PUT", path: "/characters/aria", body: { ...aria, description: "edited" } }, m)).status).toBe(200);
+    const saved = JSON.parse(fs.readFileSync(path.join(root, "characters", "aria", "card.json"), "utf8"));
+    expect(saved).toMatchObject({ description: "edited", nickname: "Ari", character_book: book });
+    expect(saved.__stored).toBeUndefined();
+    // a copy under a new id starts from the card it came from
+    await drive(engineUrl, { method: "PUT", path: "/characters/aria-copy", body: { ...aria, name: "Aria (copy)" } }, m);
+    expect(JSON.parse(fs.readFileSync(path.join(root, "characters", "aria-copy", "card.json"), "utf8"))).toMatchObject({ name: "Aria (copy)", nickname: "Ari", character_book: book });
+    // an engine without the index still lists whole cards
+    delete (m.host.fs as { query?: unknown }).query;
+    const whole = await drive(engineUrl, { method: "GET", path: "/characters" }, m);
+    expect((whole.json.characters as Record<string, unknown>[])[0]!.character_book).toEqual(book);
+  }, 30_000);
+});
