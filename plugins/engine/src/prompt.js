@@ -438,10 +438,14 @@ export function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
 
   // context trimming (chars/4 estimate against openai_max_context)
   const budget = presetMaxCtx(preset) * 4;
-  const fixedLen = () => before.concat(extras, after).reduce((a, m) => a + m.content.length, 0);
-  // what fell out is reported: automatic compaction fires on it
+  const fixedLen = before.concat(extras, after).reduce((a, m) => a + m.content.length, 0);
+  const histLen = (m) => m.content.length + (m.replay ? JSON.stringify(m.replay.messages).length : (m.reasoning?.length || 0));
+  // the oldest turns leave until the rest fits (one always stays); what fell
+  // out is reported: automatic compaction fires on it
+  let total = fixedLen + history.reduce((a, m) => a + histLen(m), 0);
   let trimmed = 0;
-  while (fixedLen() + history.reduce((a, m) => a + m.content.length + (m.replay ? JSON.stringify(m.replay.messages).length : (m.reasoning?.length || 0)), 0) > budget && history.length > 1) { history.splice(0, 1); trimmed++; }
+  while (total > budget && history.length - trimmed > 1) total -= histLen(history[trimmed++]);
+  if (trimmed) history.splice(0, trimmed);
 
   // utility prompts (preset-level, blank = off):
   //  - new-chat marker rides at the very top of a freshly started chat
