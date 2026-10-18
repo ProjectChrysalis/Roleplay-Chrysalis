@@ -775,8 +775,12 @@ export function characterToCard(c: Character): EngineCard {
   }
 }
 
-export function groupToCharacter(g: EngineGroup, members: Character[]): Character {
-  const first = members.find((m) => m.id === g.memberIds?.[0])
+/** `characters` may be the whole library: only the group's members, in
+ *  member order, name the group. */
+export function groupToCharacter(g: EngineGroup, characters: Character[]): Character {
+  const byId = new Map(characters.map((c) => [c.id, c]))
+  const members = (g.memberIds ?? []).map((id) => byId.get(id)).filter((c): c is Character => !!c)
+  const first = members[0]
   return {
     id: g.id ?? '',
     name: g.name,

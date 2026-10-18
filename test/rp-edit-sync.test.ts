@@ -8,7 +8,7 @@ Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
 Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: globalThis.localStorage, matchMedia: () => ({ matches: false }) } })
 Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: class { close() {} } })
 const { useApp } = await import('../src/lib/store')
-const { cardToCharacter, characterToCard, enginePersonaToUI, enginePresetToUI, presetToEngine } = await import('../src/lib/engine')
+const { cardToCharacter, characterToCard, enginePersonaToUI, enginePresetToUI, groupToCharacter, presetToEngine } = await import('../src/lib/engine')
 const { buildDefaultPreset, defaultSettings } = await import('../src/lib/seed')
 const { saves } = await import('../src/lib/save-queue')
 import type { RegexScript } from '../src/lib/types'
@@ -294,4 +294,12 @@ test('duplicating a preset copies its own regex scripts onto the copy', async ()
   expect(copied[0]?.id).not.toBe('rx_one')
   expect(useApp.getState().regexScripts).toHaveLength(3)
   expect(puts.some((p) => p.endsWith(`/regex/${copied[0]?.id}`))).toBe(true)
+})
+
+test('a group names only its own members, whatever list it is built from', () => {
+  const library = ['Ann', 'Bo', 'Cy', 'Di'].map((name) => cardToCharacter({ name }, name.toLowerCase()))
+  const group = groupToCharacter({ id: 'g', name: 'Party', memberIds: ['cy', 'ann'] }, library)
+  expect(group.description).toBe('Group chat with Cy, Ann.')
+  expect(group.firstMessage).toBe('*Cy, Ann are here.*')
+  expect(group.avatar).toBe(library[2]?.avatar)
 })
