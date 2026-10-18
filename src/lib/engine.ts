@@ -1624,7 +1624,7 @@ export interface ArchiveImportState {
 export const ARCHIVE_COLLECTIONS = [
   'characters/', 'worlds/', 'lorebooks/', 'presets/', 'openai settings/', 'textgen settings/', 'instruct/',
   'User Settings/', 'settings.json', 'personas.json', 'extensions/regex/', 'regex/', 'personas/', 'User Avatars/',
-  'groups/', 'chats/', 'group chats/', 'QuickReplies/', 'themes/', 'databank/', 'library.json', 'variables.json',
+  'groups/', 'user/images/', 'chats/', 'group chats/', 'QuickReplies/', 'themes/', 'databank/', 'library.json', 'variables.json',
 ]
 
 const importKey = async (file: File) => {

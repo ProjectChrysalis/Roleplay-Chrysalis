@@ -607,6 +607,7 @@ export function handleRoute(req, host) {
       writeJson("characters/" + cid + "/card.json", { ...card, studio });
     }
     bookIdByName.set(lower(n.name || fallback), id);
+    if (fallback) bookIdByName.set(lower(fallback), id);
     summary.lorebooks.push(id);
   };
   const writePreset = (n) => {
@@ -799,6 +800,79 @@ export function handleRoute(req, host) {
     writeJson("library.json", lib);
   };
 
+  const importOrganization = (st) => {
+    if (wants("characters/") && Array.isArray(st?.tags)) {
+      const lib = readJson("library.json", {});
+      const tags = Array.isArray(lib.tags) ? lib.tags : [];
+      const byName = new Map(tags.map((t) => [lower(t.name), t]));
+      const names = new Map();
+      const tagIds = new Set(tags.map((t) => t.id));
+      for (const t of st.tags) {
+        if (!t || typeof t.name !== "string" || !t.name.trim()) continue;
+        const key = lower(t.name);
+        let tag = byName.get(key);
+        if (!tag) {
+          let id;
+          do { id = "tag_" + uid(slug(t.name)); } while (tagIds.has(id));
+          tagIds.add(id);
+          tag = { id, name: t.name, color: t.color || "", textColor: t.color2 || "", visible: t.is_hidden_on_character_card !== true, asFolder: t.folder_type === "OPEN" || t.folder_type === "CLOSED", order: typeof t.sort_order === "number" && Number.isFinite(t.sort_order) ? t.sort_order : tags.length };
+          tags.push(tag);
+          byName.set(key, tag);
+        }
+        names.set(String(t.id), tag.name);
+      }
+      for (const [file, ids] of Object.entries(st.tag_map || {})) {
+        if (!Array.isArray(ids)) continue;
+        const cid = charIdByName().get("file:" + lower(file.replace(/\.[^/.]+$/, "")));
+        if (!cid) continue;
+        const card = readJson("characters/" + cid + "/card.json", null);
+        if (!card) continue;
+        const merged = new Set(Array.isArray(card.tags) ? card.tags : []);
+        for (const id of ids) if (names.has(String(id))) merged.add(names.get(String(id)));
+        writeJson("characters/" + cid + "/card.json", { ...card, tags: [...merged] });
+      }
+      writeJson("library.json", { ...lib, tags });
+      summary.library = true;
+    }
+    if (!wants("worlds/") && !wants("lorebooks/")) return;
+    const savedWorlds = st?.world_info;
+    const wi = typeof savedWorlds === "string" ? { globalSelect: [savedWorlds] } : Array.isArray(savedWorlds) ? { globalSelect: savedWorlds } : savedWorlds;
+    if (!wi || typeof wi !== "object") return;
+    const changes = new Map();
+    const bookChange = (name) => {
+      const id = bookIdByName.get(lower(name));
+      if (!id) return null;
+      if (!changes.has(id)) changes.set(id, { id, linked: new Set(), global: false });
+      return changes.get(id);
+    };
+    for (const name of Array.isArray(wi.globalSelect) ? wi.globalSelect : []) {
+      const change = bookChange(name);
+      if (change) change.global = true;
+    }
+    if (wants("characters/")) for (const item of Array.isArray(wi.charLore) ? wi.charLore : []) {
+      if (typeof item?.name !== "string" || !Array.isArray(item.extraBooks)) continue;
+      const cid = charIdByName().get("file:" + lower(item.name));
+      const card = cid ? readJson("characters/" + cid + "/card.json", null) : null;
+      if (!card) continue;
+      const linked = new Set(card.studio?.linkedLorebookIds || []);
+      for (const name of item.extraBooks) {
+        const change = bookChange(name);
+        if (!change) continue;
+        linked.add(change.id);
+        change.linked.add(cid);
+      }
+      writeJson("characters/" + cid + "/card.json", { ...card, studio: { ...card.studio, linkedLorebookIds: [...linked] } });
+    }
+    // Books may each hold megabytes of lore; keep only their links in memory.
+    for (const [id, change] of changes) {
+      const book = readJson("lorebooks/" + id + ".json", null);
+      if (!book) continue;
+      if (change.global) book.globalActive = true;
+      if (change.linked.size) book.linkedCharacterIds = [...new Set([...(book.linkedCharacterIds || []), ...change.linked])];
+      writeJson("lorebooks/" + id + ".json", book);
+    }
+  };
+
   if (req.path === "/import/batch") {
     const b = req.body && typeof req.body === "object" ? req.body : {};
     for (const c of b.cards || []) {
@@ -848,13 +922,20 @@ export function handleRoute(req, host) {
   if (req.path === "/import/finish") {
     const id = String(req.body?.importId || "");
     if (!/^[a-f0-9-]{36}$/.test(id)) return { status: 400, json: { error: "invalid import id" } };
-    for (const collection of ["characters", "library", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex", "regex"]) fsx.remove("__lookup/" + id + "_" + collection);
+    for (const collection of ["characters", "library", "books", "presets", "personas", "groups", "personaFiles", "quickReplies", "worldLinks", "embeddedLinks", "cardRegex", "regex", "chatImages"]) fsx.remove("__lookup/" + id + "_" + collection);
     return { status: 200, json: { ok: true } };
   }
 
   if (req.path === "/import/zip") {
     const rawEntries = host.zip.entries();
     const libraryAdds = { themes: [], qrSets: [] };
+    const resolveImage = (url) => {
+      if (typeof url !== "string") return null;
+      let file;
+      try { file = decodeURIComponent(url.split(/[?#]/)[0]).replace(/^\/+/, ""); } catch { return null; }
+      return file.startsWith("user/images/") ? carried("chatImages").get(file) || null : null;
+    };
+
     const entries = {};
     const names = Object.keys(rawEntries);
     const originalNames = {};
@@ -936,7 +1017,7 @@ export function handleRoute(req, host) {
     // and books by NAME, and a persona resolves its books and bound cards the
     // same way. One pass in whatever order the zip's central directory
     // happened to list things left half of those unresolved.
-    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "instruct/", "extensions/regex/", "regex/", "user settings/regex/", "settings.json", "personas/", "user avatars/", "groups/", "chats/", "group chats/", "databank/"];
+    const PHASES = ["characters/", "worlds/", "lorebooks/", "presets/", "openai settings/", "textgen settings/", "instruct/", "extensions/regex/", "regex/", "user settings/regex/", "settings.json", "personas/", "user avatars/", "groups/", "user/images/", "chats/", "group chats/", "databank/"];
     const phaseOf = (n) => {
       const l = n.toLowerCase();
       for (let i = 0; i < PHASES.length; i++) if (l.startsWith(PHASES[i])) return i;
@@ -964,6 +1045,16 @@ export function handleRoute(req, host) {
       // later entries may rewrite the same cards (a book linking to one)
       if (spriteCards.size && !SPRITE.test(name)) writeSprites();
       if (entries[name]?.error) { summary.errors.push(name + ": " + entries[name].error); continue; }
+      if (name.startsWith("user/images/") && /\.(?:png|webp|gif|jpe?g)$/i.test(name)) {
+        try {
+          const b64 = entryBase64(entries[name]);
+          const url = entries[name]?.__image__ && host.zip.image ? host.zip.image(originalNames[name]).url
+            : b64 ? "data:image/" + (/\.jpe?g$/i.test(name) ? "jpeg" : name.split(".").pop().toLowerCase()) + ";base64," + b64 : null;
+          if (!url) throw new Error("Unreadable image");
+          carried("chatImages").set(name, url);
+        } catch (error) { summary.errors.push("chat image failed: " + name + ": " + String(error?.message || error)); }
+        continue;
+      }
       // A foreign tool keeps its personas, global regex scripts and the quick
       // reply sets on show in its settings file. It runs in order: personas
       // link books and cards, chats link personas. The avatar file is how a
@@ -971,6 +1062,7 @@ export function handleRoute(req, host) {
       if (name === "settings.json" && isText(entries[name])) {
         let st = null;
         try { st = JSON.parse(entries[name]); } catch { summary.errors.push("settings failed: settings.json"); }
+        try { importOrganization(st); } catch (error) { summary.errors.push("library settings failed: " + String(error?.message || error)); }
         const pu = st && typeof st.power_user === "object" && st.power_user ? st.power_user : st;
         if (pu && !hasFullPersonas && wants("personas/")) {
           try {
@@ -1233,11 +1325,11 @@ export function handleRoute(req, host) {
           const parseLines = (text) => text.split("\n").filter((l) => l.trim()).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
           let slice = sliced ? host.zip.read(originalNames[name], 0) : null;
           const lines = parseLines(sliced ? slice.text : entries[name]);
-          let n = normalizeChatLines({ character, file, lines });
+          let n = normalizeChatLines({ character, file, lines, resolveImage });
           while (sliced && !n && slice.next !== null) {
             slice = host.zip.read(originalNames[name], slice.next);
             for (const line of parseLines(slice.text)) lines.push(line);
-            n = normalizeChatLines({ character, file, lines });
+            n = normalizeChatLines({ character, file, lines, resolveImage });
           }
           // sidecars our own backups write next to the transcript: everything
           // ABOUT the chat, and its facts vault
@@ -1309,7 +1401,7 @@ export function handleRoute(req, host) {
               while (slice.next !== null) {
                 slice = host.zip.read(originalNames[name], slice.next);
                 const more = parseLines(slice.text);
-                const part = more.length ? normalizeChatLines({ character, file, lines: more, startAt: streamed.last.at }) : null;
+                const part = more.length ? normalizeChatLines({ character, file, resolveImage, lines: more, startAt: streamed.last.at }) : null;
                 if (!part) continue;
                 attribute(part.msgs, more);
                 put(part.msgs);

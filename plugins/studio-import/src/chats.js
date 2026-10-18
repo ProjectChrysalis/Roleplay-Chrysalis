@@ -54,6 +54,11 @@ export function normalizeChatLines(raw) {
     const imported = !own && (reasoning || swipeMeta.some(Boolean))
       ? { ...(reasoning ?? {}), ...(typeof foreign.model === "string" && foreign.model ? { model: foreign.model } : {}), ...(swipes.length > 1 ? { swipeMeta } : {}) }
       : null;
+    const media = Array.isArray(foreign.media) ? foreign.media : typeof foreign.image === "string" ? [{ url: foreign.image, type: "image", title: foreign.title }] : [];
+    const attachments = own && Array.isArray(x.attachments) ? x.attachments : media.filter((m) => m?.type === "image").flatMap((m) => {
+      const url = raw.resolveImage?.(m.url);
+      return url ? [{ id: uid("a"), name: typeof m.title === "string" ? m.title : "Image", type: "image/" + (/\.jpe?g(?:[?#]|$)/i.test(m.url) ? "jpeg" : /\.(png|webp|gif)(?:[?#]|$)/i.exec(m.url)?.[1]?.toLowerCase() || "png"), url }] : [];
+    });
     msgs.push({
       id: uid("e"), name: typeof l.name === "string" ? l.name : (isUser ? "User" : "Character"),
       charId: (l.extra && typeof l.extra.chry_char_id === "string" && l.extra.chry_char_id) || null,
@@ -64,6 +69,7 @@ export function normalizeChatLines(raw) {
       ...(x.edited === true ? { edited: true } : {}),
       ...(x.greeting === true ? { greeting: true } : {}),
       ...(x.picture ? { picture: x.picture } : {}),
+      ...(attachments.length ? { attachments } : {}),
       ...(typeof x.translation === "string" && x.translation ? { translation: x.translation } : {}),
       ...(x.extra && typeof x.extra === "object" ? { extra: x.extra } : imported ? { extra: imported } : {}),
     });

@@ -32,6 +32,7 @@ const ROOT_FILES = new Set(["card.json", "settings.json", "personas.json", "libr
 export function normalizeEntryName(raw) {
   const segs = String(raw).split("/").filter((s) => s && s !== ".");
   for (let i = 0; i < segs.length - 1; i++) {
+    if (segs[i].toLowerCase() === "user" && segs[i + 1]?.toLowerCase() === "images") return ["user", "images", ...segs.slice(i + 2)].join("/");
     if (COLLECTION_DIRS.has(segs[i].toLowerCase())) return [segs[i].toLowerCase() === "user settings" ? "User Settings" : segs[i].toLowerCase(), ...segs.slice(i + 1)].join("/");
   }
   const base = segs[segs.length - 1] || String(raw);

@@ -229,6 +229,7 @@ export function backupRoute(c) {
               ...(msg.edited === true ? { edited: true } : {}),
               ...(msg.greeting === true ? { greeting: true } : {}),
               ...(msg.picture ? { picture: msg.picture } : {}),
+              ...(msg.attachments?.length ? { attachments: portableMedia(msg.attachments, fsx) } : {}),
               ...(msg.translation ? { translation: msg.translation } : {}),
               ...(msg.extra && typeof msg.extra === "object" ? { extra: msg.extra } : {}),
             },

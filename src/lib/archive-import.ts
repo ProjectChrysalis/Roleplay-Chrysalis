@@ -20,6 +20,7 @@ export const ARCHIVE_CATEGORIES: { id: string; label: string; collections: strin
   { id: 'regex', label: 'Regex scripts', collections: ['extensions/regex/', 'regex/'], settingsFile: true },
   { id: 'personas', label: 'Personas', collections: ['personas/', 'personas.json', 'User Avatars/'], settingsFile: true },
   { id: 'groups', label: 'Groups', collections: ['groups/'] },
+  { id: 'chatImages', label: 'Chat images', collections: ['user/images/'] },
   { id: 'chats', label: 'Chats', collections: ['chats/'] },
   { id: 'groupChats', label: 'Group chats', collections: ['group chats/'] },
   { id: 'quickReplies', label: 'Quick replies', collections: ['QuickReplies/'] },

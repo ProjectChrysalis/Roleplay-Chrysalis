@@ -3250,6 +3250,11 @@ describe("rp studio: backup zips survive the trip", () => {
     lines[0]!.hidden = true;
     lines[0]!.bookmarked = true;
     lines[0]!.bookmarkLabel = "opening";
+    const mediaName = "a".repeat(64) + ".png";
+    fs.mkdirSync(path.join(root, "__media"), { recursive: true });
+    fs.writeFileSync(path.join(root, "__media", mediaName), Buffer.from("a picture"));
+    Object.assign(m.host.fs, { readBase64: (rel: string) => fs.readFileSync(path.join(root, rel)).toString("base64") });
+    lines[0]!.attachments = [{ id: "attachment", name: "A view", type: "image/png", url: "/v1/apps/roleplay/__media/" + mediaName }];
     fs.writeFileSync(path.join(root, "chats", `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
 
     const entries = await exportEntries(m);
@@ -3261,6 +3266,7 @@ describe("rp studio: backup zips survive the trip", () => {
     expect(back[0]!.hidden).toBe(true);
     expect(back[0]!.bookmarked).toBe(true);
     expect(back[0]!.bookmarkLabel).toBe("opening");
+    expect(back[0]!.attachments).toEqual([{ id: "attachment", name: "A view", type: "image/png", url: "data:image/png;base64," + Buffer.from("a picture").toString("base64") }]);
     // the reply keeps which model wrote it
     const reply = back.find((x) => x.role === "char" && (x.extra as { model?: string } | undefined)?.model);
     expect((reply!.extra as { model: string }).model).toBe("mock/model");
@@ -4288,4 +4294,82 @@ describe("rp studio: long transcripts are read and written from the end", () => 
     expect(kept.includes("m3") || kept.includes("m10")).toBe(false);
     expect(kept.at(-1)).toBe("m999");
   }, 30_000);
+});
+
+describe("rp studio: archive organization and chat images", () => {
+  const importId = "ae754fe4-7c3d-4a10-a973-f27a30b15a26";
+  const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(root, rel), "utf8"));
+  const setup = () => {
+    const m = mockHost();
+    const values = new Map<string, unknown>();
+    Object.assign(m.host.fs, { lookup: (collection: string, key: string, value?: unknown) => {
+      const k = collection + ":" + key;
+      if (value !== undefined) values.set(k, value);
+      return values.get(k) ?? null;
+    } });
+    const batch = (entries: Record<string, unknown>, include?: string[]) => {
+      (m.host as { zip: unknown }).zip = {
+        entries: () => entries, list: () => Object.keys(entries).length,
+        image: () => ({ url: "/v1/apps/roleplay/__media/photo.png" }),
+      };
+      return drive(stUrl, { method: "POST", path: "/import/zip", body: { importId, ...(include ? { include } : {}) } }, m);
+    };
+    return { m, batch };
+  };
+  const settings = {
+    tags: [{ id: "folder", name: "Adventures", color: "#123456", color2: "#ffffff", folder_type: "CLOSED" }, { id: 2, name: "Personal" }],
+    tag_map: { "different-file.json": ["folder", 2, "missing"] },
+    world_info: { globalSelect: ["Shared"], charLore: [{ name: "different-file", extraBooks: ["Extra", "Missing", "Extra"] }] },
+  };
+  it("keeps personal tag folders and both directions of lore links across batches", async () => {
+    fs.writeFileSync(path.join(root, "library.json"), JSON.stringify({ tags: [{ id: "existing", name: "Personal", color: "red", asFolder: false }], themes: [{ name: "Keep" }] }));
+    const { batch } = setup();
+    const cards = await batch({ "wrapper/default-user/characters/different-file.json": JSON.stringify({ name: "Traveler", tags: ["Card tag"], extensions: { world: "Shared" } }) });
+    const cid = (cards.json.characters as string[])[0]!;
+    const books = await batch({ "worlds/Shared.json": JSON.stringify({ entries: { 0: { key: ["shared"], content: "Shared lore" } } }), "worlds/Extra.json": JSON.stringify({ entries: { 0: { key: ["extra"], content: "Extra lore" } } }) });
+    const result = await batch({ "settings.json": JSON.stringify(settings) });
+    expect(result.json.errors).toEqual([]);
+    const card = read(`characters/${cid}/card.json`);
+    expect(card.tags).toEqual(["Card tag", "Adventures", "Personal"]);
+    expect(card.studio.linkedLorebookIds).toHaveLength(2);
+    const all = (books.json.lorebooks as string[]).map((id) => read(`lorebooks/${id}.json`));
+    expect(all.find((b) => b.name === "Shared").globalActive).toBe(true);
+    expect(all.find((b) => b.name === "Extra").linkedCharacterIds).toEqual([cid]);
+    await batch({ "settings.json": JSON.stringify(settings) });
+    const lib = read("library.json");
+    expect(lib.tags).toHaveLength(2);
+    expect(lib.tags.find((t: { name: string }) => t.name === "Adventures")).toMatchObject({ asFolder: true, color: "#123456", textColor: "#ffffff" });
+    expect(lib.tags.find((t: { name: string }) => t.name === "Personal").id).toBe("existing");
+    expect(lib.themes).toEqual([{ name: "Keep" }]);
+    expect(read(`characters/${cid}/card.json`).studio.linkedLorebookIds).toHaveLength(2);
+  });
+  for (const value of ["Shared", ["Shared"]]) it("accepts older global book selections: " + JSON.stringify(value), async () => {
+    const { batch } = setup();
+    const books = await batch({ "worlds/Shared.json": JSON.stringify({ entries: { 0: { key: ["shared"], content: "Lore" } } }) });
+    await batch({ "settings.json": JSON.stringify({ world_info: value }) });
+    expect(read(`lorebooks/${(books.json.lorebooks as string[])[0]}.json`).globalActive).toBe(true);
+  });
+  it("does not change character organization or lore when those collections are excluded", async () => {
+    const { batch } = setup();
+    const result = await batch({ "settings.json": JSON.stringify(settings) }, ["settings.json", "chats/"]);
+    expect(result.json.errors).toEqual([]);
+    expect(fs.existsSync(path.join(root, "library.json"))).toBe(false);
+    expect(read("characters/aria/card.json").tags).toBeUndefined();
+  });
+  it("resolves old and current chat image records from an earlier image batch", async () => {
+    const { batch } = setup();
+    expect((await batch({ "install/data/default-user/user/images/Traveler/photo.png": { __image__: true } })).json.errors).toEqual([]);
+    const lines = [
+      { character_name: "Aria" },
+      { name: "Aria", mes: "Old picture", extra: { image: "/user/images/Traveler/photo.png", title: "A view" } },
+      { name: "You", is_user: true, mes: "New pictures", extra: { media: [{ type: "image", url: "/user/images/Traveler/photo.png?x=1", title: "Photo" }, { type: "image", url: "https://example.com/photo.png" }, { type: "video", url: "/user/images/Traveler/photo.png" }] } },
+    ];
+    const result = await batch({ "chats/Aria/test.jsonl": lines.map((l) => JSON.stringify(l)).join("\n") });
+    expect(result.json.errors).toEqual([]);
+    const id = (result.json.chats as string[])[0]!;
+    const messages = fs.readFileSync(path.join(root, `chats/${id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(messages[0].attachments).toEqual([expect.objectContaining({ name: "A view", type: "image/png", url: "/v1/apps/roleplay/__media/photo.png" })]);
+    expect(messages[1].attachments).toHaveLength(1);
+    expect(messages[1].attachments[0].name).toBe("Photo");
+  });
 });
