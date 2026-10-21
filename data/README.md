@@ -18,7 +18,7 @@ riding alongside public formats: copy them through untouched.
 
 | Path | What's inside |
 |---|---|
-| `settings.json` | `{ model, personaId, ui }` — `ui` is the WHOLE AppSettings object: theme preset, chat font + scale, hotkeys, display/chat/streaming behavior, TTS, translation, `summary` (mode/interval/word budget, prompt, injection position/template), memory, `notifications` (master switch, popup types and areas), `notificationPosition` (popup position, bottom-center by default)… edit any key and the UI applies it live. |
+| `settings.json` | `{ model, personaId, presetId, ui }` — `ui` is the WHOLE AppSettings object: theme preset, chat font + scale, hotkeys, display/chat/streaming behavior, TTS, translation, `summary` (mode/interval/word budget, prompt, injection position/template), memory, `notifications` (master switch, popup types and areas), `notificationPosition` (popup position, bottom-center by default)… edit any key and the UI applies it live. |
 | `library.json` | `{ qrSets, themes, backgrounds, tags, folders, connectionProfiles }` — every local collection in ONE file: quick-reply sets (incl. auto-execute hooks), theme palettes, chat backgrounds, tags, folders, connection profiles (named connection+model pairs). |
 | `variables.json` | `{ name: value }`: the macro variables every chat shares (`{{$name}}`, `getglobalvar`, `setglobalvar`). Absent until a prompt sets one. |
 | `characters/<id>/card.json` | Full character cards: portable card fields (name, description, personality, scenario, first_mes, alternate_greetings, mes_example, tags…) + `studio` bag (avatar, favorites, colors, stats, sprites, gallery, versions, variants). |

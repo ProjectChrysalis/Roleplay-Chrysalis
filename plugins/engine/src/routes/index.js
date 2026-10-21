@@ -3,6 +3,7 @@ import { storeMedia } from "../media.js";
 import { backupRoute } from "./backup.js";
 import { bootstrapRoute } from "./bootstrap.js";
 import { charactersRoute } from "./characters.js";
+import { connectionsRoute } from "./connections.js";
 import { chatsRoute } from "./chats.js";
 import { databankRoute } from "./databank.js";
 import { entitiesRoute } from "./entities.js";
@@ -63,6 +64,7 @@ const ROUTES = [
   entitiesRoute,
   libraryRoute,
   settingsRoute,
+  connectionsRoute,
   promptPreviewRoute,
   worldInfoStatusRoute,
   backupRoute,

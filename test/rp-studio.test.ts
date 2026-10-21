@@ -143,6 +143,40 @@ async function drive(
   return { status: out?.status ?? 200, json: (out?.json ?? {}) as Record<string, unknown>, __llmPending: out?.__llmPending };
 }
 
+describe("connection testing", () => {
+  it("sends only a small test prompt to the chosen model without saving data", async () => {
+    const m = mockHost({ text: "OK" });
+    const before = fs.readFileSync(path.join(root, "settings.json"), "utf8");
+    const result = await drive(engineUrl, { method: "POST", path: "/connections/test", body: { model: "provider/chosen" } }, m);
+    expect(result.status).toBe(200);
+    expect(result.json.text).toBe("OK");
+    expect(m.requests).toHaveLength(1);
+    expect(m.requests[0]?.req).toEqual({ model: "provider/chosen", messages: [{ role: "user", content: "Reply with OK." }], reasoning: "off", presetParams: { max_tokens: 256 } });
+    expect(fs.readFileSync(path.join(root, "settings.json"), "utf8")).toBe(before);
+    expect(fs.readdirSync(path.join(root, "chats"))).toEqual([]);
+  });
+
+  it("rejects missing models and does not report empty or failed replies as success", async () => {
+    for (const model of [undefined, "", "bare-model"]) {
+      const m = mockHost();
+      const result = await drive(engineUrl, { method: "POST", path: "/connections/test", body: { model } }, m);
+      expect(result.status).toBe(400);
+      expect(m.requests).toHaveLength(0);
+    }
+    const empty = await drive(engineUrl, { method: "POST", path: "/connections/test", body: { model: "provider/chosen" } }, mockHost({ text: " " }));
+    expect(empty.status).toBe(502);
+    expect(empty.json.error).toBe("Model returned no reply");
+    const failed = await drive(engineUrl, { method: "POST", path: "/connections/test", body: { model: "provider/chosen" } }, mockHost("error"));
+    expect(failed.status).toBe(503);
+    expect(failed.json.error).toBeString();
+    const m = mockHost();
+    m.resolve = () => { m.host.llm.results.connectionTest = { model: "error", error: "401: Invalid API key" }; };
+    const rejected = await drive(engineUrl, { method: "POST", path: "/connections/test", body: { model: "provider/chosen" } }, m);
+    expect(rejected.status).toBe(503);
+    expect(rejected.json.error).toBe("401: Invalid API key");
+  });
+});
+
 /**
  * /bootstrap used to inline every chat's full transcript, so the payload grew
  * with every message ever written and was assembled inside a 64MB sandbox
@@ -310,6 +344,30 @@ describe("rp studio engine: chats + swipes", () => {
     const picked = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria", presetId: "default" } }, m);
     expect((picked.json.meta as Record<string, unknown>).presetId).toBe("default");
   }, 30_000);
+
+  it("uses settings presetId despite stale default flags and cache", async () => {
+    const m = mockHost();
+    for (const id of ["default", "chosen"]) fs.writeFileSync(path.join(root, "presets", id + ".json"), JSON.stringify({ name: id, prompts: [], studio: { isDefault: true } }));
+    fs.writeFileSync(path.join(root, "presets", "_default.json"), JSON.stringify({ id: "default", files: 2 }));
+    await drive(engineUrl, { method: "PUT", path: "/settings", body: { presetId: "chosen" } }, m);
+    const chat = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    expect(chat.json.meta).toMatchObject({ presetId: "chosen" });
+    const listed = await drive(engineUrl, { method: "GET", path: "/presets" }, m);
+    expect(listed.json.items).toContainEqual(expect.objectContaining({ id: "chosen" }));
+    const boot = await drive(engineUrl, { method: "GET", path: "/bootstrap" }, m);
+    expect(boot.json.presets).toContainEqual(expect.objectContaining({ id: "chosen" }));
+    expect(boot.json.settings).toMatchObject({ presetId: "chosen" });
+    await drive(engineUrl, { method: "PUT", path: "/settings", body: { presetId: "default" } }, m);
+    const next = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    expect(next.json.meta).toMatchObject({ presetId: "default" });
+  });
+
+  it("prefers a custom default when legacy files have competing flags", async () => {
+    for (const id of ["default", "chosen"]) fs.writeFileSync(path.join(root, "presets", id + ".json"), JSON.stringify({ name: id, prompts: [], studio: { isDefault: true } }));
+    fs.writeFileSync(path.join(root, "presets", "_default.json"), JSON.stringify({ id: "default", files: 2 }));
+    const chat = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, mockHost());
+    expect(chat.json.meta).toMatchObject({ presetId: "chosen" });
+  });
 
   it("swipes the pristine greeting WITHOUT calling the model (wraps)", async () => {
     const m = mockHost();

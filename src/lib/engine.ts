@@ -16,7 +16,7 @@ import { saves } from './save-queue'
 import { defaultSamplers, DEFAULT_COMPACT_HISTORY, EMPTY_PROMPT_FORMAT, GENERATION_TYPES, normalizeCache } from './seed'
 import { DEFAULT_AVATAR, storedMediaUrl } from './utils'
 import { saveFile } from './export'
-import { extractCharaFromPng } from './import-shapes'
+import { extractCharaFromPng, EXTRA_NUM_KEYS, EXTRA_BOOL_KEYS } from './import-shapes'
 
 // frame URL is /app/<user>/<app>/ (cookieless sandboxed origin)
 export const APP_ID = decodeURIComponent(location.pathname.split('/').filter(Boolean)[2] ?? 'roleplay')
@@ -251,7 +251,7 @@ export interface EngineBootstrap {
   presets: Record<string, unknown>[]
   lorebooks: Record<string, unknown>[]
   regex: Record<string, unknown>[]
-  settings: { model: string | null; personaId: string | null; ui?: Record<string, unknown> }
+  settings: { model: string | null; personaId: string | null; presetId?: string | null; ui?: Record<string, unknown> }
   library: Record<string, unknown>
   databank: { files?: DataBankFile[] }
   /** List metas ONLY — each carries preview/messageCount/hasUser. Transcripts
@@ -361,6 +361,10 @@ export async function fetchModels(): Promise<ModelInfo[]> {
       pricing: m.pricing ?? null,
     }))
   } catch { return [] }
+}
+
+export function testModelConnection(model: string): Promise<{ text: string; model: string }> {
+  return j('/connections/test', { method: 'POST', body: JSON.stringify({ model }) })
 }
 
 /** The instruct formats the engine can write a text completion prompt in. */
@@ -996,7 +1000,7 @@ export function chatPatchOf(p: Partial<Chat>): Record<string, unknown> {
  *  expanded, world info + summary + injections spliced) — powers prompt peek.
  *  With messageId the assembly is scoped to that message: the prompt as it
  *  existed at that point in the chat, not the current tail. */
-export function promptPreview(chatId: string, opts?: { userText?: string; messageId?: string }): Promise<{
+export async function promptPreview(chatId: string, opts?: { userText?: string; messageId?: string }): Promise<{
   systemPrompt: string | null
   messages: { role: string; content: string }[]
   presetParams: Record<string, unknown>
@@ -1008,6 +1012,7 @@ export function promptPreview(chatId: string, opts?: { userText?: string; messag
   /** tool definitions the generation would carry (enabled app tools) */
   tools?: { name: string; description: string; parameters: Record<string, unknown> }[]
 }> {
+  await saves.settled()
   const { userText, messageId } = opts ?? {}
   // ?siblingtools=1: the engine attaches the exact tool set a send's
   // wantsTools request would carry
@@ -1150,10 +1155,14 @@ export function presetToEngine(p: Preset): EnginePreset {
   const orderId = activeOrder?.character_id ?? 100000
   const order = sections.map((s) => ({ ...activeOrder?.order?.find((entry) => entry.identifier === s.id), identifier: s.id, enabled: s.enabled }))
   const { engineExtras, ...studio } = p
+  // Forwarded sampler fields belong to the editor; opaque source metadata
+  // must not restore a parameter the user removed.
+  const extraSamplerKeys = new Set([...EXTRA_NUM_KEYS, ...EXTRA_BOOL_KEYS, 'negative_prompt'])
+  const extras = Object.fromEntries(Object.entries(engineExtras ?? {}).filter(([key]) => !extraSamplerKeys.has(key)))
   const S = p.samplers
   const num = (v: { value: number; enabled: boolean } | undefined) => (v && v.enabled && Number.isFinite(v.value) ? v.value : undefined)
   const out: EnginePreset = {
-    ...engineExtras,
+    ...extras,
     name: p.name,
     prompts,
     prompt_order: activeOrder

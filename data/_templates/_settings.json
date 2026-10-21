@@ -1,6 +1,7 @@
 {
   "model": null,
   "personaId": null,
+  "presetId": null,
   "ui": {
     "notifications": {
       "enabled": true,

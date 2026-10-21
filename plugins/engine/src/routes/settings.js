@@ -1,3 +1,5 @@
+import { defaultPresetId } from "../presets.js";
+
 // library: the studio's local collections (themes, quick replies, tags,
 // folders, backgrounds, data bank) — ONE json file so agents can read and
 // edit the whole app in one glance next to settings.json.
@@ -14,14 +16,15 @@ export function libraryRoute(c) {
   }
 }
 export function settingsRoute(c) {
-  const { req, head, id, ok, readJson, writeJson, body } = c;
+  const { req, fsx, head, id, ok, readJson, writeJson, body } = c;
   if (head === "settings" && !id) {
-    if (req.method === "GET") return ok(readJson("settings.json", { model: null, personaId: null }));
+    if (req.method === "GET") return ok({ ...readJson("settings.json", { model: null, personaId: null }), presetId: defaultPresetId(fsx) });
     if (req.method === "PUT") {
       const b = body();
       const cur = readJson("settings.json", { model: null, personaId: null });
       if ("model" in b) cur.model = b.model;
       if ("personaId" in b) cur.personaId = b.personaId;
+      if ("presetId" in b) cur.presetId = b.presetId;
       // `ui` carries the ENTIRE studio UI settings object — agents edit it
       // on disk (data/settings.json) and every open client picks it up live
       // via the data-watcher look_changed → hydrate.

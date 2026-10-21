@@ -78,9 +78,10 @@ Changing the global default does not rewrite historical speaker text.
 `presets/<id>.json` stores the portable prompt list and a complete `studio`
 editor bag. Copy `_templates/_preset.json` for a new editable preset, then set
 `id`, `name`, `studio.id`, and `studio.name`. Respect `studio.readOnly` when
-editing an existing preset; create an editable copy of a locked preset. `studio.isDefault` selects the
-working default. Keep at most one default and inspect chat `presetId` bindings
-when switching it. New presets do not affect an existing chat until selected.
+editing an existing preset; create an editable copy of a locked preset.
+`settings.json.presetId` selects the working default. `studio.isDefault` is a
+legacy fallback when that selection is missing. Chat `presetId` applies when
+`presetLocked` is true. New presets do not affect an existing chat until selected.
 
 ### Prompt text and order
 

@@ -29,7 +29,7 @@
       "route": "/presets/{id}",
       "template": "_templates/_preset.json",
       "fields": "src/lib/types.ts: Preset; src/lib/engine.ts: EnginePreset",
-      "notes": "prompts and prompt_order control runtime text/order; studio preserves section controls and other editor fields. Keep both copies consistent."
+      "notes": "settings.json presetId selects the active preset. prompts and prompt_order control runtime text/order; studio preserves section controls and other editor fields. Keep both copies consistent."
     },
     "lorebook": {
       "path": "lorebooks/{id}.json",

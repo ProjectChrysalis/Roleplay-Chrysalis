@@ -204,8 +204,8 @@ interface AppState {
    *  Returns the book's id. */
   saveSceneEntry: (chatId: ID, entry: { title: string; keys: string[]; content: string }, bookId: ID | null) => Promise<ID>
   /** Import a portable preset file; regex scripts it carries become scripts
-   *  bound to the new preset. `base` fills whatever the file leaves out. */
-  importPreset: (json: unknown, name: string, base?: Preset, enableEmbeddedRegex?: boolean) => Promise<{ preset: Preset; scripts: number; replaced: boolean }>
+   *  bound to the new preset. Missing fields use clean defaults. */
+  importPreset: (json: unknown, name: string, enableEmbeddedRegex?: boolean) => Promise<{ preset: Preset; scripts: number; replaced: boolean }>
   /** Post a generated picture as the chat's last speaker (and keep it in
    *  that character's gallery when the setting says so). */
   postPicture: (chatId: ID, image: GeneratedImage) => Promise<void>
@@ -437,6 +437,11 @@ export const useApp = create<AppState>()(
           const presets = boot.presets
             .map((p) => enginePresetToUI(p as never, String(p.id ?? '')))
             .sort((a, b) => (a.id === 'default' ? -1 : b.id === 'default' ? 1 : a.name.localeCompare(b.name)))
+          const selectedPreset = presets.find((p) => p.id === settings.presetId)
+            ?? presets.find((p) => p.isDefault && p.id !== 'default')
+            ?? presets.find((p) => p.isDefault)
+            ?? presets.find((p) => p.id === 'default')
+          for (const p of presets) p.isDefault = p.id === selectedPreset?.id
           // First boot on an empty workspace: seed the default preset — a
           // fully editable working copy whose main prompt and utility prompts
           // carry their shipped text (there is no hidden engine-side default
@@ -1426,9 +1431,8 @@ export const useApp = create<AppState>()(
         if (!bound.includes(book.id)) await get().setChatLorebooks(chatId, [...bound, book.id])
         return book.id
       },
-      importPreset: async (json, name, base, enableEmbeddedRegex = false) => {
-        const fill = base ?? get().presets.find((p) => !p.readOnly) ?? get().presets[0]
-        const imported = fill ? presetImport(json, name, fill) : null
+      importPreset: async (json, name, enableEmbeddedRegex = false) => {
+        const imported = presetImport(json, name)
         if (!imported) throw new Error('Not a recognizable preset file')
         // a preset named like one here replaces it in place, keeping its id,
         // so chats and scripts bound to it stay bound; the default preset is
@@ -1657,12 +1661,14 @@ export const useApp = create<AppState>()(
       updatePreset: (id, patch) => {
         // Stock prompt content is immutable; selection and folder placement are editable.
         const target = get().presets.find((x) => x.id === id)
-        if (target?.readOnly && Object.keys(patch).some((k) => k !== 'isDefault' && k !== 'folderId')) {
+        if (!target) return
+        if (target.readOnly && Object.keys(patch).some((k) => k !== 'isDefault' && k !== 'folderId')) {
           presetsToast.error('Stock preset, create an editable copy to change it')
           return
         }
         bumpMutate()
         // default is exclusive — remember which others to clear so their files persist too
+        if (patch.isDefault) writeThrough('presets', 'the active preset', j('/settings', { method: 'PUT', body: JSON.stringify({ presetId: id }) }))
         const prevDefaults = patch.isDefault ? get().presets.filter((x) => x.id !== id && x.isDefault) : []
         set((s) => ({
           presets: s.presets.map((p) => {
@@ -2149,6 +2155,7 @@ async function runStream(
   let committed = false
   let committedRes: Record<string, unknown> | null = null
   try {
+    await saves.settled()
     // keep the engine's chat meta in sync with the UI's lorebook bindings
     await j(`/chats/${encodeURIComponent(chatId)}`, { method: 'PATCH', body: JSON.stringify({ lorebookIds: bookIds }), signal: ctrl.signal })
     const model = get().streaming?.chatId === chatId ? get().streaming?.model : get().model

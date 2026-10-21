@@ -31,15 +31,15 @@ const portablePreset = (over: Record<string, unknown> = {}) => ({
 
 describe("presetImport", () => {
   it("imports the arrangement under character id 100001, not the first list", () => {
-    const p = presetImport(portablePreset(), "Test", base())!;
+    const p = presetImport(portablePreset(), "Test")!;
     expect(p.sections.map((s) => s.name)).toEqual(["Main Prompt", "Author Note", "Chat History"]);
     expect(p.sections[1]!.content).toBe("AUTHOR-MARK");
   });
 
   it("falls back to the first non-empty list, then the prompts order", () => {
-    const one = presetImport({ ...portablePreset(), prompt_order: [{ character_id: 100000, order: [{ identifier: "main", enabled: true }] }] }, "T", base())!;
+    const one = presetImport({ ...portablePreset(), prompt_order: [{ character_id: 100000, order: [{ identifier: "main", enabled: true }] }] }, "T")!;
     expect(one.sections).toHaveLength(1);
-    const none = presetImport({ ...portablePreset(), prompt_order: [] }, "T", base())!;
+    const none = presetImport({ ...portablePreset(), prompt_order: [] }, "T")!;
     expect(none.sections.map((s) => s.name)).toEqual(["Main Prompt", "Chat History", "Author Note"]);
   });
 
@@ -50,7 +50,7 @@ describe("presetImport", () => {
         { identifier: "depth-1", name: "Depth", role: "user", content: "d", injection_position: 1, injection_depth: 7 },
       ],
       prompt_order: [{ character_id: 100001, order: [{ identifier: "main", enabled: true }, { identifier: "depth-1", enabled: true }] }],
-    }), "T", base())!;
+    }), "T")!;
     expect(p.sections[0]!.role).toBe("system");
     expect(p.sections[1]!.position).toBe("in-chat");
     expect(p.sections[1]!.depth).toBe(7);
@@ -67,7 +67,7 @@ describe("presetImport", () => {
       prompt_order: [{ character_id: 100001, order: [
         { identifier: "a", enabled: true }, { identifier: "b", enabled: true }, { identifier: "c", enabled: true },
       ] }],
-    }), "T", base())!;
+    }), "T")!;
     expect(p.sections[0]!.injectionTriggers).toHaveLength(6);
     expect(p.sections[1]!.injectionTriggers).toEqual(["normal", "swipe"]);
     // unknown values only → treated as always (empty after filter)
@@ -83,7 +83,7 @@ describe("presetImport", () => {
       names_behavior: -1,
       send_if_empty: "(none)",
       impersonation_prompt: "IMP", group_nudge_prompt: "NUDGE",
-    }), "T", base())!;
+    }), "T")!;
     expect(p.samplers.temperature.value).toBe(1.21);
     expect(p.samplers.seed).toBe(42);
     expect(p.samplers.stopStrings).toEqual(["END", "STOP", "HALT"]);
@@ -98,16 +98,16 @@ describe("presetImport", () => {
   });
 
   it("reasoning effort aliases map; absent keeps the base", () => {
-    const p = presetImport(portablePreset({ reasoning_effort: "minimal" }), "T", base())!;
+    const p = presetImport(portablePreset({ reasoning_effort: "minimal" }), "T")!;
     expect(p.samplers.reasoning.effort).toBe("min");
-    const p2 = presetImport(portablePreset({ reasoning_effort: "xhigh" }), "T", base())!;
+    const p2 = presetImport(portablePreset({ reasoning_effort: "xhigh" }), "T")!;
     expect(p2.samplers.reasoning.effort).toBe("max");
-    const p3 = presetImport(portablePreset({ reasoning_effort: "" }), "T", base())!;
+    const p3 = presetImport(portablePreset({ reasoning_effort: "" }), "T")!;
     expect(p3.samplers.reasoning.effort).toBe("med"); // untouched base
   });
 
   it("negative/absent seed keeps the base; names_behavior 2 = content", () => {
-    const p = presetImport(portablePreset({ seed: -1, names_behavior: 2 }), "T", base())!;
+    const p = presetImport(portablePreset({ seed: -1, names_behavior: 2 }), "T")!;
     expect(p.samplers.seed).toBe(base().samplers.seed);
     expect(p.namesBehavior).toBe("content");
   });
@@ -117,7 +117,7 @@ describe("presetImport", () => {
       dry_multiplier: 0.8, dry_base: 1.75, xtc_probability: 0.5, xtc_threshold: 0.1,
       typical_p: 0.9, mirostat_mode: 2, temperature_last: true,
       negative_prompt: "avoid this", smoothing_factor: 1.5,
-    }), "T", base())!;
+    }), "T")!;
     expect(p.extendedSamplers).toMatchObject({
       dry_multiplier: 0.8, dry_base: 1.75, xtc_probability: 0.5, xtc_threshold: 0.1,
       typical_p: 0.9, mirostat_mode: 2, temperature_last: true,
@@ -127,7 +127,7 @@ describe("presetImport", () => {
     expect(p.extendedSamplers!.temperature).toBeUndefined();
     expect(p.extendedSamplers!.top_k).toBeUndefined();
     // absent sweep → no bag at all
-    const bare = presetImport(portablePreset(), "T", base())!;
+    const bare = presetImport(portablePreset(), "T")!;
     expect(bare.extendedSamplers).toBeUndefined();
   });
 
@@ -147,7 +147,7 @@ describe("presetImport", () => {
         { identifier: "main", enabled: true }, { identifier: "note", enabled: true },
         { identifier: "chatHistory", enabled: true }, { identifier: "tail", enabled: true },
       ] }],
-    }), "T", base())!;
+    }), "T")!;
     expect(p.sections.map((s) => s.name)).toEqual(["Main", "Note", "Chat History", "Tail"]);
     expect(p.sections.map((s) => s.order)).toEqual([0, 1, 2, 3]);
   });
@@ -162,7 +162,7 @@ describe("presetImport", () => {
         { identifier: "custom", name: "Custom", role: "system", content: "C" },
       ],
       prompt_order: [{ character_id: 100001, order: ["main", "charPersonality", "chatHistory", "worldInfoBefore", "custom"].map((identifier) => ({ identifier, enabled: true })) }],
-    }), "T", base())!;
+    }), "T")!;
     const byName = Object.fromEntries(p.sections.map((s) => [s.name, s.id]));
     // the engine matches markers BY IDENTIFIER — these must be canonical
     expect(byName.Main).toBe("main");
@@ -174,8 +174,8 @@ describe("presetImport", () => {
   });
 
   it("rejects non-preset JSON", () => {
-    expect(presetImport({ foo: 1 }, "T", base())).toBeNull();
-    expect(presetImport({ prompts: [] }, "T", base())).toBeNull();
+    expect(presetImport({ foo: 1 }, "T")).toBeNull();
+    expect(presetImport({ prompts: [] }, "T")).toBeNull();
   });
 });
 
@@ -197,9 +197,9 @@ describe("presetExport", () => {
       reasoning_effort: "high",
       top_a: 0.1, dry_multiplier: 0.8, mirostat_mode: 2, temperature_last: true,
     });
-    const imported = presetImport(source, "RT", base())!;
+    const imported = presetImport(source, "RT")!;
     const exported = presetExport(imported);
-    const again = presetImport(exported, "RT2", base())!;
+    const again = presetImport(exported, "RT2")!;
 
     expect(again.samplers.assistantPrefill).toBe("Understood.");
     expect(again.samplers.seed).toBe(12345);
@@ -221,7 +221,7 @@ describe("presetExport", () => {
   });
 
   it("writes the arrangement under the id the importer prefers", () => {
-    const exported = presetExport(presetImport(portablePreset(), "T", base())!);
+    const exported = presetExport(presetImport(portablePreset(), "T")!);
     expect(exported.prompt_order.map((o) => o.character_id)).toEqual([100001]);
   });
 });

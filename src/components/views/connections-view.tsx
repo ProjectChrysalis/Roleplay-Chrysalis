@@ -11,7 +11,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useApp } from '@/lib/store'
 import {
-  fetchEngineProviders, setEngineModelContext, setEngineModelPricing,
+  fetchEngineProviders, setEngineModelContext, setEngineModelPricing, testModelConnection,
   type EngineConnectionInfo, type EngineProviderInfo,
 } from '@/lib/engine'
 import { ProfilesSheet } from '@/components/connections/profiles-sheet'
@@ -65,6 +65,9 @@ export function ConnectionsView() {
 
   const [providers, setProviders] = useState<EngineProviderInfo[]>(providerCache ?? [])
   const [busy, setBusy] = useState(false)
+  const [testing, setTesting] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<{ ref: string; ms?: number; error?: string } | null>(null)
+  const testInFlight = useRef(false)
   /** the provider whose models are listed; null follows the model in use */
   const [browse, setBrowse] = useViewMemory<string | null>('connections.provider', null)
   const [q, setQ] = useViewMemory('connections.query', '')
@@ -151,6 +154,24 @@ export function ConnectionsView() {
   const pick = (m: ModelInfo) => {
     void setModel(m.ref)
     toast.success(`Model: ${shortModel(m.id)}`, { description: m.provider })
+  }
+
+  const testConnection = async () => {
+    if (!current || testInFlight.current) return
+    const ref = current.ref
+    testInFlight.current = true
+    setTesting(ref)
+    setTestResult(null)
+    const started = performance.now()
+    try {
+      await testModelConnection(ref)
+      setTestResult({ ref, ms: performance.now() - started })
+    } catch (e) {
+      setTestResult({ ref, error: String((e as Error).message ?? e) })
+    } finally {
+      testInFlight.current = false
+      setTesting(null)
+    }
   }
 
   const saveCurrentAsProfile = () => {
@@ -259,6 +280,23 @@ export function ConnectionsView() {
                   <X className="size-4" aria-hidden="true" />
                 </Button>
               )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!current || testing !== null}
+                onClick={() => void testConnection()}
+                title="Send a short test message to this model"
+              >
+                {testing === current?.ref
+                  ? <CircleNotch className="size-3.5 animate-spin" aria-hidden="true" />
+                  : <Plug className="size-3.5" aria-hidden="true" />}
+                {testing === current?.ref ? 'Testing…' : 'Test connection'}
+              </Button>
+              <p role="status" className={cn('min-w-0 text-xs', testResult?.error ? 'text-destructive' : 'text-muted-foreground')}>
+                {testResult && testResult.ref === current?.ref && (testResult.error ?? (testResult.ms != null ? `Reply received in ${(testResult.ms / 1000).toFixed(1)}s` : ''))}
+              </p>
             </div>
           </section>
 

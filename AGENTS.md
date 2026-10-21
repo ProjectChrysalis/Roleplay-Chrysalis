@@ -26,8 +26,8 @@ timestamps. For an edit, read the existing record and preserve every field
 you are not changing, including opaque metadata, extensions, and studio bags.
 Character cards are flat; their stored example-dialogue key is `mes_example`.
 Preset text/order live in prompts/prompt_order and their matching studio
-sections. Keep both copies consistent. Persona defaults live in
-settings.json.personaId. Never overwrite live settings/library with a template.
+sections. Keep both copies consistent. Persona and preset defaults live in
+settings.json.personaId and settings.json.presetId. Never overwrite live settings/library with a template.
 UI data saves coalesce rapid replacements and serialize writes per entity;
 refresh reads wait for pending saves, including the debounce period.
 
@@ -410,7 +410,7 @@ on the WS bus; the app re-hydrates). No restart, no reload needed.
 
 ```
 data/
-├─ settings.json        { model, personaId, ui: {…} }  — `ui` is the ENTIRE
+├─ settings.json        { model, personaId, presetId, ui: {…} }  — `ui` is the ENTIRE
 │                       AppSettings object (theme, fonts, hotkeys, TTS,
 │                       translation, chat behavior…). Edit a key → the UI
 │                       applies it live. (UI writes back on user changes.)
@@ -480,6 +480,7 @@ Rules of thumb:
 `src/lib/view-memory.ts` keeps editor navigation in session storage, including
 selected lorebooks/personas/presets, detail state, preset tabs, lore entries and
 scroll positions. Explicit focus links override the remembered selection.
+Connections tests the model in use through POST /connections/test with a fixed short prompt, without chat or preset data. The button reports measured response time or the provider error.
 Connections renders 40 model rows initially and appends batches as its scroll
 sentinel approaches the viewport; its search still filters the full catalog. Streaming state snapshots the requested model for message badges and
 interrupted replies. Company icons are local paths with the license in
@@ -504,7 +505,7 @@ and marketplace artwork, with pinch zoom and constrained panning.
 
 New card imports set deferEmbeddedLore and preserve character_book. The shell queues Import / Later prompts from studio.embeddedLorebookPending. POST /import/embedded-lorebook persists the choice; Later creates no book, and importing links one book without overwriting existing books. The character editor can import retained lore later. Archive restores retain their existing import behavior.
 
-Preset regex appears only as a compact shortcut for the active preset. RegexImportChoice supplies the Enable / Keep off dialog for preset and standalone imports. The Regex manager lists scripts in four fixed scope sections (Global, Preset, Character, Chat), each with a one-line hint, an enabled/total tally and its own add button; scoped sections group by owner, with the open chat's preset, character and chat marked current, sorted first and expanded, and scripts whose owner is unset or gone gathered in one group since they never run. Folders are sub-headings inside an owner. Each row has a direct switch, and each owner (and Global) has a menu to turn all on, turn all off or export. Adding from a scoped section assigns the current owner (addRegex takes an optional target). Collapse state is kept in view memory; folder metadata survives portable and engine saves. Sampler and bias sliders use full-width rows in narrow panels.
+Preset regex appears only as a compact shortcut for the active preset. RegexImportChoice supplies the Enable / Keep off dialog for preset and standalone imports. The Regex manager lists scripts in four fixed scope sections (Global, Preset, Character, Chat), each with a one-line hint, an enabled/total tally and its own add button; scoped sections group by owner, with the open chat's preset, character and chat marked current, sorted first and expanded, and scripts whose owner is unset or gone gathered in one group since they never run. Folders are sub-headings inside an owner. Each row has a direct switch, and each owner (and Global) has a menu to turn all on, turn all off or export. Adding from a scoped section assigns the current owner (addRegex takes an optional target). Collapse state is kept in view memory; folder metadata survives portable and engine saves. Sampler and bias sliders use full-width rows in narrow panels. Removing an imported extra sampler removes its forwarded field while preserving unrelated source metadata.
 
 Tools uses one page scroller for its header, tab strip and Regex workspace. Regex passes pageScroll to MasterDetail and uses content-sized panes so nested scrollers do not trap the tab strip.
 

@@ -12,7 +12,7 @@ export function entitiesRoute(c) {
       const read = (f, text) => {
         try {
           const item = JSON.parse(text);
-          return item ? { item, bytes: text.length } : null;
+          return item ? { item: { ...item, id: f.slice(0, -5) }, bytes: text.length } : null;
         } catch { return null; }
       };
       const r = readPage(fsx, names, pageOf(req.query, Number(req.query?.budget) || 0) || { offset: 0, end: Infinity, budget: Infinity }, (f) => kind + "/" + f, read);

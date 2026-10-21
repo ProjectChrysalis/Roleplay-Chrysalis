@@ -3,6 +3,7 @@
 // engine-side test suite typechecks this module directly.
 import type { Preset, PromptSection, RegexScript } from './types.js'
 import { uid } from './tokens.js'
+import { buildDefaultPreset } from './seed.js'
 
 // ─── Presets ───
 // chat-completion preset shape: prompts[] + prompt_order[]
@@ -57,14 +58,14 @@ interface WirePresetJson {
 
 /** Keys with first-class preset slots are excluded; everything else in this
  *  sweep rides extendedSamplers. Mirrors the engine's forwarded-key list. */
-const EXTRA_NUM_KEYS = [
+export const EXTRA_NUM_KEYS = [
   'top_a', 'typical_p', 'eta_cutoff', 'epsilon_cutoff', 'repetition_penalty_range',
   'no_repeat_ngram_size', 'penalty_alpha', 'guidance_scale', 'negative_prompt_scale',
   'smoothing_factor', 'smoothing_curve', 'dry_multiplier', 'dry_base', 'dry_allowed_length',
   'dry_last_n', 'xtc_probability', 'xtc_threshold', 'dynatemp_min', 'dynatemp_max',
   'dynatemp_exponent', 'mirostat_mode', 'mirostat_tau', 'mirostat_eta',
 ]
-const EXTRA_BOOL_KEYS = ['temperature_last', 'skip_special_tokens', 'ban_eos_token', 'add_bos_token']
+export const EXTRA_BOOL_KEYS = ['temperature_last', 'skip_special_tokens', 'ban_eos_token', 'add_bos_token']
 
 /** names behavior is a numeric enum: NONE -1, DEFAULT 0, COMPLETION 1, CONTENT 2. */
 const NAMES_BEHAVIOR: Record<Preset['namesBehavior'], number> = {
@@ -172,7 +173,8 @@ function activeOrder(d: WirePresetJson): WirePromptOrderEntry[] {
     ?? d.prompts.map((p) => ({ identifier: p.identifier, enabled: true }))
 }
 
-export function presetImport(json: unknown, name: string, base: Preset): Preset | null {
+export function presetImport(json: unknown, name: string): Preset | null {
+  const base = buildDefaultPreset()
   const d = json as WirePresetJson
   if (!d || !Array.isArray(d.prompts)) return null
   const orderList = activeOrder(d)
@@ -230,6 +232,10 @@ export function presetImport(json: unknown, name: string, base: Preset): Preset 
   if (typeof d.negative_prompt === 'string' && d.negative_prompt.trim()) extended.negative_prompt = d.negative_prompt
   return {
     ...base,
+    engineExtras: { ...d },
+    library: [],
+    groups: [],
+    variables: [],
     id: uid('preset'),
     name,
     readOnly: false,
@@ -256,7 +262,7 @@ export function presetImport(json: unknown, name: string, base: Preset): Preset 
     squashSystemMessages: d.squash_system_messages ?? base.squashSystemMessages,
     promptPostProcessing: {
       // the format carries no equivalent of the utility model / instruction
-      // fields, so those keep the base preset's values across a round-trip.
+      // fields, so those use the clean defaults.
       ...base.promptPostProcessing,
       // an empty/absent value means post-processing was switched off.
       enabled: !!d.custom_prompt_post_processing,
@@ -275,8 +281,8 @@ export function presetImport(json: unknown, name: string, base: Preset): Preset 
       contextSize: d.openai_max_context ?? base.samplers.contextSize,
       seed: typeof d.seed === 'number' && d.seed >= 0 ? d.seed : base.samplers.seed,
       streaming: d.stream_openai ?? base.samplers.streaming,
-      stopStrings: stops.length ? [...new Set(stops)] : base.samplers.stopStrings,
-      assistantPrefill: d.assistant_prefill?.trim() ? d.assistant_prefill : base.samplers.assistantPrefill,
+      stopStrings: [...new Set(stops)],
+      assistantPrefill: d.assistant_prefill ?? base.samplers.assistantPrefill,
       reasoning: mappedEffort
         ? { ...base.samplers.reasoning, enabled: true, effort: mappedEffort }
         : base.samplers.reasoning,

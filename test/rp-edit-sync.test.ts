@@ -400,3 +400,109 @@ test('transcript loading assembles pages and restarts if a write changes the ver
   expect(result.from).toBeUndefined()
   expect(requests).toHaveLength(5)
 })
+
+test('preset imports use clean defaults and retain only their own hidden prompts', async () => {
+  const dirty = { ...buildDefaultPreset(), id: 'dirty', readOnly: false, utilityPrompts: { ...buildDefaultPreset().utilityPrompts, newChat: 'LEAK' },
+    samplers: { ...buildDefaultPreset().samplers, temperature: { enabled: true, value: 1.99 }, assistantPrefill: 'LEAK', stopStrings: ['LEAK'] },
+    engineExtras: { prompts: [{ identifier: 'leaked', content: 'LEAK' }] },
+    library: [buildDefaultPreset().sections[0]!], groups: [{ id: 'leak', name: 'LEAK', wrapFormat: 'xml' as const }], variables: [{ id: 'leak', name: 'LEAK', label: 'LEAK', type: 'text' as const, defaultValue: 'LEAK' }] }
+  useApp.setState({ presets: [dirty], regexScripts: [] })
+  let saved: Record<string, unknown> = {}
+  globalThis.fetch = (async (_input, init) => { saved = JSON.parse(String(init?.body)); return Response.json({ ok: true }) }) as typeof fetch
+  const source = { prompts: [{ identifier: 'main', name: 'Main', content: 'Imported' }, { identifier: 'hidden', content: 'Own hidden prompt' }],
+    prompt_order: [{ character_id: 100001, order: [{ identifier: 'main', enabled: true }] }], assistant_prefill: '' }
+  const { preset } = await useApp.getState().importPreset(source, 'Clean')
+  expect(preset.samplers.assistantPrefill).toBe('')
+  expect(preset.samplers.stopStrings).toEqual([])
+  expect(preset.samplers.temperature).toEqual(buildDefaultPreset().samplers.temperature)
+  expect(preset.utilityPrompts).toEqual(buildDefaultPreset().utilityPrompts)
+  expect(preset.library).toEqual([])
+  expect(preset.groups).toEqual([])
+  expect(preset.variables).toEqual([])
+  expect(JSON.stringify(saved)).not.toContain('LEAK')
+  expect(saved.prompts).toContainEqual({ identifier: 'hidden', content: 'Own hidden prompt' })
+})
+
+test('active preset settings save before debounced preset files and preview waits', async () => {
+  const { promptPreview } = await import('../src/lib/engine')
+  useApp.setState({ presets: [buildDefaultPreset(), { ...buildDefaultPreset(), id: 'chosen', isDefault: false }] })
+  const calls: { url: string; body: Record<string, unknown> }[] = []
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input)
+    calls.push({ url, body: JSON.parse(String(init?.body)) })
+    if (url.endsWith('/settings')) await gate
+    return Response.json({ ok: true })
+  }) as typeof fetch
+  useApp.getState().updatePreset('chosen', { isDefault: true })
+  await pause(10)
+  expect(calls).toHaveLength(1)
+  expect(calls[0]).toMatchObject({ body: { presetId: 'chosen' } })
+  const preview = promptPreview('chat')
+  await pause(10)
+  expect(calls.some((c) => c.url.includes('/prompt/preview'))).toBe(false)
+  release()
+  await preview
+  expect(calls.at(-1)?.url).toContain('/prompt/preview')
+})
+
+test('refresh restores settings presetId over conflicting default flags', async () => {
+  const stock = { ...presetToEngine(buildDefaultPreset()), id: 'default' }
+  const selected = { ...presetToEngine({ ...buildDefaultPreset(), id: 'selected', name: 'Selected', readOnly: false }), id: 'selected' }
+  globalThis.fetch = (async (input) => {
+    const url = String(input)
+    if (url.includes('/bootstrap')) return Response.json({
+      settings: { model: null, personaId: null, presetId: 'selected', ui: defaultSettings() },
+      library: { qrSets: [], themes: [], backgrounds: [], tags: [], folders: [], connectionProfiles: [] },
+      characters: [], presets: [stock, selected], personas: [], groups: [], lorebooks: [], regex: [], chats: [], databank: { files: [] }, activeChat: null,
+    })
+    return Response.json(url.endsWith('/models') ? { models: [] } : { connections: [] })
+  }) as typeof fetch
+  useApp.setState({ boot: 'ready', activeChatId: null, chats: [], presets: [buildDefaultPreset()] })
+  await useApp.getState().hydrate()
+  expect(useApp.getState().presets.filter((p) => p.isDefault).map((p) => p.id)).toEqual(['selected'])
+})
+
+test('removing imported extra samplers removes them from the saved request fields', async () => {
+  const { presetImport } = await import('../src/lib/import-shapes')
+  const imported = presetImport({
+    prompts: [{ identifier: 'main', name: 'Main', role: 'system', content: 'Rules' }],
+    dry_multiplier: 0.8, xtc_probability: 0.5, negative_prompt: 'Avoid this',
+    future: { keep: true },
+  }, 'Imported')!
+  const hydrated = enginePresetToUI(presetToEngine(imported), imported.id)
+  expect(hydrated.extendedSamplers).toMatchObject({ dry_multiplier: 0.8, xtc_probability: 0.5, negative_prompt: 'Avoid this' })
+  hydrated.extendedSamplers = {}
+  const saved = presetToEngine(hydrated)
+  expect(saved).not.toHaveProperty('dry_multiplier')
+  expect(saved).not.toHaveProperty('xtc_probability')
+  expect(saved).not.toHaveProperty('negative_prompt')
+  expect(saved).toHaveProperty('future', { keep: true })
+  expect(enginePresetToUI(saved, imported.id).extendedSamplers).toEqual({})
+})
+
+test('rapid preset switches save the last selection and preserve chat locks', async () => {
+  const { chatPresetId } = await import('../src/lib/store')
+  const presets = [buildDefaultPreset(), ...['alpha', 'beta'].map((id) => ({ ...buildDefaultPreset(), id, readOnly: false, isDefault: false }))]
+  useApp.setState({ presets })
+  let active = 'default'
+  const flags = new Map<string, boolean>()
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input)
+    const body = JSON.parse(String(init?.body))
+    await pause(body.presetId === 'alpha' ? 20 : 1)
+    if (url.endsWith('/settings')) active = body.presetId
+    if (url.includes('/presets/')) flags.set(body.id, body.studio.isDefault)
+    return Response.json({ ok: true })
+  }) as typeof fetch
+  useApp.getState().updatePreset('alpha', { isDefault: true })
+  useApp.getState().updatePreset('beta', { isDefault: true })
+  useApp.getState().updatePreset('alpha', { isDefault: true })
+  await saves.settled()
+  expect(active).toBe('alpha')
+  expect([...flags].filter(([, enabled]) => enabled).map(([id]) => id)).toEqual(['alpha'])
+  expect(chatPresetId(useApp.getState(), { presetId: 'beta', presetLocked: false })).toBe('alpha')
+  expect(chatPresetId(useApp.getState(), { presetId: 'beta', presetLocked: true })).toBe('beta')
+  expect(chatPresetId(useApp.getState(), { presetId: 'deleted', presetLocked: true })).toBe('alpha')
+})
