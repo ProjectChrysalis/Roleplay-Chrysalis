@@ -144,6 +144,8 @@ Messages are a FLAT list with swipes. Interrupted generations freeze and save st
 
 Markdown horizontal rules use a brighter line. Thinking disclosure and panel borders
 use the standard muted theme styles.
+Single tildes stay literal in Markdown; strikethrough requires double tildes.
+Section drawers retain their title and view until the sheet's closing animation completes.
 
 Expanded thinking panels have a Copy button and an actions menu above the scrollable
 text. Edit thinking and Remove all thinking live in that menu; collapsed panels

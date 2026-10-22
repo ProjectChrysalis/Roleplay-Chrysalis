@@ -179,7 +179,7 @@ export const Markdown = memo(function Markdown({ content, className, scope, allo
       <StyleScope.Provider value={scope ?? '.mes_text'}>
         <ReactMarkdown
           // remark-breaks: single newlines render as breaks
-          remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
+          remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkMath, remarkBreaks]}
           rehypePlugins={[
             // raw HTML parsed, then sanitized BEFORE katex/highlight so their
             // generated markup isn't stripped by the allowlist

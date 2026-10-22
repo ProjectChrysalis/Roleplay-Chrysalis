@@ -190,7 +190,11 @@ function renderView(v: ViewKey) {
 function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
   const drawer = useApp((s) => s.drawer)
   const closeDrawer = useApp((s) => s.closeDrawer)
-  const label = SECTIONS.find((i) => i.key === drawer)?.label ?? ''
+  const [retainedDrawer, setRetainedDrawer] = useState(drawer)
+  if (drawer && drawer !== retainedDrawer) setRetainedDrawer(drawer)
+  // Closing starts the slide; its content stays mounted until the sheet is hidden.
+  const displayedDrawer = drawer ?? retainedDrawer
+  const label = SECTIONS.find((i) => i.key === displayedDrawer)?.label ?? ''
   // 0 until the user picks a width
   const [width, setWidth] = useViewMemory('layout.drawer.width', 0, true)
   const [full, setFull] = useViewMemory('layout.drawer.full', false, true)
@@ -198,7 +202,9 @@ function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
     // non-modal and without pointer dismissal: the rail (or the chat's section
     // bar) stays live, since pressing it must not read as an outside-close; the
     // page area closes via the backdrop's own click, Esc and the X keep working
-    <Sheet modal={false} disablePointerDismissal open={!!drawer} onOpenChange={(open) => { if (!open) closeDrawer() }}>
+    <Sheet modal={false} disablePointerDismissal open={!!drawer} onOpenChange={(open) => { if (!open) closeDrawer() }} onOpenChangeComplete={(open) => {
+      if (!open && !useApp.getState().drawer) setRetainedDrawer(null)
+    }}>
       <SheetContent
         // it comes out of whatever opened it: the rail on desktop, the bar
         // above it on mobile
@@ -249,7 +255,7 @@ function SectionDrawer({ isDesktop }: { isDesktop: boolean }) {
           />
         )}
         <div className="min-h-0 flex-1 overflow-hidden">
-          {drawer && renderView(drawer)}
+          {displayedDrawer && renderView(displayedDrawer)}
         </div>
       </SheetContent>
     </Sheet>
