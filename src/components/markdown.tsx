@@ -36,20 +36,7 @@ type QuoteKind = 'straight' | 'curly' | 'guillemet'
 const OPENERS: Record<string, QuoteKind> = { '"': 'straight', '“': 'curly', '«': 'guillemet' }
 const CLOSERS: Record<string, QuoteKind> = { '"': 'straight', '”': 'curly', '»': 'guillemet' }
 
-/**
- * Tints spoken dialogue with the theme's quote color.
- *
- * Runs a STATEFUL walk over each block's children rather than regexing text
- * nodes one at a time: a quotation like `"…but not here. **Walls have ears**,
- * and…"` opens in one text node and closes in a later sibling, with a `strong`
- * element in between. Per-node matching left everything after the bold segment
- * untinted — exactly the "some quotes aren't highlighted" bug. Here the open
- * state carries across siblings, and whole elements encountered mid-quote are
- * pulled inside the `<q>` wrapper so they inherit the dialogue color.
- *
- * An unterminated quote tints to the end of the block, so streamed dialogue
- * colors from the opening mark onward instead of popping in at the close.
- */
+/** Quote state crosses inline formatting, but only matched pairs receive tint. */
 function tintQuotes(children: ReactNode, depth = 0): ReactNode {
   if (depth > 6) return children
 
@@ -70,8 +57,17 @@ function tintQuotes(children: ReactNode, depth = 0): ReactNode {
 
   for (const child of Children.toArray(children)) {
     if (typeof child === 'string') {
+      let offset = 0
       for (const token of child.split(MARK_RE)) {
+        const before = child.slice(0, offset)
+        offset += token.length
         if (!token) continue
+        // Inch marks cannot open dialogue; feet-and-inches stay literal inside it too.
+        if ((token === '"' || token === '”') && ((!open && /\d$/.test(before)) || /\d['’′]\s*\d+(?:\.\d+)?$/.test(before))) {
+          if (open) group.push(token)
+          else out.push(token)
+          continue
+        }
         if (open) {
           if (CLOSERS[token] === open) {
             group.push(token)
@@ -114,7 +110,7 @@ function tintQuotes(children: ReactNode, depth = 0): ReactNode {
     else out.push(child)
   }
 
-  if (open) flush() // streaming: tint the still-open quote to the block's end
+  if (open) out.push(...group)
   return out
 }
 
