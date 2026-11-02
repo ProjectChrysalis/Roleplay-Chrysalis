@@ -1,3 +1,6 @@
+import { saves } from '@/lib/save-queue'
+import { buildPortableArchive } from '@/lib/portable-archive'
+import { saveFile } from '@/lib/export'
 import { importArchiveWithProgress } from "@/lib/archive-import"
 
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -569,6 +572,20 @@ function DataSection() {
     } finally { setBusy(false) }
   }
 
+  const handlePortableExport = async () => {
+    setBusy(true)
+    try {
+      await saves.settled()
+      const r = await j<{ base64: string }>("/export/backup")
+      const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0))
+      const archive = await buildPortableArchive(bytes)
+      saveFile(new Blob([archive as BlobPart], { type: 'application/zip' }), 'portable-data.zip')
+      toast.success('Portable archive exported')
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e))
+    } finally { setBusy(false) }
+  }
+
   /** Restore uses bounded archive batches to keep memory independent of archive size. */
   const handleImport = async (files: FileList | null) => {
     const file = files?.[0]
@@ -590,6 +607,10 @@ function DataSection() {
         <Button variant="outline" className="justify-start gap-2 bg-transparent" disabled={busy} onClick={() => void handleExport()}>
           <DownloadSimple className="size-4" aria-hidden /> Export backup (zip)
         </Button>
+        <Button variant="outline" className="justify-start gap-2 bg-transparent" disabled={busy} onClick={() => void handlePortableExport()}>
+          <DownloadSimple className="size-4" aria-hidden /> Export portable data (zip)
+        </Button>
+        <p className="text-xs text-muted-foreground">Characters, individual chats, lorebooks and presets. Extract into the destination data folder.</p>
         <input
           ref={importInput}
           type="file"

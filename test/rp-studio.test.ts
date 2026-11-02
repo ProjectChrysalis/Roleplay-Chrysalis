@@ -2922,6 +2922,7 @@ describe("rp studio: outside preset/book formats", () => {
     expect(worldName).toBeTruthy();
     const world = JSON.parse(new TextDecoder().decode(files[worldName!]!)) as Record<string, unknown>;
 
+    expect((world.entries as Record<string, any>)[0].selective).toBe(true);
     // wipe the book, re-import what the export wrote
     fs.rmSync(path.join(root, "lorebooks", `${bookId}.json`));
     const back = await drive(stUrl, { method: "POST", path: "/import/batch", body: { worldInfo: [world] } }, m);

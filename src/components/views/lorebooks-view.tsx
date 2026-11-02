@@ -1,7 +1,7 @@
 import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BookOpenText, Plus, Trash, Copy, MagnifyingGlass, Globe, Flask, Pulse, CaretDown, CaretRight, GearSix, DotsThreeVertical, ArrowSquareOut } from '@phosphor-icons/react'
+import { BookOpenText, Plus, Trash, Copy, MagnifyingGlass, Globe, Flask, Pulse, CaretDown, CaretRight, GearSix, DotsThreeVertical, ArrowSquareOut, DownloadSimple } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -21,6 +21,8 @@ import { newLoreEntry } from '@/lib/seed'
 import { loreEntryMatch } from '@/lib/lore-match'
 import { importLorebookFiles, fetchWIStatus, type WIStatus } from '@/lib/engine'
 import { cn } from '@/lib/utils'
+import { downloadJson } from '@/lib/interop'
+import { exportLorebook } from '@/lib/lorebook-export'
 import type { Lorebook, LoreEntry } from '@/lib/types'
 import { MasterDetail } from '@/components/shell/master-detail'
 import { LibraryFolderTree } from '@/components/shell/library-folder-tree'
@@ -232,6 +234,12 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest, onActive }:
               </DropdownMenuItem>
               <DropdownMenuItem onClick={onActive}>
                 <Pulse className="size-4" aria-hidden="true" />Active in chat
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => {
+                void downloadJson(exportLorebook(book), `${book.name.replace(/[^\w-]+/g, '_') || 'lorebook'}.json`)
+                  .catch((error) => toast.error(String(error)))
+              }}>
+                <DownloadSimple className="size-4" aria-hidden="true" />Export
               </DropdownMenuItem>
               <DropdownMenuItem onClick={onDuplicate}>
                 <Copy className="size-4" aria-hidden="true" />Duplicate

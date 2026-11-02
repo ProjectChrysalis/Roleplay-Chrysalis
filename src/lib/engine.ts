@@ -1343,12 +1343,14 @@ export async function importLorebookFiles(
   for (const file of files) {
     try {
       const json = JSON.parse(await file.text()) as Record<string, unknown>
-      const isNative = 'settings' in json && 'vectorized' in json && Array.isArray(json.entries)
+      const embedded = json._chrysalis
+      const native = embedded && typeof embedded === 'object' && !Array.isArray(embedded) ? embedded as Record<string, unknown> : json
+      const isNative = 'settings' in native && 'vectorized' in native && Array.isArray(native.entries)
       if (isNative) {
         const id = uid('book')
         await j(`/lorebooks/${encodeURIComponent(id)}`, {
           method: 'PUT',
-          body: JSON.stringify({ ...lorebookToEngine({ ...(json as unknown as Lorebook), id }), id }),
+          body: JSON.stringify({ ...lorebookToEngine({ ...(native as unknown as Lorebook), id }), id }),
         })
         ids.push(id)
       } else {
@@ -1385,6 +1387,9 @@ export function lorebookToEngine(b: Lorebook): EngineLorebook {
       tagFilter: e.tagFilter, triggerFilters: e.triggerFilters,
       nonRecursable: e.nonRecursable, preventFurtherRecursion: e.preventFurtherRecursion, ignoreBudget: e.ignoreBudget,
       delayUntilRecursion: e.delayUntilRecursion, automationId: e.automationId, matchSources: e.matchSources,
+      scanDepthOverride: e.scanDepthOverride, caseSensitiveOverride: e.caseSensitiveOverride,
+      wholeWordsOverride: e.wholeWordsOverride, groupScoringOverride: e.groupScoringOverride,
+      useProbability: e.useProbability, storedProbability: e.probability,
     })),
   }
 }
@@ -1404,7 +1409,7 @@ export function engineLorebookToUI(b: EngineLorebook, id: string): Lorebook {
       content: e.content ?? '',
       position: ENGINE_TO_POS[e.position ?? 'before_char'] ?? 'before_char',
       depth: e.depth ?? 4, role: (e.role as LoreEntry['role']) ?? 'system',
-      order: e.order ?? 100, probability: e.probability ?? 100, useProbability: e.probability != null && e.probability < 100,
+      order: e.order ?? 100, probability: (e.storedProbability as number | undefined) ?? e.probability ?? 100, useProbability: (e.useProbability as boolean | undefined) ?? (e.probability != null && e.probability < 100),
       group: (e.group as string) ?? '', groupWeight: (e.groupWeight as number) ?? 100, groupPrioritize: e.groupPrioritize === true,
       sticky: (e.sticky as number) ?? 0, cooldown: (e.cooldown as number) ?? 0, delay: (e.delay as number) ?? 0,
       enabled: e.enabled !== false,
@@ -1412,7 +1417,7 @@ export function engineLorebookToUI(b: EngineLorebook, id: string): Lorebook {
       tagFilter: (e.tagFilter as string[]) ?? [], triggerFilters: (e.triggerFilters as string[]) ?? [],
       nonRecursable: e.nonRecursable === true, preventFurtherRecursion: e.preventFurtherRecursion === true, ignoreBudget: e.ignoreBudget === true,
       delayUntilRecursion: e.delayUntilRecursion === true,
-      scanDepthOverride: null, caseSensitiveOverride: null, wholeWordsOverride: null, groupScoringOverride: null,
+      scanDepthOverride: (e.scanDepthOverride as number | null) ?? null, caseSensitiveOverride: (e.caseSensitiveOverride as boolean | null) ?? null, wholeWordsOverride: (e.wholeWordsOverride as boolean | null) ?? null, groupScoringOverride: (e.groupScoringOverride as boolean | null) ?? null,
       automationId: (e.automationId as string) ?? '',
       matchSources: (e.matchSources as LoreEntry['matchSources']) ?? { description: false, personality: false, scenario: false, persona: false },
     })),

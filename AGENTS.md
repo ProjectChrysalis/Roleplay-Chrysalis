@@ -104,6 +104,7 @@ matches at a time. `chatLorebookIds`
 stores explicit chat bindings separately from the inherited `lorebookIds` scope.
 Both prompt assembly and semantic preparation include them; backups remap the
 explicit bindings through `_chatLorebookNames`. Forks inherit the selection.
+Lorebook export downloads world-info JSON with a native snapshot for re-importing app-specific fields and empty entries.
 The preset and lorebook editors keep one line of everyday controls and fold
 the rest. A preset prompt shows name, role, a macro button (inserts at the
 cursor) and its text. Position, group, condition, triggers and forbid overrides
@@ -185,6 +186,8 @@ Older replies retain readable thinking but cannot recover missing signatures.
   /v1/audio/speech: keyless Edge voices or a speech endpoint), the data bank
   (plugin /databank) and image generation are all engine-backed.
   Purely local: themes, quick replies, tags/folders, hotkeys, backgrounds.
+
+Settings > Data offers a portable data archive alongside the full backup. It converts the backup in the browser into PNG cards, individual chat transcripts with headers, world files and individual chat completion presets. Group chats and other app-specific collections are not included.
 
 ## Backups (the zip, both directions)
 
