@@ -1439,25 +1439,34 @@ export const useApp = create<AppState>()(
         // never replaced
         const same = get().presets.find((p) => p.id !== 'default' && !p.readOnly && p.name.toLowerCase() === imported.name.toLowerCase())
         const preset = same ? { ...imported, id: same.id, isDefault: same.isDefault } : imported
-        await j(`/presets/${encodeURIComponent(preset.id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(preset), id: preset.id }) })
-        bumpMutate()
-        set((s) => ({ presets: same ? s.presets.map((p) => (p.id === same.id ? preset : p)) : [...s.presets, preset] }))
-        const embedded = (json as { extensions?: { regex_scripts?: unknown[] } }).extensions?.regex_scripts
-        // a script already here, everywhere or on this preset, is not added again
-        const known = new Set(get().regexScripts
-          .filter((r) => r.scope === 'global' || (r.scope === 'preset' && r.scopeTargetId === preset.id))
-          .map((r) => regexSignature(r)))
-        const scripts: RegexScript[] = []
-        for (const item of Array.isArray(embedded) ? embedded : []) {
-          const rx = regexImport(item)
-          if (!rx || known.has(regexSignature(rx))) continue
-          known.add(regexSignature(rx))
-          const script: RegexScript = { ...rx, enabled: enableEmbeddedRegex && rx.enabled, id: uid('rx'), scope: 'preset', scopeTargetId: preset.id, order: scripts.length }
-          await j(`/regex/${encodeURIComponent(script.id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id: script.id }) })
-          scripts.push(script)
+        // every write echoes back as a change; one reload of the library
+        // follows the import instead of one per script
+        holdLiveHydrate(true)
+        try {
+          await j(`/presets/${encodeURIComponent(preset.id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(preset), id: preset.id }) })
+          bumpMutate()
+          set((s) => ({ presets: same ? s.presets.map((p) => (p.id === same.id ? preset : p)) : [...s.presets, preset] }))
+          const embedded = (json as { extensions?: { regex_scripts?: unknown[] } }).extensions?.regex_scripts
+          // a script already here, everywhere or on this preset, is not added again
+          const known = new Set(get().regexScripts
+            .filter((r) => r.scope === 'global' || (r.scope === 'preset' && r.scopeTargetId === preset.id))
+            .map((r) => regexSignature(r)))
+          const scripts: RegexScript[] = []
+          for (const item of Array.isArray(embedded) ? embedded : []) {
+            const rx = regexImport(item)
+            if (!rx || known.has(regexSignature(rx))) continue
+            known.add(regexSignature(rx))
+            scripts.push({ ...rx, enabled: enableEmbeddedRegex && rx.enabled, id: uid('rx'), scope: 'preset', scopeTargetId: preset.id, order: scripts.length })
+          }
+          for (let i = 0; i < scripts.length; i += 8) {
+            await Promise.all(scripts.slice(i, i + 8).map((script) =>
+              j(`/regex/${encodeURIComponent(script.id)}`, { method: 'PUT', body: JSON.stringify({ ...regexToEngine(script), id: script.id }) })))
+          }
+          if (scripts.length) set((s) => ({ regexScripts: [...s.regexScripts, ...scripts] }))
+          return { preset, scripts: scripts.length, replaced: !!same }
+        } finally {
+          holdLiveHydrate(false)
         }
-        if (scripts.length) set((s) => ({ regexScripts: [...s.regexScripts, ...scripts] }))
-        return { preset, scripts: scripts.length, replaced: !!same }
       },
       postPicture: async (chatId, image) => {
         const chat = get().chats.find((c) => c.id === chatId)
@@ -1506,6 +1515,8 @@ export const useApp = create<AppState>()(
             c = withVersion
           }
         }
+        // a card needs a name: a cleared field waits on screen until one is typed
+        if (!c.name.trim()) return
         void j(`/characters/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(characterToCard(c)) })
           .catch((e) => charactersToast.error(String((e as Error).message ?? e)))
       },
@@ -1676,10 +1687,12 @@ export const useApp = create<AppState>()(
             return patch.isDefault && p.isDefault ? { ...p, isDefault: false } : p
           }),
         }))
-        const p = get().presets.find((x) => x.id === id)
-        if (!p) return
-        void j(`/presets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(p), id }) })
-          .catch((e) => presetsToast.error(String((e as Error).message ?? e)))
+        if (!get().presets.some((x) => x.id === id)) return
+        // a preset can run to megabytes: a burst of edits sends the newest state once
+        void saves.replace(`preset:${id}`, () => {
+          const p = get().presets.find((x) => x.id === id)
+          return p ? j(`/presets/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine(p), id }) }) : Promise.resolve()
+        }).catch((e) => presetsToast.error(String((e as Error).message ?? e)))
         for (const other of prevDefaults) {
           writeThrough('presets', 'preset', j(`/presets/${encodeURIComponent(other.id)}`, { method: 'PUT', body: JSON.stringify({ ...presetToEngine({ ...other, isDefault: false }), id: other.id }) }))
         }
@@ -1997,7 +2010,7 @@ async function preserveInterruptedStream(
         await j(`/chats/${encodeURIComponent(st.chatId)}/cancelled`, {
           method: 'POST',
           body: JSON.stringify({
-            text: frozen.text, parts: frozen.parts, genMs: frozen.genMs, presetName: st.presetName,
+            text: frozen.text, parts: frozen.parts, genMs: frozen.genMs, startedAt: st.startedAt, presetName: st.presetName,
             model: st.model ?? get().model ?? '', operation: st.operation,
             ...(frozen.isStaged ? {
               replyMessageId: st.messageId.replace(/^pending-/, ''), charId: target?.characterId,

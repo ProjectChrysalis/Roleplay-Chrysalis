@@ -7,7 +7,7 @@ import { isConstantEntry } from "../world-info.js";
 import { buildZip } from "../zip.js";
 
 export function backupRoute(c) {
-  const { req, fsx, head, id, ok, readJson } = c;
+  const { req, host, fsx, head, id, ok, readJson } = c;
   if (head === "export" && id === "backup" && req.method === "GET") {
     const files = [];
     const usedNames = new Set();
@@ -67,9 +67,12 @@ export function backupRoute(c) {
       }
     } catch {}
     const presets = {};
+    // regex scopes and chats name their preset; one read of each preset serves all of them
+    const presetNames = new Map();
     try {
       for (const f of fsx.list("presets").filter((x) => x.endsWith(".json") && !x.startsWith("_"))) {
         const preset = readJson("presets/" + f, null);
+        if (preset) presetNames.set(preset.id || f.replace(/\.json$/, ""), preset.name || f.replace(/\.json$/, ""));
         if (preset) {
           const copy = { ...preset, extensions: { ...preset.extensions } };
           delete copy.extensions.regex_scripts;
@@ -91,8 +94,8 @@ export function backupRoute(c) {
         const NUM = { user_input: 1, ai_output: 2, slash: 3, wi: 5, reasoning: 6 };
         const rid2 = unameIn("User Settings/regex", slug(s.scriptName || f), ".json").replace(/\.json$/, "");
         const scope = s.scope || "global";
-        const target = scope === "character" ? readJson("characters/" + s.scopeTargetId + "/card.json", null)
-          : scope === "preset" ? readJson("presets/" + s.scopeTargetId + ".json", null) : null;
+        const target = scope === "character" ? { name: idToName.get(s.scopeTargetId) }
+          : scope === "preset" ? { name: presetNames.get(s.scopeTargetId) } : null;
         files.push({
           name: "User Settings/regex/" + rid2 + ".json",
           text: JSON.stringify({
@@ -108,13 +111,6 @@ export function backupRoute(c) {
             minDepth: s.minDepth ?? null, maxDepth: s.maxDepth ?? null,
           }, null, 2),
         });
-      }
-    } catch {}
-    const presetNames = new Map();
-    try {
-      for (const f of fsx.list("presets").filter((x) => x.endsWith(".json") && !x.startsWith("_"))) {
-        const p = readJson("presets/" + f, null);
-        if (p) presetNames.set(p.id || f.replace(/\.json$/, ""), p.name || f.replace(/\.json$/, ""));
       }
     } catch {}
     const namesOf = (ids, map) => (Array.isArray(ids) ? ids.map((x) => map.get(x)).filter(Boolean) : []);
@@ -296,6 +292,9 @@ export function backupRoute(c) {
     // shared variables are state a preset can depend on; an empty set is not worth a file
     const shared = readJson("variables.json", {});
     if (shared && typeof shared === "object" && Object.keys(shared).length) files.push({ name: "variables.json", text: JSON.stringify(shared, null, 2) });
-    return ok({ filename: "studio-backup-" + new Date().toISOString().slice(0, 10) + ".zip", base64: buildZip(files.map((file) => { if (!/\.json$/.test(file.name)) return file; try { return { ...file, text: JSON.stringify(portableMedia(JSON.parse(file.text), fsx)) }; } catch { return file; } })) });
+    const entries = files.map((file) => { if (!/\.json$/.test(file.name)) return file; try { return { ...file, text: JSON.stringify(portableMedia(JSON.parse(file.text), fsx)) }; } catch { return file; } });
+    // the engine zips natively when it can; the guest-side zip is for engines before 1.0.7
+    const base64 = typeof host.zip?.build === "function" ? host.zip.build(entries) : buildZip(entries);
+    return ok({ filename: "studio-backup-" + new Date().toISOString().slice(0, 10) + ".zip", base64 });
   }
 }
