@@ -288,7 +288,6 @@ export function MarketplaceView() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<Record<string, boolean>>({})
-  const [enableEmbeddedRegex, setEnableEmbeddedRegex] = useState(false)
   const [downloaded, setDownloaded] = useState<Set<string>>(new Set())
   const reqId = useRef(0)
 
@@ -429,10 +428,10 @@ export function MarketplaceView() {
       }
       const r = await j<CardImportResult>(source !== 'chub' ? '/marketplace/import' : '/import/url', {
         method: 'POST',
-        body: JSON.stringify(source !== 'chub' ? { source, id: item.id, deferEmbeddedLore: true, enableEmbeddedRegex, ...(avatar ? { avatar } : {}) } : { url: sourceUrl(source, item.id), deferEmbeddedLore: true, enableEmbeddedRegex, ...(avatar ? { avatar } : {}) }),
+        body: JSON.stringify(source !== 'chub' ? { source, id: item.id, deferEmbeddedLore: true, enableEmbeddedRegex: true, ...(avatar ? { avatar } : {}) } : { url: sourceUrl(source, item.id), deferEmbeddedLore: true, enableEmbeddedRegex: true, ...(avatar ? { avatar } : {}) }),
       })
       setDownloaded((s) => new Set(s).add(item.id))
-      toast.success(`${r.name ?? item.name} added to Characters`, { description: cardImportDetails(r, enableEmbeddedRegex) })
+      toast.success(`${r.name ?? item.name} added to Characters`, { description: cardImportDetails(r, true) })
       if (r.warning) toast.warning(r.warning)
       await hydrate()
     } catch (e) {
@@ -743,7 +742,6 @@ export function MarketplaceView() {
               </DialogHeader>
               <MarketplaceCardContent key={`${source}:${detail.id}`} data={detailData} loading={detailLoading} error={detailError} tagline={detail.tagline} description={detail.description} />
               <footer className="marketplace-preview-footer">
-              <label className="flex items-center gap-2 text-xs"><Checkbox checked={enableEmbeddedRegex} onCheckedChange={(v) => setEnableEmbeddedRegex(v === true)} />Enable embedded regex on import</label>
               {source !== 'chub' && detailData?.importReason && <p className="text-xs text-muted-foreground">{detailData.importReason}</p>}
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <a

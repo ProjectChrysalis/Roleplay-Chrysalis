@@ -230,7 +230,8 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
                 <div className="flex flex-col gap-3">
                   <div className="flex flex-col gap-1">
                     <Label className="flex items-center gap-2 text-xs">Name <TokenBadge text={c.name} /></Label>
-                    <Input value={c.name} onChange={(e) => up({ name: e.target.value })} aria-label="Character name" />
+                    <Input value={c.name} onChange={(e) => up({ name: e.target.value })} aria-label="Character name" aria-invalid={!c.name.trim()} />
+                    {!c.name.trim() && <p className="text-xs text-destructive">Name required. Changes save once it has one.</p>}
                   </div>
                   <div className="flex flex-col gap-1">
                     <Label className="text-xs">Tags (comma separated)</Label>

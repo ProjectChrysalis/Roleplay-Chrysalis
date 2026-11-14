@@ -10,7 +10,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuCheckboxItem,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -81,7 +81,6 @@ export function CharactersView() {
   const [urlOpen, setUrlOpen] = useState(false)
   const [urlValue, setUrlValue] = useState('')
   const [urlBusy, setUrlBusy] = useState(false)
-  const [enableEmbeddedRegex, setEnableEmbeddedRegex] = useState(false)
   const [page, setPage] = useState(0)
   const importRef = useRef<HTMLInputElement>(null)
 
@@ -98,10 +97,10 @@ export function CharactersView() {
       try {
         const avatar = await fullSizeAvatar(url)
         const r = await j<CardImportResult>('/import/url', {
-          method: 'POST', body: JSON.stringify({ url, deferEmbeddedLore: true, enableEmbeddedRegex, ...(avatar ? { avatar } : {}) }),
+          method: 'POST', body: JSON.stringify({ url, deferEmbeddedLore: true, enableEmbeddedRegex: true, ...(avatar ? { avatar } : {}) }),
         })
         okCount++
-        toast.success(`Imported ${r.name ?? 'character'}`, { description: cardImportDetails(r, enableEmbeddedRegex) })
+        toast.success(`Imported ${r.name ?? 'character'}`, { description: cardImportDetails(r, true) })
       } catch (e) {
         toast.error(url.split('/').pop() ?? url, { description: String((e as Error).message ?? e) })
       }
@@ -119,9 +118,9 @@ export function CharactersView() {
   const importFiles = async (files: FileList | null) => {
     if (!files?.length) return
     try {
-      const r = await importCardFiles(Array.from(files), { fullSize: useApp.getState().settings.importFullSizeArt === true, enableEmbeddedRegex })
+      const r = await importCardFiles(Array.from(files), { fullSize: useApp.getState().settings.importFullSizeArt === true, enableEmbeddedRegex: true })
       if (r.characters.length) {
-        toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? '' : 's'}`, { description: cardImportDetails(r, enableEmbeddedRegex) })
+        toast.success(`Imported ${r.characters.length} character${r.characters.length === 1 ? '' : 's'}`, { description: cardImportDetails(r, true) })
         await hydrate()
       }
       for (const e of r.errors) toast.error(e)
@@ -242,8 +241,6 @@ export function CharactersView() {
               </Button>
             } />
             <DropdownMenuContent align="end">
-              <DropdownMenuCheckboxItem checked={enableEmbeddedRegex} onCheckedChange={setEnableEmbeddedRegex}>Enable embedded regex</DropdownMenuCheckboxItem>
-              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => importRef.current?.click()}>
                 <FileCode className="size-4" aria-hidden="true" />From files…
               </DropdownMenuItem>
@@ -456,7 +453,6 @@ export function CharactersView() {
             className="font-mono text-xs"
           />
           <p className="text-xs text-muted-foreground">Chub, CharacterHub, Pygmalion, Realm, AI Character Cards. One URL per line. Embedded lorebooks can be imported now or later.</p>
-          <label className="flex items-center justify-between text-sm">Enable embedded regex<Switch checked={enableEmbeddedRegex} onCheckedChange={setEnableEmbeddedRegex} /></label>
           <div className="flex justify-end gap-2">
             <Button variant="outline" size="sm" onClick={() => setUrlOpen(false)}>Cancel</Button>
             <Button size="sm" disabled={urlBusy || !urlValue.trim()} onClick={() => void importFromUrl()}>

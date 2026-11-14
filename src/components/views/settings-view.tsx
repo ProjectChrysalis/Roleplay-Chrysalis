@@ -577,7 +577,9 @@ function DataSection() {
     try {
       await saves.settled()
       const r = await j<{ base64: string }>("/export/backup")
-      const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0))
+      const bin = atob(r.base64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
       const archive = await buildPortableArchive(bytes)
       saveFile(new Blob([archive as BlobPart], { type: 'application/zip' }), 'portable-data.zip')
       toast.success('Portable archive exported')
