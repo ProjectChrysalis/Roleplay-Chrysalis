@@ -42,11 +42,29 @@ function b64(s: string): string {
   return btoa(bin)
 }
 
+/**
+ * A source the canvas may read back. The app page has its own opaque origin,
+ * so an image from the engine taints the canvas unless it arrives as bytes
+ * (engine routes, fetched over the bridge) or with CORS (the app's own files).
+ */
+async function readableImage(src: string): Promise<{ url: string; revoke?: () => void; cors: boolean }> {
+  if (src.startsWith('data:') || src.startsWith('blob:')) return { url: src, cors: false }
+  if (src.startsWith('/v1/')) {
+    const response = await fetch(src)
+    if (!response.ok) throw new Error('could not load avatar')
+    const url = URL.createObjectURL(await response.blob())
+    return { url, revoke: () => URL.revokeObjectURL(url), cors: false }
+  }
+  return { url: src, cors: true }
+}
+
 /** Build the PNG bytes of `imageDataUrl` with `card` embedded as tEXt. */
 export async function buildCardPng(imageDataUrl: string, card: EngineCard): Promise<Uint8Array> {
+  const source = await readableImage(imageDataUrl)
   // normalize to PNG via canvas (source may be jpeg/data-url/placeholder)
-  const pngUrl: string = await new Promise((resolve, reject) => {
+  const pngUrl: string = await new Promise<string>((resolve, reject) => {
     const img = new Image()
+    if (source.cors) img.crossOrigin = 'anonymous'
     img.onload = () => {
       const canvas = document.createElement('canvas')
       canvas.width = Math.max(64, img.width)
@@ -55,8 +73,8 @@ export async function buildCardPng(imageDataUrl: string, card: EngineCard): Prom
       resolve(canvas.toDataURL('image/png'))
     }
     img.onerror = () => reject(new Error('could not load avatar'))
-    img.src = imageDataUrl
-  })
+    img.src = source.url
+  }).finally(() => source.revoke?.())
   const base = Uint8Array.from(atob(pngUrl.slice(pngUrl.indexOf(',') + 1)), (c) => c.charCodeAt(0))
 
   const metadata: EngineCard = { ...card, studio: { ...card.studio } }
