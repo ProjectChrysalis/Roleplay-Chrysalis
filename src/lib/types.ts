@@ -304,7 +304,7 @@ export interface SamplerSettings {
    * of role runs back (plus one two runs deeper) so the stable prefix stays
    * cached while depth injections churn the tail. `ttl` picks the window.
    */
-  cache: { enabled: boolean; pinned: boolean; depth: number; ttl: 'short' | 'long' }
+  cache: { enabled: boolean; pinned: boolean; depth: number; ttl: 'short' | 'long'; refresh?: { enabled: boolean; intervalSeconds: number; maxRefreshes: number; notifications: boolean } }
 }
 
 export interface Preset {

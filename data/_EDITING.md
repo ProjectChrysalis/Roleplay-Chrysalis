@@ -129,6 +129,13 @@ number. `studio.samplers.reasoning` controls effort, thinking budget/tags and `h
 `cache`, `streaming`, and `assistantPrefill` live in the same bag. Extended
 samplers live in `studio.extendedSamplers` and their forwarded portable keys.
 Use actual model limits, not guessed values.
+`cache.refresh` is `{ enabled: false, intervalSeconds: 270, maxRefreshes: 3,
+notifications: true }`. Refresh is opt-in, uses paid requests and requires a
+caching chat transport that reports cache usage. An extended cache window defaults
+to a 3300-second interval. Limits are 30 seconds through 30 seconds before expiry,
+and 1–20 refreshes per reply. Swipe dates live in each `extra.swipeMeta` entry as
+`createdAt`, `startedAt`, `finishedAt`; continuation metadata lives in
+`continuations`. Preserve unknown dates as absent.
 
 `utilityPrompts` (impersonation, continueNudge, newChat, groupNudge, emptySend)
 lives at top level and in studio. Preserve both. Other editor behavior lives

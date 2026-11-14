@@ -10,6 +10,7 @@ export const NOTIFICATION_TYPES = [
 
 export const NOTIFICATION_AREAS = [
   ['chat', 'Chats and messages'],
+  ['cache', 'Cache refresh'],
   ['characters', 'Characters'],
   ['personas', 'Personas'],
   ['presets', 'Presets and samplers'],

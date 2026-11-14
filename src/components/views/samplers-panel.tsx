@@ -38,6 +38,8 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
   // old stored blocks are coerced to the current shape; the whole object is
   // written back on any edit
   const cache = normalizeCache(sp.cache)
+  const refresh = cache.refresh!
+  const upRefresh = (patch: Partial<typeof refresh>) => up({ cache: { ...cache, refresh: { ...refresh, ...patch } } })
   const up = (patch: Partial<SamplerSettings>) => updatePreset(preset.id, { samplers: { ...sp, ...patch } })
 
   return (
@@ -220,7 +222,7 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
           </div>
           <div className={cn('flex items-center gap-3', !cache.enabled && 'opacity-50')}>
             <Label className="w-28 text-xs">Window</Label>
-            <Select value={cache.ttl} onValueChange={(v) => up({ cache: { ...cache, ttl: v as never } })}>
+            <Select value={cache.ttl} onValueChange={(v) => up({ cache: { ...cache, ttl: v as never, refresh: { ...refresh, intervalSeconds: v === 'long' && refresh.intervalSeconds === 270 ? 3300 : v === 'short' ? Math.min(270, refresh.intervalSeconds) : refresh.intervalSeconds } } })}>
               <SelectTrigger className="w-32" aria-label="Cache window" disabled={ro || !cache.enabled}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="short">Default</SelectItem>
@@ -229,6 +231,26 @@ export function SamplersPanel({ preset }: { preset: Preset }) {
             </Select>
           </div>
           <p className="text-xs text-muted-foreground">Extended: 1 hour on Anthropic, 24 hours on OpenAI.</p>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={refresh.enabled} disabled={ro || !cache.enabled} onCheckedChange={(enabled) => upRefresh({ enabled })} aria-label="Keep cache warm" />
+            Keep cache warm
+          </label>
+          <p className="text-xs text-muted-foreground">Uses paid requests while this chat is open.</p>
+          {refresh.enabled && <>
+            <div className="flex items-center gap-3">
+              <Label className="w-28 text-xs">Interval (seconds)</Label>
+              <Input type="number" min={30} max={cache.ttl === 'long' ? 3570 : 270} value={refresh.intervalSeconds} disabled={ro || !cache.enabled} className="h-7 w-24 text-xs" aria-label="Refresh interval" onChange={(e) => upRefresh({ intervalSeconds: Math.max(30, Math.min(cache.ttl === 'long' ? 3570 : 270, Number(e.target.value) || 270)) })} />
+            </div>
+            <div className="flex items-center gap-3">
+              <Label className="w-28 text-xs">Maximum refreshes</Label>
+              <Input type="number" min={1} max={20} value={refresh.maxRefreshes} disabled={ro || !cache.enabled} className="h-7 w-24 text-xs" aria-label="Maximum refreshes" onChange={(e) => upRefresh({ maxRefreshes: Math.max(1, Math.min(20, Math.floor(Number(e.target.value) || 3))) })} />
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={refresh.notifications} disabled={ro} onCheckedChange={(notifications) => upRefresh({ notifications })} aria-label="Refresh notifications" />
+              Refresh notifications
+            </label>
+          </>}
+
         </TabsContent>
 
       </Tabs>

@@ -502,7 +502,13 @@
         "enabled": true,
         "pinned": false,
         "depth": 0,
-        "ttl": "short"
+        "ttl": "short",
+        "refresh": {
+          "enabled": false,
+          "intervalSeconds": 270,
+          "maxRefreshes": 3,
+          "notifications": true
+        }
       }
     },
     "namesBehavior": "default",

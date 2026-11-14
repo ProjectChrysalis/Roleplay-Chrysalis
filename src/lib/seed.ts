@@ -16,11 +16,12 @@ export function normalizeCache(cache: unknown): SamplerSettings['cache'] {
   const c = (cache ?? {}) as Partial<SamplerSettings['cache']>
   const depth = typeof c.depth === 'number' && Number.isFinite(c.depth) ? Math.max(0, Math.floor(c.depth)) : 0
   const ttl = c.ttl === 'long' ? ('long' as const) : ('short' as const)
+  const refresh = { enabled: c.refresh?.enabled === true, intervalSeconds: Math.max(30, Math.min(ttl === 'long' ? 3570 : 270, Number(c.refresh?.intervalSeconds) || (ttl === 'long' ? 3300 : 270))), maxRefreshes: Math.max(1, Math.min(20, Math.floor(Number(c.refresh?.maxRefreshes) || 3))), notifications: c.refresh?.notifications !== false }
   if (c.pinned === undefined) {
     const legacy = c as { enabled?: unknown }
-    return { enabled: true, pinned: legacy.enabled === true, depth, ttl }
+    return { enabled: true, pinned: legacy.enabled === true, depth, ttl, refresh }
   }
-  return { enabled: c.enabled !== false, pinned: c.pinned === true, depth, ttl }
+  return { enabled: c.enabled !== false, pinned: c.pinned === true, depth, ttl, refresh }
 }
 
 const now = Date.now()

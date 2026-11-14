@@ -33,6 +33,7 @@ import { createToast } from '@/lib/notifications'
 import { useSwipeAnimation } from '@/hooks/use-swipe-animation'
 import { MessageRow } from './message-row'
 import { Composer } from './composer'
+import { CacheRefreshStatus } from './cache-refresh-status'
 import { GroupMemberBar } from './group-member-bar'
 import { MemoryPanel } from './memory-panel'
 import { HelpDialog } from './help-dialog'
@@ -628,6 +629,8 @@ export function ChatView() {
           }}
         />
       )}
+
+      <CacheRefreshStatus chatId={chat.id} />
 
       {/* Header + group bar PINNED above the message log — the one view where
           the top row stays visible at all times (back, name, search, preset

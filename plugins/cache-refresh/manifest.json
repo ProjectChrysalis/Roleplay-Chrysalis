@@ -1,0 +1,10 @@
+{
+  "name": "Cache Refresh",
+  "version": "1.0.2",
+  "description": "Bounded cache refreshes for an open chat, with measured usage and status.",
+  "origin": "local",
+  "keepLoaded": true,
+  "permissions": ["routes", "llm", "hooks", "store", "fs", "schedule"],
+  "schedule": { "intervalMs": 5000 },
+  "priority": 1000
+}

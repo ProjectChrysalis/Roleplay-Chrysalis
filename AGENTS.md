@@ -516,3 +516,27 @@ Preset regex appears only as a compact shortcut for the active preset. RegexImpo
 Tools uses one page scroller for its header, tab strip and Regex workspace. Regex passes pageScroll to MasterDetail and uses content-sized panes so nested scrollers do not trap the tab strip.
 
 Presets and lorebooks share LibraryFolderTree (components/shell/library-folder-tree.tsx), which owns the sidebar's search box, New folder button, scroll area and rows: folders first, then items without a folder. The views pass renderLabel (row content) and renderMenu (their own menu items); the tree adds Move to. Rows are 28px (36px on mobile) and the whole row is the drag surface through lib/tree-drag.ts: press and move with a mouse, hold then move on touch, Escape cancels, the list scrolls at its edges, and a floating label follows the pointer. An item dropped between rows lands there, in that row's folder, shown as a line; dropped on a folder header (open or closed) it goes to the end of that folder. While an item is dragged a bar under the list offers No folder and New folder (the new folder holds the item and opens for naming). Item order is one id list per collection in settings.ui.libraryOrder (lib/library-order.ts): rows sort by it inside every folder, and items it has never seen follow in their stored sequence. A folder dragged past another header reorders, shown as a line. Folder dragging is off while searching. Children marked data-no-drag never start a drag. Folders are created with a unique default name and renamed in place (also double-click or F2); names stay unique per collection. Folder order is the order of library.folders (reorderFolders keeps other scopes' slots); open folders are kept in view memory. Folder headers show a check for the actual active preset, independent of editor selection. Folder membership uses preset studio.folderId and lorebook folderId. Deleting a folder clears membership without removing items. Stock presets allow folder placement while prompt content stays locked. Agents handle folders through the skills: library-editing adds folders (name and scope are required), preset-editing and lorebook-editing set and report folderId (checked against the folders of that list; a locked preset accepts only that change), preset inspection takes `folder` to list a folder's presets, and settings-editing patches ui.libraryOrder. data/_EDITING.md has the Folders and list order section.
+
+## Cache refresh and swipe dates
+
+Presets → Samplers → Caching stores opt-in refresh controls in
+`studio.samplers.cache.refresh` (`enabled`, `intervalSeconds`, `maxRefreshes`,
+`notifications`). `plugins/cache-refresh/` owns presence leases, bounded cycles,
+request/response hooks and scheduled work. The engine retains process-local,
+app-scoped request snapshots behind opaque tokens. Refreshes preserve prompt,
+model, session and tool definitions; they never execute tools or save chat turns.
+OpenAI-compatible, Responses, Gemini, Vertex, Anthropic and Bedrock transports
+can refresh when cache usage is reported. Native Anthropic/Bedrock thinking,
+structured output, completed tool sequences and transports without a bounded
+output mode pause refresh with a reason. Other thinking configurations remain
+unchanged; the output cap is applied after provider adaptation. Cache-read usage confirms
+success. Misses/errors stop; a 90-second lease ends work after a client disappears.
+Refresh usage stays separate from reply usage. Notifications use the cache area.
+Capture identifiers reject old replies after Stop, a newer generation, preset edits,
+or closing the chat. Disabled clients send no refresh heartbeats.
+
+`extra.swipeMeta[]` records each swipe's `createdAt`, `startedAt`, `finishedAt`.
+Continue keeps these dates and appends its own generation metadata to
+`continuations`. Missing historical dates remain absent. The UI adapter and
+picker use swipe dates, and public exports carry `swipe_info` timestamps and
+metadata. Foreign swipe information is preserved in `sourceInfo`.
