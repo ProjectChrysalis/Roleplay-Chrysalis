@@ -792,7 +792,7 @@ export const MessageRow = memo(function MessageRow({
               </span>
               {settings.showTimestamps && (
                 <span className="text-muted-foreground">
-                  {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  {new Date(isUser ? message.timestamp : swipe?.createdAt ?? message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>
               )}
               {settings.hideAvatars && settings.showMessageIds && <span className="text-muted-foreground">#{index}</span>}
@@ -1085,7 +1085,7 @@ export const MessageRow = memo(function MessageRow({
           </DialogHeader>
           <div className="flex flex-col gap-2">
             {message.swipes.map((sw, i) => (
-              <SwipeCard key={sw.id} chatId={chat.id} messageId={message.id} index={i} active={i === message.activeSwipe} content={sw.content} model={sw.model} onPick={() => { setSwipe(chat.id, message.id, i); setSwipesOpen(false) }} />
+              <SwipeCard key={sw.id} chatId={chat.id} messageId={message.id} index={i} active={i === message.activeSwipe} content={sw.content} model={sw.model} createdAt={sw.createdAt} onPick={() => { setSwipe(chat.id, message.id, i); setSwipesOpen(false) }} />
             ))}
           </div>
         </DialogContent>
@@ -1111,6 +1111,13 @@ export const MessageRow = memo(function MessageRow({
             <DialogTitle>Generation data</DialogTitle>
           </DialogHeader>
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+            <dt className="text-muted-foreground">Created</dt>
+            <dd>{swipe?.createdAt != null ? new Date(swipe.createdAt).toLocaleString() : 'Not recorded'}</dd>
+            <dt className="text-muted-foreground">Started</dt>
+            <dd>{swipe?.startedAt != null ? new Date(swipe.startedAt).toLocaleString() : 'Not recorded'}</dd>
+            <dt className="text-muted-foreground">Finished</dt>
+            <dd>{swipe?.finishedAt != null ? new Date(swipe.finishedAt).toLocaleString() : 'Not recorded'}</dd>
+            {swipe?.continuations?.length ? <><dt className="text-muted-foreground">Last continued</dt><dd>{typeof swipe.continuations.at(-1)?.finishedAt === 'number' ? new Date(swipe.continuations.at(-1)!.finishedAt as number).toLocaleString() : 'Not recorded'}</dd></> : null}
             <dt className="text-muted-foreground">Preset</dt>
             <dd className="break-words">{swipe?.presetName || <span className="text-muted-foreground">Not recorded</span>}</dd>
             <dt className="text-muted-foreground">Model</dt>
@@ -1167,23 +1174,24 @@ export const MessageRow = memo(function MessageRow({
   )
 })
 
-function SwipeCard({ chatId, messageId, index, active, content, model, onPick }: {
-  chatId: string; messageId: string; index: number; active: boolean; content: string; model: string; onPick: () => void
+function SwipeCard({ chatId, messageId, index, active, content, model, createdAt, onPick }: {
+  chatId: string; messageId: string; index: number; active: boolean; content: string; model: string; createdAt?: number; onPick: () => void
 }) {
   const deleteSwipe = useApp((s) => s.deleteSwipe)
   const forkAndOpen = useApp((s) => s.forkAndOpen)
   return (
     <div className={cn('rounded-md border p-2.5', active ? 'border-primary/60 bg-accent/50' : 'border-border')}>
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        Swipe {index + 1}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span className="shrink-0">Swipe {index + 1}</span>
         {model && <Badge variant="outline">{shortModel(model)}</Badge>}
         {active && <Badge variant="secondary">active</Badge>}
-        <div className="ml-auto flex gap-1">
+        <div className="ml-auto flex shrink-0 flex-wrap gap-1">
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onPick}>Use</Button>
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => { void forkAndOpen(chatId, messageId); toast.success('Branched from swipe') }}>Branch</Button>
           <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-destructive" onClick={() => deleteSwipe(chatId, messageId, index)}>Delete</Button>
         </div>
       </div>
+      <p className="mt-1 text-xs text-muted-foreground">{createdAt != null ? new Date(createdAt).toLocaleString() : "Date not recorded"}</p>
       <p className="mt-1 line-clamp-3 text-xs">{content.replace(/[*>#`]/g, '')}</p>
     </div>
   )

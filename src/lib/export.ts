@@ -1,4 +1,4 @@
-import type { Chat, Character } from './types'
+import type { Chat, Character, Swipe } from './types'
 
 /** Save a file through the browser. The object URL outlives the click:
  *  revoking it in the same tick cancels the download on browsers that fetch
@@ -30,6 +30,18 @@ function safeSlug(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 60) || 'chat'
 }
 
+export function exportSwipeInfo(swipes: Swipe[]) {
+  return swipes.map((s) => ({ ...s.sourceInfo,
+    ...(s.createdAt != null ? { send_date: s.createdAt } : {}),
+    ...(s.startedAt != null ? { gen_started: s.startedAt } : {}),
+    ...(s.finishedAt != null ? { gen_finished: s.finishedAt } : {}),
+    extra: { ...(s.sourceInfo?.extra as Record<string, unknown> || {}), model: s.model || undefined,
+      presetName: s.presetName, genMs: s.genTimeMs || undefined, usage: s.usage, params: s.params,
+      reasoning: s.reasoning, reasoningMs: s.reasoningTime != null ? s.reasoningTime * 1000 : undefined,
+      parts: s.parts, tools: s.tools, continuations: s.continuations },
+  }))
+}
+
 /** JSONL chat log: one JSON object per message line. */
 export function exportChatJSONL(chat: Chat, characters: Character[]) {
   const lines = chat.messages.map((m) => {
@@ -42,6 +54,7 @@ export function exportChatJSONL(chat: Chat, characters: Character[]) {
       mes: swipe?.content ?? '',
       swipes: m.swipes.map((s) => s.content),
       swipe_id: m.activeSwipe,
+      swipe_info: exportSwipeInfo(m.swipes),
     })
   })
   downloadTextFile(`${safeSlug(chat.title)}.jsonl`, lines.join('\n'), 'application/jsonl')

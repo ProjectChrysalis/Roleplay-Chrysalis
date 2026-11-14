@@ -105,6 +105,11 @@ export type ToolPart =
   | { type: 'tool'; name: string; args: Record<string, unknown>; resultText: string; isError: boolean }
 
 export interface Swipe {
+  createdAt?: number
+  startedAt?: number
+  finishedAt?: number
+  continuations?: Record<string, unknown>[]
+  sourceInfo?: Record<string, unknown>
   id: ID
   content: string
   reasoning?: string

@@ -9,17 +9,17 @@ export function syncSwipeThinking(msg, overwrite = true) {
     if (extra[key] === undefined) delete own[key];
     else own[key] = extra[key];
   }
-  for (const key of ["model", "usage", "genMs", "params", "presetName"]) if (extra[key] !== undefined) own[key] = extra[key];
+  for (const key of ["model", "usage", "genMs", "params", "presetName", "createdAt", "startedAt", "finishedAt", "continuations", "sourceInfo"]) if (extra[key] !== undefined) own[key] = extra[key];
   extra.swipeMeta[msg.swipe || 0] = own;
   return { ...msg, extra };
 }
 export function restoreSwipeThinking(extra, index) {
   const next = { ...extra };
-  for (const key of [...THINKING_FIELDS, "model", "usage", "genMs", "params", "presetName"]) delete next[key];
+  for (const key of [...THINKING_FIELDS, "model", "usage", "genMs", "params", "presetName", "createdAt", "startedAt", "finishedAt", "continuations", "sourceInfo"]) delete next[key];
   const own = extra?.swipeMeta?.[index];
   if (own) {
     for (const key of THINKING_FIELDS) if (own[key] !== undefined) next[key] = own[key];
-    for (const key of ["model", "usage", "genMs", "params", "presetName"]) if (own[key] !== undefined) next[key] = own[key];
+    for (const key of ["model", "usage", "genMs", "params", "presetName", "createdAt", "startedAt", "finishedAt", "continuations", "sourceInfo"]) if (own[key] !== undefined) next[key] = own[key];
   }
   return next;
 }
@@ -48,4 +48,10 @@ export function editReplayThinking(replay, text, thinkingIndex) {
     if (last) last.content.unshift({ type: "thinking", thinking: text });
   }
   return { ...replay, messages };
+}
+
+export function continuedSwipeMeta(original, continuation) {
+  return { ...continuation, createdAt: original?.createdAt, startedAt: original?.startedAt,
+    finishedAt: original?.finishedAt, sourceInfo: original?.sourceInfo,
+    continuations: [...(original?.continuations || []), continuation] };
 }

@@ -48,11 +48,21 @@ export function normalizeChatLines(raw) {
     // thinking rides each swipe; the active swipe's is the message's own
     const info = Array.isArray(l.swipe_info) ? l.swipe_info : [];
     const thought = (e) => (e && typeof e.reasoning === "string" && e.reasoning ? { reasoning: e.reasoning } : null);
-    const swipeMeta = swipes.map((_, i) => thought(info[i]?.extra));
+    const swipeMeta = swipes.map((_, i) => {
+      const source = info[i];
+      if (!source || typeof source !== "object") return null;
+      const createdAt = chatTime(source.send_date);
+      const startedAt = chatTime(source.gen_started);
+      const finishedAt = chatTime(source.gen_finished);
+      return { sourceInfo: source, ...(source.extra || {}), ...(thought(source.extra) || {}),
+        ...(createdAt != null ? { createdAt } : {}), ...(startedAt != null ? { startedAt } : {}),
+        ...(finishedAt != null ? { finishedAt } : {}),
+        ...(startedAt != null && finishedAt != null && finishedAt >= startedAt ? { genMs: finishedAt - startedAt } : {}) };
+    });
     const active = typeof l.swipe_id === "number" && l.swipe_id >= 0 && l.swipe_id < swipes.length ? l.swipe_id : 0;
-    const reasoning = thought(foreign) ?? swipeMeta[active];
-    const imported = !own && (reasoning || swipeMeta.some(Boolean))
-      ? { ...(reasoning ?? {}), ...(typeof foreign.model === "string" && foreign.model ? { model: foreign.model } : {}), ...(swipes.length > 1 ? { swipeMeta } : {}) }
+    const reasoning = thought(foreign) ?? thought(swipeMeta[active]);
+    const imported = !own && (Object.keys(foreign).length || swipeMeta.some(Boolean))
+      ? { ...foreign, ...(reasoning ?? {}), ...(swipeMeta[active] || {}), swipeMeta }
       : null;
     const media = Array.isArray(foreign.media) ? foreign.media : typeof foreign.image === "string" ? [{ url: foreign.image, type: "image", title: foreign.title }] : [];
     const attachments = own && Array.isArray(x.attachments) ? x.attachments : media.filter((m) => m?.type === "image").flatMap((m) => {

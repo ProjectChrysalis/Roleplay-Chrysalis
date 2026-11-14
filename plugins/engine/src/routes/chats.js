@@ -179,7 +179,7 @@ export function chatsRoute(c) {
       return n === 1 ? base + " fork" : base + " fork " + n;
     };
     const generationPreset = () => typeof req.stash?.presetName === "string" ? { presetName: req.stash.presetName } : {};
-    const swipeMetaEntry = (reply) => ({ ...generationPreset(), model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0,
+    const swipeMetaEntry = (reply) => ({ createdAt: reply.startedAt ?? Date.now(), startedAt: reply.startedAt, finishedAt: reply.finishedAt, ...generationPreset(), model: reply.model, usage: genUsage(reply), genMs: reply.genTimeMs ?? 0,
       params: reply.requestParams, reasoning: reply.reasoning, reasoningMs: reply.reasoningTimeMs, ...toolX(reply) });
     // per-swipe generation facts (model, usage, timing). A message's extra
     // describes its ACTIVE swipe only, so every swipe's own numbers ride this

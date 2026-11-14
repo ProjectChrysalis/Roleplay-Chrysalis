@@ -319,6 +319,30 @@ describe("rp studio engine: bootstrap pages instead of shipping every transcript
 });
 
 describe("rp studio engine: chats + swipes", () => {
+  it("retains each swipe's dates through Continue, navigation, deletion and forks", async () => {
+    const make = (start: number, end: number) => mockHost({ text: "Dated reply", model: "mock/model", startedAt: start, finishedAt: end, genTimeMs: end - start, usage: { input: 1, output: 1 } } as never);
+    const first = make(1000, 2000);
+    const created = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, first);
+    const id = (created.json.meta as { id: string }).id;
+    const sent = await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "Hello" } }, first);
+    const reply = sent.json.reply as EngineMessage;
+    expect(reply.extra?.swipeMeta?.[0]).toMatchObject({ createdAt: 1000, startedAt: 1000, finishedAt: 2000 });
+    const swiped = await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe` }, make(3000, 4000));
+    expect((swiped.json.message as EngineMessage).extra?.swipeMeta?.map((x) => x?.createdAt)).toEqual([1000, 3000]);
+    const continued = await drive(engineUrl, { method: "POST", path: `/chats/${id}/continue` }, make(5000, 6000));
+    const entry = (continued.json.message as EngineMessage).extra?.swipeMeta?.[1];
+    expect(entry).toMatchObject({ createdAt: 3000, startedAt: 3000, finishedAt: 4000, continuations: [{ startedAt: 5000, finishedAt: 6000 }] });
+    const switched = await drive(engineUrl, { method: "POST", path: `/chats/${id}/messages/${reply.id}/swipe`, body: { index: 0 } }, first);
+    expect((switched.json.message as EngineMessage).extra?.createdAt).toBe(1000);
+    const deleted = await drive(engineUrl, { method: "DELETE", path: `/chats/${id}/messages/${reply.id}/swipes/0` }, first);
+    expect((deleted.json.message as EngineMessage).extra?.createdAt).toBe(3000);
+    expect((deleted.json.message as EngineMessage).extra?.swipeMeta).toHaveLength(1);
+    const fork = await drive(engineUrl, { method: "POST", path: `/chats/${id}/fork`, body: { messageId: reply.id } }, first);
+    const forkId = (fork.json.meta as { id: string }).id;
+    const transcript = await drive(engineUrl, { method: "GET", path: `/chats/${forkId}` }, first);
+    expect((transcript.json.messages as EngineMessage[]).at(-1)?.extra?.swipeMeta?.[0]).toMatchObject({ createdAt: 3000, continuations: [{ finishedAt: 6000 }] });
+  });
+
   it("creates a chat with the greeting seeded as swipes", async () => {
     const m = mockHost();
     const r = await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
@@ -1130,7 +1154,7 @@ describe("rp studio engine: export + regex + prompt preview", () => {
     const chat2 = await drive(engineUrl, { method: "GET", path: `/chats/${id}` }, m);
     const reply2 = [...(chat2.json.messages as { id: string; role: string; extra?: { swipeMeta?: unknown[]; genMs?: number; model?: string; usage?: unknown } }[])].reverse().find((x) => x.role === "char")!;
     expect(reply2.extra?.swipeMeta).toHaveLength(4);
-    expect(reply2.extra?.swipeMeta?.[3]).toEqual({ genMs: 4200, model: "test/mini" });
+    expect(reply2.extra?.swipeMeta?.[3]).toEqual({ genMs: 4200, model: "test/mini", createdAt: expect.any(Number), finishedAt: expect.any(Number) });
     // the message-level facts describe the ACTIVE swipe — the cancelled
     // partial, not the generation it replaced
     expect(reply2.extra?.genMs).toBe(4200);
@@ -4077,7 +4101,8 @@ describe("rp studio: a foreign user folder imports linked up", () => {
     expect(msgs[0].at).toBe(new Date(2023, 5, 19, 14, 20).getTime());
     expect(msgs[1]).toMatchObject({ role: "user", hidden: true, at: Date.UTC(2023, 5, 19, 14, 21, 5) });
     expect(msgs[2]).toMatchObject({ role: "system", at: 1687184500000 });
-    expect(msgs[3].extra).toEqual({ reasoning: "second", swipeMeta: [{ reasoning: "first" }, { reasoning: "second" }] });
+    expect(msgs[3].extra).toMatchObject({ reasoning: "second", swipeMeta: [{ reasoning: "first" }, { reasoning: "second" }] });
+    expect(msgs[3].extra.swipeMeta[0].sourceInfo.extra.reasoning).toBe("first");
   }, 30_000);
 
   it("turns on a card's own regex only where the settings file allowed it", async () => {

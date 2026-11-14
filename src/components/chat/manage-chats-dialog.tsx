@@ -10,7 +10,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useApp, chatPersonaId } from "@/lib/store"
-import { saveFile } from "@/lib/export"
+import { exportSwipeInfo, saveFile } from "@/lib/export"
 import { j } from "@/lib/engine"
 import type { Chat, ID } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -45,6 +45,7 @@ function chatToJsonl(chat: Chat, charName: string, userName: string): string {
       send_date: m.timestamp,
       swipes: m.swipes.map((sw) => sw.content),
       swipe_id: m.activeSwipe,
+      swipe_info: exportSwipeInfo(m.swipes),
     })),
   ]
   return lines.join("\n") + "\n"

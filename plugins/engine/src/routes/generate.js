@@ -5,7 +5,7 @@ import { expandMacros } from "../macros.js";
 import { loadMemories, memoryExtractPrompt, memoryTranscript, mergeMemories, parseMemoriesReply, saveMemories } from "../memories.js";
 import { applyStashVars, llmFailReason, pendingOut } from "../passes.js";
 import { assemble, chatPersona, chatUserName } from "../prompt.js";
-import { restoreSwipeThinking, syncSwipeThinking } from "../thinking.js";
+import { continuedSwipeMeta, restoreSwipeThinking, syncSwipeThinking } from "../thinking.js";
 import { esc, uid } from "../util.js";
 import { globalVars, transcriptMacros } from "../variables.js";
 import { cacheWiVectorBatch, embedCap, semanticEmbedWork, setEmbedCap } from "../vectors.js";
@@ -305,6 +305,9 @@ export function cancelledRoute(c) {
     const parts = Array.isArray(b.parts) ? b.parts : [];
     const keep = !!text.trim() || parts.length > 0;
     const genMs = Math.max(0, Number(b.genMs) || 0);
+    const finishedAt = Date.now();
+    const startedAt = Number.isFinite(b.startedAt) && b.startedAt > 0 && b.startedAt <= finishedAt ? b.startedAt : undefined;
+    const dates = { createdAt: startedAt ?? finishedAt, startedAt, finishedAt };
     const model = typeof b.model === "string" ? b.model : "";
     const presetName = typeof b.presetName === "string" ? b.presetName : undefined;
     if (b.targetMessageId) {
@@ -317,14 +320,15 @@ export function cancelledRoute(c) {
       if (continuing) swipes[target.swipe || 0] = text;
       else swipes.push(text);
       const swipe = continuing ? target.swipe || 0 : swipes.length - 1;
-      const extra = { ...syncSwipeThinking(target, false).extra, presetName, model, genMs, usage: undefined, params: undefined, replay: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
+      const extra = { ...syncSwipeThinking(target, false).extra, ...dates, presetName, model, genMs, usage: undefined, params: undefined, replay: undefined, reasoning: undefined, reasoningMs: undefined, tools: undefined, parts: parts.length ? parts : undefined };
       if (continuing) {
         const swipeMeta = extra.swipeMeta.slice();
-        swipeMeta[swipe] = { presetName, genMs, ...(model ? { model } : {}) };
+        swipeMeta[swipe] = continuedSwipeMeta(target.extra?.swipeMeta?.[swipe], { ...dates, presetName, genMs, ...(model ? { model } : {}) });
+        Object.assign(extra, swipeMeta[swipe]);
         extra.swipeMeta = swipeMeta;
       }
       chat.msgs[chat.msgs.indexOf(target)] = syncSwipeThinking({ ...target, text, swipes, swipe, translation: undefined,
-        extra: continuing ? extra : pushSwipeMeta(extra, swipes.length, { genMs, ...(model ? { model } : {}) }) });
+        extra: continuing ? extra : pushSwipeMeta(extra, swipes.length, { ...dates, genMs, ...(model ? { model } : {}) }) });
     } else {
       const userText = typeof b.userText === "string" ? onSave(b.userText.trim(), "user_input", members[0] || null).trim() : "";
       if (!keep && !userText) return err(400, "nothing to keep");
@@ -340,7 +344,7 @@ export function cancelledRoute(c) {
       if (keep) chat.msgs.push({
         id: b.replyMessageId || uid(), name: speaker.name, charId: speaker.id, role: "char",
         text, at: Date.now(), swipes: [text], swipe: 0,
-        extra: { presetName, ...(parts.length ? { parts } : {}), genMs, ...(model ? { model } : {}) },
+        extra: { ...dates, presetName, ...(parts.length ? { parts } : {}), genMs, ...(model ? { model } : {}) },
       });
     }
     applyStashVars(req, meta);
@@ -423,8 +427,10 @@ export function continueRoute(c) {
     }
     if (Array.isArray(msg.extra?.swipeMeta) && msg.extra.swipeMeta.length === swipes.length) {
       contExtra.swipeMeta = msg.extra.swipeMeta.slice();
-      contExtra.swipeMeta[msg.swipe || 0] = swipeMetaEntry(reply);
+      contExtra.swipeMeta[msg.swipe || 0] = continuedSwipeMeta(msg.extra.swipeMeta[msg.swipe || 0], swipeMetaEntry(reply));
     }
+    const continued = continuedSwipeMeta(syncSwipeThinking(msg, false).extra.swipeMeta[msg.swipe || 0], swipeMetaEntry(reply));
+    for (const key of ["createdAt", "startedAt", "finishedAt", "sourceInfo", "continuations"]) contExtra[key] = continued[key];
     chat.msgs[idx] = syncSwipeThinking({ ...msg, text: merged, swipes, translation: undefined, extra: contExtra });
     applyStashVars(req, meta);
     saveChat(fsx, id, touch({ ...meta, tainted: true }), chat.msgs);

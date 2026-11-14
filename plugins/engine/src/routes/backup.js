@@ -219,6 +219,13 @@ export function backupRoute(c) {
           mes: msg.text,
           swipes: msg.swipes && msg.swipes.length ? msg.swipes : [msg.text],
           swipe_id: msg.swipe || 0,
+          swipe_info: (msg.swipes?.length ? msg.swipes : [msg.text]).map((_, i) => {
+            const own = msg.extra?.swipeMeta?.[i] ?? (i === (msg.swipe || 0) ? msg.extra : null);
+            const { sourceInfo, ...extra } = own || {};
+            return { ...sourceInfo, ...(own?.createdAt != null ? { send_date: own.createdAt } : {}),
+              ...(own?.startedAt != null ? { gen_started: own.startedAt } : {}),
+              ...(own?.finishedAt != null ? { gen_finished: own.finishedAt } : {}), extra: { ...sourceInfo?.extra, ...extra } };
+          }),
           // the public line shape has no room for a hidden turn, a bookmark, a
           // generated picture, a translation or the model/usage stamp — all of
           // it used to be dropped on export and could never come back

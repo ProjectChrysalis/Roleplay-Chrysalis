@@ -52,6 +52,11 @@ export interface EngineCard {
 }
 
 interface EngineGenerationMeta {
+  createdAt?: number
+  startedAt?: number
+  finishedAt?: number
+  continuations?: Record<string, unknown>[]
+  sourceInfo?: Record<string, unknown>
   presetName?: string
   model?: string
   usage?: Swipe['usage']
@@ -875,6 +880,8 @@ export function groupToCharacter(g: EngineGroup, characters: Character[]): Chara
 function toSwipe(content: string, model: string, at: number, genMs = 0, extra?: EngineMessage['extra']): Swipe {
   return {
     id: uid('sw'), content, model, genTimeMs: genMs, timestamp: at,
+    createdAt: extra?.createdAt, startedAt: extra?.startedAt, finishedAt: extra?.finishedAt,
+    continuations: extra?.continuations, sourceInfo: extra?.sourceInfo,
     // the engine's generation metadata (real usage + params snapshot +
     // reasoning-model thinking) belongs to the swipe that was actually
     // generated — the ACTIVE one
