@@ -54,6 +54,6 @@ export async function buildPortableArchive(backup: Uint8Array, makeCard = buildC
       out[`OpenAI Settings/${filename}.json`] = strToU8(JSON.stringify({ ...value, ...(prompts ? { prompts } : {}), ...(orders.length ? { prompt_order: promptOrder } : {}) }, null, 2))
     }
   }
-  out['README.txt'] = strToU8('This archive contains character PNG cards, individual chats, lorebooks and chat completion presets. Extract its folders into the destination user data folder. Back up existing data first and avoid overwriting files. Group chats, personas, settings, scripts, and other app-specific data are not included. Character links include the first linked lorebook.\n')
+  out['README.txt'] = strToU8('This archive is for SillyTavern and contains character PNG cards, individual chats, lorebooks and chat completion presets. Extract its folders into your SillyTavern user data folder. Back up existing data first and avoid overwriting files. Group chats, personas, settings, scripts, and other app-specific data are not included. Character links include the first linked lorebook.\n')
   return zipSync(out)
 }

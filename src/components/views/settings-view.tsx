@@ -581,8 +581,8 @@ function DataSection() {
       const bytes = new Uint8Array(bin.length)
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
       const archive = await buildPortableArchive(bytes)
-      saveFile(new Blob([archive as BlobPart], { type: 'application/zip' }), 'portable-data.zip')
-      toast.success('Portable archive exported')
+      saveFile(new Blob([archive as BlobPart], { type: 'application/zip' }), 'sillytavern-export.zip')
+      toast.success('SillyTavern export ready')
     } catch (e) {
       toast.error(String((e as Error).message ?? e))
     } finally { setBusy(false) }
@@ -610,9 +610,9 @@ function DataSection() {
           <DownloadSimple className="size-4" aria-hidden /> Export backup (zip)
         </Button>
         <Button variant="outline" className="justify-start gap-2 bg-transparent" disabled={busy} onClick={() => void handlePortableExport()}>
-          <DownloadSimple className="size-4" aria-hidden /> Export portable data (zip)
+          <DownloadSimple className="size-4" aria-hidden /> Export for SillyTavern (zip)
         </Button>
-        <p className="text-xs text-muted-foreground">Characters, individual chats, lorebooks and presets. Extract into the destination data folder.</p>
+        <p className="text-xs text-muted-foreground">Characters, individual chats, lorebooks and presets for your SillyTavern user data folder.</p>
         <input
           ref={importInput}
           type="file"
