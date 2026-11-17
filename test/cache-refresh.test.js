@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { afterEach, beforeEach, expect, it } from 'bun:test'
 import { handleRoute, llmRequest, llmResponse, onTick } from '../plugins/cache-refresh/plugin.js'
 import { normalizeChatLines } from '../plugins/studio-import/src/chats.js'
@@ -117,8 +118,10 @@ it('keeps original creation and generation dates while recording each continuati
   expect(continuedSwipeMeta(null, { createdAt: 200 }).createdAt).toBeUndefined()
 })
 
-it('runs the refresher hooks in the real sandbox without model or network access', async () => {
-  const { PluginSandbox } = await import('../../chrysalis-engine/src/plugins/sandbox.ts')
+// the engine's sandbox is only on disk where the engine is checked out beside this repo
+const engineSandbox = new URL('../../chrysalis-engine/src/plugins/sandbox.ts', import.meta.url)
+it.skipIf(!existsSync(engineSandbox))('runs the refresher hooks in the real sandbox without model or network access', async () => {
+  const { PluginSandbox } = await import(engineSandbox.href)
   const fs = await import('node:fs')
   const os = await import('node:os')
   const path = await import('node:path')
