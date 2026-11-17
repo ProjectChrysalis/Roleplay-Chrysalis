@@ -412,7 +412,9 @@ presets/ lorebooks/ regex/ personas/ databank/). The tree below is the summary:
 EVERYTHING the studio shows lives in this app's `data/` tree as plain JSON —
 you may read and edit any of it directly, and every open client picks your
 changes up within ~a second (the engine's data watcher emits `look_changed`
-on the WS bus; the app re-hydrates). No restart, no reload needed.
+with the changed paths on the WS bus; the app re-reads just those chats and
+records, and does a full hydrate only for a path it does not recognize, see
+classifyDataPath in lib/store.ts). No restart, no reload needed.
 
 ```
 data/

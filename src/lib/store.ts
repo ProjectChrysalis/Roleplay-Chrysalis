@@ -29,7 +29,8 @@ import {
   j, fetchModels, fetchEngineConnections, fetchBootstrap, connectStreams, ApiError, reloadWithReason,
   cardToCharacter, characterToCard, groupToCharacter,
   engineChatToUI, engineMessageToUI, chatPatchOf, transcriptToUI, readChatTranscript,
-  type EngineChatMeta, type EngineMessage, type EngineConnectionInfo,
+  type EngineChatMeta, type EngineMessage, type EngineConnectionInfo, type EngineBootstrap,
+  type EngineCard, type EngineGroup, type EnginePreset, type EngineLorebook, type EngineRegex,
   enginePersonaToUI, presetToEngine, enginePresetToUI,
   lorebookToEngine, engineLorebookToUI, regexToEngine, engineRegexToUI,
 } from './engine'
@@ -555,15 +556,7 @@ export const useApp = create<AppState>()(
           const groupCfgById = new Map(boot.groups.map((g) => [String(g.id ?? ''), g]))
           for (const c of withBranches) {
             const g = groupCfgById.get(c.characterId)
-            if (!g) continue
-            c.groupSettings = {
-              activation: g.mode ?? 'natural',
-              generationMode: g.generationMode ?? 'swap',
-              autoMode: g.autoMode ?? false,
-              autoDelaySec: g.autoDelaySec ?? 5,
-              allowSelfResponses: g.allowSelfResponses ?? false,
-              muted: g.mutedIds ?? [],
-            }
+            if (g) c.groupSettings = groupSettingsOf(g)
           }
           // a local optimistic mutation landed while we were fetching — this
           // snapshot is stale; applying it would revert the mutation until
@@ -595,76 +588,7 @@ export const useApp = create<AppState>()(
           })
           if (rereadId) void refreshChat(set, get, rereadId, true)
           if (openedDuringLoad && !openedDuringLoad.messages.length) void get().ensureChatMessages(openedDuringLoad.id)
-          if (settings.ui) {
-            const ui = settings.ui as Record<string, unknown>
-            // Object-valued bags (tts, translation, …) merge ONE level deep:
-            // a partial bag on disk (hand-edited or from an older build) must
-            // never nuke the seeded defaults — a missing speed once crashed
-            // the whole Tools page on render.
-            set((s) => {
-              const merged: Record<string, unknown> = { ...s.settings }
-              for (const [k, v] of Object.entries(ui)) {
-                const cur = merged[k]
-                if (v && typeof v === 'object' && !Array.isArray(v) && cur && typeof cur === 'object' && !Array.isArray(cur)) {
-                  merged[k] = { ...(cur as object), ...(v as object) }
-                } else {
-                  merged[k] = v
-                }
-              }
-              return { settings: merged as unknown as typeof s.settings }
-            })
-          }
-          // memory vault config: older builds shipped a chunking stub that
-          // never ran — replace it wholesale with the vault defaults
-          if (typeof get().settings.memory?.enabled !== 'boolean') {
-            set({ settings: { ...get().settings, memory: { enabled: true, auto: false, interval: 20, model: '' } } })
-          }
-          // summary config normalization. Older builds kept an ordered prompt
-          // list; its instruction text carries over as the single prompt when
-          // the user had rewritten it, and the retired keys drop off.
-          set((s) => {
-            const d = defaultSettings().summary
-            const legacy = s.settings.summary as Partial<AppSettings['summary']> & {
-              prompts?: { marker?: string | null; role?: string; content?: string }[]
-              paused?: boolean
-              notify?: boolean
-            }
-            const cur = { ...d, ...legacy }
-            if ((cur.mode as string) === 'interval') cur.mode = 'auto'
-            if (legacy.paused === true) cur.mode = 'manual'
-            if (!cur.template.includes('{{summary}}')) cur.template = d.template
-            if (typeof legacy.prompt !== 'string' || !legacy.prompt.trim()) {
-              const own = legacy.prompts?.find((x) => !x.marker && x.role === 'system')?.content?.trim()
-              cur.prompt = own && !own.startsWith('Summarize the most important facts and events in the story so far.') ? own : d.prompt
-            }
-            // the default from when one summary was rewritten every time asks
-            // for the whole story again; summaries are now one per stretch
-            if (cur.prompt.startsWith(RETIRED_SUMMARY_PROMPT)) cur.prompt = d.prompt
-            delete (cur as typeof legacy).prompts
-            delete (cur as typeof legacy).paused
-            delete (cur as typeof legacy).notify
-            return { settings: { ...s.settings, summary: cur } }
-          })
-          // the normalized shape must reach the ENGINE too — assemble() reads
-          // settings.json directly (write-back only when it actually changed)
-          if (JSON.stringify((settings.ui ?? {}).summary ?? null) !== JSON.stringify(get().settings.summary)) {
-            void j('/settings', { method: 'PUT', body: JSON.stringify({ ui: get().settings }) }).catch(() => undefined)
-          }
-          // library.json — the local collections, agent-editable in ONE file
-          const lib = library as Partial<Pick<AppState, 'qrSets' | 'themes' | 'backgrounds' | 'tags' | 'folders' | 'connectionProfiles'>>
-          if (Object.keys(lib).length) {
-            libraryOnDisk = JSON.stringify(Object.fromEntries(LIB_KEYS.map((k) => [k, lib[k] ?? get()[k]])))
-            set((s) => ({ ...s, ...lib }))
-          } else {
-            // first boot: materialize data/library.json so agents find every
-            // collection on disk from the start
-            const cur = get()
-            void j('/library', { method: 'PUT', body: JSON.stringify({
-              qrSets: cur.qrSets, themes: cur.themes, backgrounds: cur.backgrounds,
-              tags: cur.tags, folders: cur.folders, connectionProfiles: cur.connectionProfiles,
-            }) }).catch(() => undefined)
-            libraryOnDisk = libraryJson()
-          }
+          applyEngineSettings(set, get, settings, library)
           // live generation deltas over the kernel WS bus. One stream per page:
           // reopening it on every re-hydrate lost the deltas sent meanwhile,
           // and the startup hooks below run once
@@ -762,8 +686,9 @@ export const useApp = create<AppState>()(
               return
             }
             if (liveHydrateHeld) { liveHydrateMissed = true; return }
+            noteDataChange(paths)
             clearTimeout(lookHydrateTimer)
-            lookHydrateTimer = setTimeout(() => void get().hydrate(), 250)
+            lookHydrateTimer = setTimeout(() => takeDataChanges(set, get), 250)
           }, (chatId, delta) => {
             const st = get().streaming
             if (!st || st.chatId !== chatId) return
@@ -1896,11 +1821,12 @@ export const useApp = create<AppState>()(
         return persisted as never
       },
       partialize: (s) => ({
-        // local-only slices; server-backed slices rehydrate from the engine
+        // local-only slices; server-backed slices rehydrate from the engine.
+        // Backgrounds stay out: they are images, data/library.json holds them,
+        // and what is kept here is serialized again on every store update.
         settings: s.settings,
         qrSets: s.qrSets,
         themes: s.themes,
-        backgrounds: s.backgrounds,
         tags: s.tags,
         folders: s.folders,
         view: s.view,
@@ -1914,6 +1840,12 @@ export const useApp = create<AppState>()(
 )
 
 configureNotifications(() => useApp.getState().settings.notifications)
+
+/** One burst of changed data paths, applied now (live sync runs this after
+ *  coalescing look_changed events); no paths reads everything. */
+export function syncDataChanges(paths?: string[]): Promise<void> {
+  return applyDataChanges(useApp.setState, useApp.getState, paths ?? null)
+}
 
 // ── generation driver ────────────────────────────────────────────────────────
 /** Chats with an automatic compaction in flight (one at a time per chat). */
@@ -2056,13 +1988,317 @@ async function refreshChat(set: SetFn, get: GetFn, chatId: ID, whole = false) {
       if (mutateSeq !== seqAtStart || interruptedChats.has(chatId)) return
       next = transcriptToUI(full)
     }
+    // branches come from the other chats' metas, which this read does not carry
     const chat = next
-    if (chat) set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? chat : c)) }))
-  } catch { /* chat may be gone */ }
-  void refreshLists(set, get)
+    if (chat) set((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? { ...chat, branches: c.branches } : c)) }))
+  } catch (e) {
+    // gone from the engine (deleted elsewhere): drop it here too
+    if (e instanceof ApiError && e.status === 404 && mutateSeq === seqAtStart && get().streaming?.chatId !== chatId) {
+      set((s) => ({ chats: attachBranches(s.chats.filter((c) => c.id !== chatId)) }))
+    }
+  }
 }
 
-async function refreshLists(set: SetFn, _get: GetFn) {
+/** The engine-side settings (`ui` bag, normalized) and the local collections
+ *  from data/library.json, as hydrate and a settings-only change apply them. */
+function applyEngineSettings(set: SetFn, get: GetFn, settings: EngineBootstrap['settings'], library: EngineBootstrap['library']) {
+  if (settings.ui) {
+    const ui = settings.ui as Record<string, unknown>
+    // Object-valued bags (tts, translation, …) merge ONE level deep:
+    // a partial bag on disk (hand-edited or from an older build) must
+    // never nuke the seeded defaults — a missing speed once crashed
+    // the whole Tools page on render.
+    set((s) => {
+      const merged: Record<string, unknown> = { ...s.settings }
+      for (const [k, v] of Object.entries(ui)) {
+        const cur = merged[k]
+        if (v && typeof v === 'object' && !Array.isArray(v) && cur && typeof cur === 'object' && !Array.isArray(cur)) {
+          merged[k] = { ...(cur as object), ...(v as object) }
+        } else {
+          merged[k] = v
+        }
+      }
+      return { settings: merged as unknown as typeof s.settings }
+    })
+  }
+  // memory vault config: older builds shipped a chunking stub that
+  // never ran — replace it wholesale with the vault defaults
+  if (typeof get().settings.memory?.enabled !== 'boolean') {
+    set({ settings: { ...get().settings, memory: { enabled: true, auto: false, interval: 20, model: '' } } })
+  }
+  // summary config normalization. Older builds kept an ordered prompt
+  // list; its instruction text carries over as the single prompt when
+  // the user had rewritten it, and the retired keys drop off.
+  set((s) => {
+    const d = defaultSettings().summary
+    const legacy = s.settings.summary as Partial<AppSettings['summary']> & {
+      prompts?: { marker?: string | null; role?: string; content?: string }[]
+      paused?: boolean
+      notify?: boolean
+    }
+    const cur = { ...d, ...legacy }
+    if ((cur.mode as string) === 'interval') cur.mode = 'auto'
+    if (legacy.paused === true) cur.mode = 'manual'
+    if (!cur.template.includes('{{summary}}')) cur.template = d.template
+    if (typeof legacy.prompt !== 'string' || !legacy.prompt.trim()) {
+      const own = legacy.prompts?.find((x) => !x.marker && x.role === 'system')?.content?.trim()
+      cur.prompt = own && !own.startsWith('Summarize the most important facts and events in the story so far.') ? own : d.prompt
+    }
+    // the default from when one summary was rewritten every time asks
+    // for the whole story again; summaries are now one per stretch
+    if (cur.prompt.startsWith(RETIRED_SUMMARY_PROMPT)) cur.prompt = d.prompt
+    delete (cur as typeof legacy).prompts
+    delete (cur as typeof legacy).paused
+    delete (cur as typeof legacy).notify
+    return { settings: { ...s.settings, summary: cur } }
+  })
+  // the normalized shape must reach the ENGINE too — assemble() reads
+  // settings.json directly (write-back only when it actually changed)
+  if (JSON.stringify((settings.ui ?? {}).summary ?? null) !== JSON.stringify(get().settings.summary)) {
+    void j('/settings', { method: 'PUT', body: JSON.stringify({ ui: get().settings }) }).catch(() => undefined)
+  }
+  // library.json — the local collections, agent-editable in ONE file
+  const lib = library as Partial<Pick<AppState, 'qrSets' | 'themes' | 'backgrounds' | 'tags' | 'folders' | 'connectionProfiles'>>
+  if (Object.keys(lib).length) {
+    libraryOnDisk = JSON.stringify(Object.fromEntries(LIB_KEYS.map((k) => [k, lib[k] ?? get()[k]])))
+    set((s) => ({ ...s, ...lib }))
+  } else {
+    // first boot: materialize data/library.json so agents find every
+    // collection on disk from the start
+    const cur = get()
+    void j('/library', { method: 'PUT', body: JSON.stringify({
+      qrSets: cur.qrSets, themes: cur.themes, backgrounds: cur.backgrounds,
+      tags: cur.tags, folders: cur.folders, connectionProfiles: cur.connectionProfiles,
+    }) }).catch(() => undefined)
+    libraryOnDisk = libraryJson()
+  }
+}
+
+/** A group's chat settings as the group entity stores them. */
+function groupSettingsOf(g: EngineGroup): NonNullable<Chat['groupSettings']> {
+  return {
+    activation: g.mode ?? 'natural',
+    generationMode: g.generationMode ?? 'swap',
+    autoMode: g.autoMode ?? false,
+    autoDelaySec: g.autoDelaySec ?? 5,
+    allowSelfResponses: g.allowSelfResponses ?? false,
+    muted: g.mutedIds ?? [],
+  }
+}
+
+// ── live data changes ────────────────────────────────────────────────────────
+// Every write under the app's data folder (this page's own saves included)
+// arrives as look_changed with the paths that changed. Re-reading the whole
+// library for each one stalled large libraries after every message, so a
+// change is read back record by record; only a path nothing here knows takes
+// a full hydrate.
+
+type RecordKind = 'characters' | 'groups' | 'personas' | 'presets' | 'lorebooks' | 'regex'
+export type DataChange = { kind: 'chat'; id: ID } | { kind: RecordKind; id: string } | { kind: 'settings' } | { kind: 'skip' }
+
+const RECORD_DIRS = new Set<string>(['groups', 'personas', 'presets', 'lorebooks', 'regex'])
+/** engine-side state the page never shows */
+const ENGINE_STATE = new Set(['variables.json', 'embed-status.json'])
+/** Past this many records in one burst (a bulk agent edit, an import), one
+ *  full hydrate is cheaper than a request per record. */
+const MAX_RECORD_READS = 40
+
+/** What an app-relative path that changed belongs to; null when only a full
+ *  hydrate can tell. Paths may use either separator. */
+export function classifyDataPath(path: string): DataChange | null {
+  const segs = path.replace(/\\/g, '/').split('/').filter(Boolean)
+  if (segs[0] !== 'data' || segs.length < 2) return null
+  const dir = segs[1]!
+  if (segs.length === 2) {
+    if (ENGINE_STATE.has(dir)) return { kind: 'skip' }
+    return dir === 'settings.json' || dir === 'library.json' ? { kind: 'settings' } : null
+  }
+  if (dir === '__media') return { kind: 'skip' }
+  if (dir === 'databank') return { kind: 'settings' }
+  const name = segs[2]!
+  if (dir === 'characters') return name.startsWith('_') || name.startsWith('.') ? { kind: 'skip' } : { kind: 'characters', id: name }
+  if (segs.length > 3) return null
+  // files are written beside their place as <name>.<uuid>.tmp, then renamed
+  const file = name.replace(/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i, '')
+  if (file.startsWith('_') || file.startsWith('.')) return { kind: 'skip' }
+  if (dir === 'chats') {
+    const id = file.split('.')[0]
+    return id ? { kind: 'chat', id } : null
+  }
+  if (RECORD_DIRS.has(dir) && file.endsWith('.json')) return { kind: dir as RecordKind, id: file.slice(0, -5) }
+  return null
+}
+
+let pendingPaths: string[] | null = []
+let dataChangeChain: Promise<void> = Promise.resolve()
+
+/** Queue the paths of one look_changed; `undefined` (a reconnect, no paths
+ *  known) means anything may have changed. */
+function noteDataChange(paths: string[] | undefined) {
+  if (!paths || pendingPaths === null) pendingPaths = null
+  else pendingPaths.push(...paths)
+}
+
+function takeDataChanges(set: SetFn, get: GetFn) {
+  const paths = pendingPaths
+  pendingPaths = []
+  dataChangeChain = dataChangeChain.then(() => applyDataChanges(set, get, paths)).catch(() => undefined)
+}
+
+async function applyDataChanges(set: SetFn, get: GetFn, paths: string[] | null) {
+  const changes = paths?.map(classifyDataPath)
+  const full = !changes || changes.some((c) => c === null) || hydrateRunning
+  const records = new Map<RecordKind, Set<string>>()
+  const chats = new Set<ID>()
+  let settings = false
+  for (const c of changes ?? []) {
+    if (!c || c.kind === 'skip') continue
+    if (c.kind === 'chat') chats.add(c.id)
+    else if (c.kind === 'settings') settings = true
+    else {
+      const ids = records.get(c.kind) ?? new Set<string>()
+      ids.add(c.id)
+      records.set(c.kind, ids)
+    }
+  }
+  const recordCount = [...records.values()].reduce((n, ids) => n + ids.size, 0)
+  if (full || recordCount > MAX_RECORD_READS) { await get().hydrate(); return }
+  await saves.settled()
+  await Promise.all([
+    settings ? refreshSettings(set, get) : null,
+    recordCount ? refreshRecords(set, get, records) : null,
+    chats.size ? refreshChangedChats(set, get, chats) : null,
+  ])
+}
+
+/** settings.json, library.json and the data bank: the parts of a hydrate
+ *  that do not read the library. */
+async function refreshSettings(set: SetFn, get: GetFn) {
+  const seqAtStart = mutateSeq
+  try {
+    const [settings, library, databank] = await Promise.all([
+      j<EngineBootstrap['settings']>('/settings'),
+      j<EngineBootstrap['library']>('/library'),
+      j<EngineBootstrap['databank']>('/databank'),
+    ])
+    if (mutateSeq !== seqAtStart) return
+    set((s) => {
+      const presetId = s.presets.find((p) => p.id === settings.presetId)?.id ?? s.presets.find((p) => p.isDefault)?.id
+      return {
+        model: settings.model,
+        dataBank: databank.files ?? [],
+        personas: s.personas.map((p) => (p.isDefault === (p.id === settings.personaId) ? p : { ...p, isDefault: p.id === settings.personaId })),
+        presets: s.presets.map((p) => (p.isDefault === (p.id === presetId) ? p : { ...p, isDefault: p.id === presetId })),
+      }
+    })
+    applyEngineSettings(set, get, settings, library)
+  } catch { /* offline: the next change or reconnect reads it again */ }
+}
+
+/** Loaded chats read what changed since the copy held here; the rest only
+ *  need their list entries. */
+async function refreshChangedChats(set: SetFn, get: GetFn, ids: ReadonlySet<ID>) {
+  const live = get().streaming?.chatId ?? null
+  const loaded = [...ids].filter((id) => get().chats.find((c) => c.id === id)?.messages.length)
+  const listed = [...ids].filter((id) => !loaded.includes(id))
+  // a chat mid-generation is ahead of the engine; its run reconciles it
+  await Promise.all([
+    ...loaded.filter((id) => id !== live).map((id) => refreshChat(set, get, id)),
+    listed.length ? refreshLists(set, get, new Set(listed)) : null,
+  ])
+  // the card lists sort by last chat
+  const s = get()
+  const latest = new Map<ID, number>()
+  for (const c of s.chats) if (ids.has(c.id) && c.updatedAt > (latest.get(c.characterId) ?? 0)) latest.set(c.characterId, c.updatedAt)
+  const newer = (c: Character) => (latest.get(c.id) ?? 0) > (c.lastChatAt ?? 0)
+  if (s.characters.some(newer)) set({ characters: s.characters.map((c) => (newer(c) ? { ...c, lastChatAt: latest.get(c.id)! } : c)) })
+}
+
+/** One record by id; null when the engine no longer has it. */
+async function readRecord<T>(path: string): Promise<T | null> {
+  try { return await j<T>(path) } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null
+    throw e
+  }
+}
+
+/** Replace, add or drop the records `fresh` reports for `ids`, keeping the
+ *  list's order for those that stay. */
+function mergeRecords<T extends { id: string }>(list: T[], ids: ReadonlySet<string>, fresh: Map<string, T>): T[] {
+  const out = list.filter((x) => !ids.has(x.id) || fresh.has(x.id)).map((x) => fresh.get(x.id) ?? x)
+  for (const [id, x] of fresh) if (!list.some((y) => y.id === id)) out.push(x)
+  return out
+}
+
+async function refreshRecords(set: SetFn, get: GetFn, records: Map<RecordKind, Set<string>>) {
+  const seqAtStart = mutateSeq
+  const enc = encodeURIComponent
+  const ids = (kind: RecordKind) => records.get(kind) ?? new Set<string>()
+  try {
+    const charIds = ids('characters')
+    // a member's name and avatar show on its groups: those read again too
+    const groupIds = new Set(ids('groups'))
+    for (const g of get().characters) if (g.isGroup && g.members?.some((m) => charIds.has(m))) groupIds.add(g.id)
+    const one = async <T>(kind: string, wanted: ReadonlySet<string>): Promise<Map<string, T>> => {
+      const out = new Map<string, T>()
+      await Promise.all([...wanted].map(async (id) => {
+        const v = await readRecord<T>(`/${kind}/${enc(id)}`)
+        if (v !== null) out.set(id, v)
+      }))
+      return out
+    }
+    const [cards, groups, personas, presets, lorebooks, regex] = await Promise.all([
+      charIds.size ? j<{ characters: EngineCard[] }>(`/characters?ids=${enc([...charIds].join(','))}`).then((r) => r.characters) : [],
+      one<EngineGroup>('groups', groupIds),
+      one<Record<string, unknown>>('personas', ids('personas')),
+      one<EnginePreset>('presets', ids('presets')),
+      one<EngineLorebook>('lorebooks', ids('lorebooks')),
+      one<EngineRegex>('regex', ids('regex')),
+    ])
+    if (mutateSeq !== seqAtStart) return
+    const s = get()
+    // the active preset going away needs the full choice of a new one
+    const activePreset = s.presets.find((p) => p.isDefault)?.id
+    if (activePreset && ids('presets').has(activePreset) && !presets.has(activePreset)) { await get().hydrate(); return }
+    const solo = mergeRecords(
+      s.characters.filter((c) => !c.isGroup),
+      charIds,
+      new Map(cards.map((card) => {
+        const id = card.id ?? ''
+        const held = s.characters.find((c) => c.id === id)
+        return [id, cardToCharacter(card, id, held?.lastChatAt ?? 0)] as const
+      })),
+    )
+    const groupChars = mergeRecords(
+      s.characters.filter((c) => c.isGroup),
+      groupIds,
+      new Map([...groups].map(([id, g]) => [id, { ...groupToCharacter({ ...g, id }, solo), lastChatAt: s.characters.find((c) => c.id === id)?.lastChatAt ?? 0 }] as const)),
+    )
+    const defaultPersona = s.personas.find((p) => p.isDefault)?.id ?? null
+    const nextPresets = mergeRecords(s.presets, ids('presets'), new Map([...presets].map(([id, p]) => {
+      const ui = enginePresetToUI(p, id)
+      return [id, { ...ui, isDefault: id === activePreset }] as const
+    })))
+    set({
+      characters: charIds.size || groupIds.size ? [...solo, ...groupChars] : s.characters,
+      chats: groups.size ? s.chats.map((c) => {
+        const g = groups.get(c.characterId)
+        return g ? { ...c, groupSettings: groupSettingsOf(g) } : c
+      }) : s.chats,
+      personas: mergeRecords(s.personas, ids('personas'), new Map([...personas].map(([id, p]) => [id, enginePersonaToUI({ ...p, id }, defaultPersona)] as const))),
+      presets: ids('presets').size
+        ? nextPresets.sort((a, b) => (a.id === 'default' ? -1 : b.id === 'default' ? 1 : a.name.localeCompare(b.name)))
+        : s.presets,
+      lorebooks: mergeRecords(s.lorebooks, ids('lorebooks'), new Map([...lorebooks].map(([id, b]) => [id, engineLorebookToUI(b, id)] as const))),
+      regexScripts: mergeRecords(s.regexScripts, ids('regex'), new Map([...regex].map(([id, r]) => [id, engineRegexToUI(r, id)] as const))),
+    })
+  } catch { /* offline: the next change or reconnect reads it again */ }
+}
+
+/** `gone`: chats whose files changed; one the engine no longer lists was
+ *  deleted there. Any other chat it does not list is kept (it may be newer
+ *  than the listing). */
+async function refreshLists(set: SetFn, _get: GetFn, gone?: ReadonlySet<ID>) {
   await saves.settled()
   const seqAtStart = mutateSeq
   try {
@@ -2070,29 +2306,42 @@ async function refreshLists(set: SetFn, _get: GetFn) {
     if (mutateSeq !== seqAtStart) return
     set((s) => {
       const byId = new Map(s.chats.map((c) => [c.id, c]))
+      const listed = new Set(metas.chats.map((m) => m.id))
       // keep loaded transcripts; update order/metas; carry messageCount/preview for unloaded
       const merged = metas.chats.map((m) => {
         const existing = byId.get(m.id)
         if (existing && existing.messages.length > 0) return { ...existing, updatedAt: m.updatedAt ?? existing.updatedAt, title: m.title }
         return engineChatToUI(m, [])
       })
-      const added = s.chats.filter((c) => !metas.chats.some((m) => m.id === c.id))
+      const added = s.chats.filter((c) => !listed.has(c.id) && !gone?.has(c.id))
       return { chats: attachBranches([...merged, ...added]) }
     })
   } catch { /* offline */ }
 }
 
-/** branch metadata: forks record parentChatId/parentMessageId on the engine */
+/** branch metadata: forks record parentChatId/parentMessageId on the engine.
+ *  A chat whose branches did not change keeps its object, so views memoized
+ *  on it do not redraw. */
 function attachBranches(chats: Chat[]): Chat[] {
-  return chats.map((c) => ({
-    ...c,
-    branches: chats
-      .filter((x) => x.parentChatId === c.id)
-      .map((x): ChatBranch => ({
-        id: x.id, name: x.title, parentMessageId: x.parentMessageId ?? '',
-        createdAt: x.createdAt, messageCount: x.messages.length > 0 ? x.messages.length : x.messageCount ?? 0,
-      })),
-  }))
+  const byParent = new Map<ID, ChatBranch[]>()
+  for (const x of chats) {
+    if (!x.parentChatId) continue
+    const list = byParent.get(x.parentChatId) ?? []
+    list.push({
+      id: x.id, name: x.title, parentMessageId: x.parentMessageId ?? '',
+      createdAt: x.createdAt, messageCount: x.messages.length > 0 ? x.messages.length : x.messageCount ?? 0,
+    })
+    byParent.set(x.parentChatId, list)
+  }
+  return chats.map((c) => {
+    const branches = byParent.get(c.id) ?? []
+    const held = c.branches ?? []
+    const same = held.length === branches.length && held.every((b, i) => {
+      const n = branches[i]!
+      return b.id === n.id && b.name === n.name && b.parentMessageId === n.parentMessageId && b.createdAt === n.createdAt && b.messageCount === n.messageCount
+    })
+    return same ? c : { ...c, branches }
+  })
 }
 
 /**

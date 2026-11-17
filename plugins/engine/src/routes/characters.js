@@ -19,13 +19,21 @@ const LIST_FIELDS = {
 const OMITTED_BOOK = { __omitted: true };
 const CARD_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 
+/** `?ids=a,b` limits a list read to those cards, in the same shape, so a
+ *  client that saw one card change reads that card alone. */
+function wantedIds(query) {
+  if (!query || typeof query.ids !== "string") return null;
+  return new Set(query.ids.split(",").filter(Boolean));
+}
+
 export function charactersRoute(c) {
   const { req, fsx, head, id, op, ok, err, readJson, writeJson, body } = c;
   if (head === "characters") {
+    const only = req.method === "GET" && !id ? wantedIds(req.query) : null;
     if (req.method === "GET" && !id && typeof fsx.query === "function") {
       // the engine's index answers from the cards without reading every one
       const { rows } = fsx.query({ files: "characters/*/card.json", fields: LIST_FIELDS }, {});
-      const cards = rows.filter((r) => !r.error && !r.keys[0].startsWith("_") && r.data.name).sort((a, b) => (a.keys[0] < b.keys[0] ? -1 : a.keys[0] > b.keys[0] ? 1 : 0));
+      const cards = rows.filter((r) => !r.error && !r.keys[0].startsWith("_") && r.data.name && (!only || only.has(r.keys[0]))).sort((a, b) => (a.keys[0] < b.keys[0] ? -1 : a.keys[0] > b.keys[0] ? 1 : 0));
       const page = pageOf(req.query, Number(req.query?.budget) || 0) || { offset: 0, end: Infinity, budget: Infinity };
       const items = [];
       let at = page.offset, bytes = 0;
@@ -55,7 +63,7 @@ export function charactersRoute(c) {
     if (req.method === "GET" && !id) {
       let ids = [];
       try { ids = fsx.list("characters"); } catch {}
-      ids = ids.filter((cid) => !cid.startsWith("_")); // _-prefixed = AI-only template
+      ids = ids.filter((cid) => !cid.startsWith("_") && (!only || only.has(cid))); // _-prefixed = AI-only template
       const pathOf = (cid) => "characters/" + cid + "/card.json";
       const read = (cid, text) => {
         let c;

@@ -4262,6 +4262,22 @@ describe("rp studio: the library leaves embedded lorebooks on disk", () => {
     const whole = await drive(engineUrl, { method: "GET", path: "/characters" }, m);
     expect((whole.json.characters as Record<string, unknown>[])[0]!.character_book).toEqual(book);
   }, 30_000);
+
+  it("reads only the cards named in ?ids, in the list's shape", async () => {
+    for (const [id, name] of [["aria", "Aria"], ["kael", "Kael"], ["mira", "Mira"]] as const) {
+      fs.mkdirSync(path.join(root, "characters", id), { recursive: true });
+      fs.writeFileSync(path.join(root, "characters", id, "card.json"), JSON.stringify({ name, description: "d", character_book: { entries: [] } }));
+    }
+    const m = mockHost();
+    (m.host.fs as { query?: unknown }).query = cardQuery;
+    const picked = await drive(engineUrl, { method: "GET", path: "/characters?ids=mira,aria,gone" }, m);
+    const indexed = picked.json.characters as Record<string, unknown>[];
+    expect(indexed.map((c) => c.id)).toEqual(["aria", "mira"]);
+    expect(indexed[0]).toMatchObject({ __stored: "aria", character_book: { __omitted: true } });
+    delete (m.host.fs as { query?: unknown }).query;
+    const read = await drive(engineUrl, { method: "GET", path: "/characters?ids=kael" }, m);
+    expect((read.json.characters as Record<string, unknown>[]).map((c) => c.id)).toEqual(["kael"]);
+  }, 30_000);
 });
 
 /** fs.lines / fs.spliceLines as the engine answers them, counting how many
