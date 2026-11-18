@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { CaretRight, FolderSimple, FolderOpen, FolderSimplePlus, FolderSimpleMinus, DotsSixVertical, Trash, DotsThree, SealCheck, MagnifyingGlass, PencilSimple, ArrowUp, ArrowDown } from '@phosphor-icons/react'
 import { useApp } from '@/lib/store'
@@ -6,6 +6,7 @@ import { useViewMemory } from '@/lib/view-memory'
 import { useTreeDrag } from '@/lib/tree-drag'
 import { libraryOrder, placeInOrder, sortByOrder } from '@/lib/library-order'
 import { cn } from '@/lib/utils'
+import type { Folder } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -27,6 +28,69 @@ const ROW_MENU = 'size-6 shrink-0 text-muted-foreground opacity-0 group-hover/ro
 
 type Entry = { id: string; name: string; folderId: string | null }
 type Source = { kind: 'item' | 'folder'; id: string; name: string; folderId: string | null }
+
+type RowActions = {
+  select: (id: string) => void
+  move: (id: string, folderId: string | null) => void
+  openFolder: (id: string) => void
+  createFolder: (holding?: string) => void
+  press: (source: Source, e: ReactPointerEvent<HTMLElement>) => void
+  label: (item: Entry) => ReactNode
+  menu?: (item: Entry) => ReactNode
+}
+
+/** Renders the caller's menu items when the menu opens, so they reflect the
+ *  library as it is then rather than when the row last rendered. */
+function RowMenu({ actions, item }: { actions: { current: RowActions }; item: Entry }) {
+  const menu = actions.current.menu
+  return menu ? <>{menu(item)}<DropdownMenuSeparator /></> : null
+}
+
+// A row renders again only when its item or its own state changes. Typing in
+// the open editor replaces one item, and re-rendering every row with its menu
+// on each keystroke made typing lag in large libraries.
+const ItemRow = memo(function ItemRow({ item, actions, folders, inFolder, selected, active, dimmed, lineTop, lineBottom }: {
+  item: Entry
+  actions: { current: RowActions }
+  folders: Folder[]
+  inFolder: boolean
+  selected: boolean
+  /** read by the caller's label; listed so the row renders again when it flips */
+  active: boolean
+  dimmed: boolean
+  lineTop: boolean
+  lineBottom: boolean
+}) {
+  void active
+  return <li data-item={item.id} className="relative">
+    {lineTop && <div className={cn(LINE, '-top-px')} />}
+    {lineBottom && <div className={cn(LINE, '-bottom-px')} />}
+    <div
+      className={cn(ROW, selected ? 'bg-accent' : 'hover:bg-accent/50', dimmed && 'cursor-grabbing opacity-40')}
+      onPointerDown={(e) => actions.current.press({ kind: 'item', id: item.id, name: item.name, folderId: inFolder ? item.folderId : null }, e)}
+    >
+      <button type="button" title={item.name} onClick={() => actions.current.select(item.id)} className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md pl-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+        {actions.current.label(item)}
+      </button>
+      <span data-no-drag className="flex">
+        <DropdownMenu>
+          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" className={ROW_MENU} aria-label={`Actions for ${item.name}`}><DotsThree className="size-4" aria-hidden="true" /></Button>} />
+          <DropdownMenuContent align="end">
+            <RowMenu actions={actions} item={item} />
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Move to</DropdownMenuLabel>
+              {folders.map((folder) => <DropdownMenuItem key={folder.id} disabled={item.folderId === folder.id} onClick={() => { actions.current.move(item.id, folder.id); actions.current.openFolder(folder.id) }}>
+                <FolderSimple className="size-4" aria-hidden="true" /><span className="truncate">{folder.name}</span>
+              </DropdownMenuItem>)}
+              {inFolder && <DropdownMenuItem onClick={() => actions.current.move(item.id, null)}><FolderSimpleMinus className="size-4" aria-hidden="true" />No folder</DropdownMenuItem>}
+              <DropdownMenuItem onClick={() => actions.current.createFolder(item.id)}><FolderSimplePlus className="size-4" aria-hidden="true" />New folder</DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </span>
+    </div>
+  </li>
+})
 
 function uniqueName(wanted: string, taken: string[]) {
   const used = new Set(taken.map((name) => name.toLowerCase()))
@@ -84,7 +148,7 @@ export function LibraryFolderTree<T extends Entry>({ scope, items, selectedId, a
   const deleteFolder = useApp((s) => s.deleteFolder)
   const savedOrder = useApp((s) => s.settings.libraryOrder)
   const updateSettings = useApp((s) => s.updateSettings)
-  const folders = allFolders.filter((f) => f.scope === scope)
+  const folders = useMemo(() => allFolders.filter((f) => f.scope === scope), [allFolders, scope])
   const sorted = sortByOrder(items, libraryOrder(savedOrder, scope))
   const [query, setQuery] = useViewMemory(`${scope}.search`, '')
   const [openIds, setOpenIds] = useViewMemory<string[]>(`${scope}.openFolders`, NO_OPEN, true)
@@ -205,35 +269,28 @@ export function LibraryFolderTree<T extends Entry>({ scope, items, selectedId, a
   const landing = into && into !== NEW ? homeOfTarget(into) : null
   const leaving = landing && landing !== (dragged?.folderId ?? ROOT) ? landing : null
 
-  const itemRow = (item: T, index: number, list: T[]) => <li key={item.id} data-item={item.id} className="relative">
-    {into === `at:${item.id}` && <div className={cn(LINE, '-top-px')} />}
-    {into === `end:${homeOf(item)}` && index === list.length - 1 && <div className={cn(LINE, '-bottom-px')} />}
-    <div
-      className={cn(ROW, item.id === selectedId ? 'bg-accent' : 'hover:bg-accent/50', dragged?.id === item.id && 'cursor-grabbing opacity-40')}
-      onPointerDown={(e) => drag.press({ kind: 'item', id: item.id, name: item.name, folderId: folderOf(item) }, e)}
-    >
-      <button type="button" title={item.name} onClick={() => onSelect(item.id)} className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md pl-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
-        {renderLabel(item)}
-      </button>
-      <span data-no-drag className="flex">
-        <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" className={ROW_MENU} aria-label={`Actions for ${item.name}`}><DotsThree className="size-4" aria-hidden="true" /></Button>} />
-          <DropdownMenuContent align="end">
-            {renderMenu?.(item)}
-            {renderMenu && <DropdownMenuSeparator />}
-            <DropdownMenuGroup>
-              <DropdownMenuLabel>Move to</DropdownMenuLabel>
-              {folders.map((folder) => <DropdownMenuItem key={folder.id} disabled={item.folderId === folder.id} onClick={() => { onMove(item.id, folder.id); openFolder(folder.id) }}>
-                <FolderSimple className="size-4" aria-hidden="true" /><span className="truncate">{folder.name}</span>
-              </DropdownMenuItem>)}
-              {!!folderOf(item) && <DropdownMenuItem onClick={() => onMove(item.id, null)}><FolderSimpleMinus className="size-4" aria-hidden="true" />No folder</DropdownMenuItem>}
-              <DropdownMenuItem onClick={() => createFolder(item.id)}><FolderSimplePlus className="size-4" aria-hidden="true" />New folder</DropdownMenuItem>
-            </DropdownMenuGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </span>
-    </div>
-  </li>
+  const actions = useRef<RowActions>(null!)
+  actions.current = {
+    select: onSelect,
+    move: onMove,
+    openFolder,
+    createFolder,
+    press: drag.press,
+    label: renderLabel as (item: Entry) => ReactNode,
+    menu: renderMenu as ((item: Entry) => ReactNode) | undefined,
+  }
+  const itemRow = (item: T, index: number, list: T[]) => <ItemRow
+    key={item.id}
+    item={item}
+    actions={actions}
+    folders={folders}
+    inFolder={!!folderOf(item)}
+    selected={item.id === selectedId}
+    active={item.id === activeId}
+    dimmed={dragged?.id === item.id}
+    lineTop={into === `at:${item.id}`}
+    lineBottom={into === `end:${homeOf(item)}` && index === list.length - 1}
+  />
 
   const more = (key: string, total: number) => total > (limits[key] ?? PAGE) && <li>
     <Button variant="ghost" size="xs" className="text-muted-foreground" onClick={() => setLimits((values) => ({ ...values, [key]: (values[key] ?? PAGE) + PAGE }))}>Show more</Button>

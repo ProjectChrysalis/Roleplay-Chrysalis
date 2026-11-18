@@ -31,7 +31,7 @@ import { DEFAULT_AVATAR, cn, readableNameColor, shortModel } from '@/lib/utils'
 import { cssAttrValue, scopeCss } from '@/lib/scope-css'
 import { createToast } from '@/lib/notifications'
 import { useSwipeAnimation } from '@/hooks/use-swipe-animation'
-import { MessageRow } from './message-row'
+import { MessageRow, type RowCharacter } from './message-row'
 import { Composer } from './composer'
 import { CacheRefreshStatus } from './cache-refresh-status'
 import { GroupMemberBar } from './group-member-bar'
@@ -111,27 +111,38 @@ export function ChatView() {
   const chat = useChat(activeChatId)
   const character = useCharacter(chat?.characterId ?? null)
   const chats = useApp((s) => s.chats)
-  const characters = useApp((s) => s.characters)
   const closeChat = useApp((s) => s.closeChat)
-  const scopedScripts = useApp((s) => s.regexScripts)
-  const lorebooks = useApp((s) => s.lorebooks)
-  const presets = useApp((s) => s.presets)
+  // The notice reads presets, regex and lorebooks from the store when they
+  // change instead of subscribing this view to them: a subscription
+  // re-rendered the whole chat on every keystroke in those editors.
+  const chatId = chat?.id
+  const characterId = character?.id
   useEffect(() => {
-    if (!chat || !character) return
-    const preset = presets.find((p) => p.id === chatPresetId({ presets }, chat))
-    for (const owner of [{ scope: 'character', id: character.id, name: character.name }, ...(preset ? [{ scope: 'preset', id: preset.id, name: preset.name }] : [])]) {
-      const key = `${owner.scope}:${owner.id}`
-      if (embeddedNotices.has(key)) continue
-      const scripts = scopedScripts.filter((r) => r.scope === owner.scope && r.scopeTargetId === owner.id)
-      const book = owner.scope === 'character' ? lorebooks.find((b) => b.id === character.embeddedLorebookId) : undefined
-      if (!scripts.length && !book) continue
-      embeddedNotices.add(key)
-      const details = [book ? `${book.name}: ${book.entries.length} entries, imported and linked` : '', scripts.length ? `Regex: ${scripts.filter((r) => r.enabled).length}/${scripts.length} enabled` : ''].filter(Boolean).join('. ')
-      const script = scripts.find((r) => !r.enabled) ?? scripts[0]
-      const notify = script ? regexToast : loreToast
-      notify.info(owner.name, { description: details, action: script ? { label: 'Review regex', onClick: () => useApp.getState().focusRegex(script.id) } : book ? { label: 'Open lorebook', onClick: () => useApp.getState().focusLorebook(book.id) } : undefined })
+    if (!chatId || !characterId) return
+    const notice = () => {
+      const s = useApp.getState()
+      const chat = s.chats.find((c) => c.id === chatId)
+      const character = s.characters.find((c) => c.id === characterId)
+      if (!chat || !character) return
+      const preset = s.presets.find((p) => p.id === chatPresetId(s, chat))
+      for (const owner of [{ scope: 'character', id: character.id, name: character.name }, ...(preset ? [{ scope: 'preset', id: preset.id, name: preset.name }] : [])]) {
+        const key = `${owner.scope}:${owner.id}`
+        if (embeddedNotices.has(key)) continue
+        const scripts = s.regexScripts.filter((r) => r.scope === owner.scope && r.scopeTargetId === owner.id)
+        const book = owner.scope === 'character' ? s.lorebooks.find((b) => b.id === character.embeddedLorebookId) : undefined
+        if (!scripts.length && !book) continue
+        embeddedNotices.add(key)
+        const details = [book ? `${book.name}: ${book.entries.length} entries, imported and linked` : '', scripts.length ? `Regex: ${scripts.filter((r) => r.enabled).length}/${scripts.length} enabled` : ''].filter(Boolean).join('. ')
+        const script = scripts.find((r) => !r.enabled) ?? scripts[0]
+        const notify = script ? regexToast : loreToast
+        notify.info(owner.name, { description: details, action: script ? { label: 'Review regex', onClick: () => useApp.getState().focusRegex(script.id) } : book ? { label: 'Open lorebook', onClick: () => useApp.getState().focusLorebook(book.id) } : undefined })
+      }
     }
-  }, [chat, character, scopedScripts, lorebooks, presets])
+    notice()
+    return useApp.subscribe((s, prev) => {
+      if (s.regexScripts !== prev.regexScripts || s.lorebooks !== prev.lorebooks || s.presets !== prev.presets || s.characters !== prev.characters || s.chats !== prev.chats) notice()
+    })
+  }, [chatId, characterId])
 
   // primitives only: subscribing to the streaming OBJECT re-rendered this
   // whole view (and every visible row with it) on every token
@@ -307,10 +318,10 @@ export function ChatView() {
     const last = chat.messages[chat.messages.length - 1]
     if (!last || last.role !== 'assistant' || spokenRef.current === last.id) return
     spokenRef.current = last.id
-    const speaker = characters.find((c) => c.id === (last.characterId ?? chat.characterId))
+    const speaker = useApp.getState().characters.find((c) => c.id === (last.characterId ?? chat.characterId))
     speakText(last.swipes[last.activeSwipe]?.content ?? '', voiceFor(settings.tts, speaker), `${chat.id}:${last.id}`)
       .catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
-  }, [chat, characters, isStreaming, settings.tts])
+  }, [chat, isStreaming, settings.tts])
 
   // ── holding the reader's place through size changes ──
   // With native anchoring off, a reader scrolled up loses their place to any
@@ -522,10 +533,12 @@ export function ChatView() {
     : backgrounds.find((b) => b.id === (chat?.backgroundId ?? settings.activeBackgroundId))
 
   // memory cutoff: walk from newest message backwards, accumulate token estimate against the preset's context size
+  const budget = useApp((s) => {
+    const preset = s.presets.find((p) => p.id === chatPresetId(s, chat)) ?? s.presets[0]
+    return (preset?.samplers.contextSize ?? 8192) - (preset?.samplers.maxTokens ?? 512) - 800 // reserve for system/response
+  })
   const cutoffIndex = useMemo(() => {
     if (!chat) return -1
-    const preset = presets.find((p) => p.id === chatPresetId({ presets }, chat)) ?? presets[0]
-    const budget = (preset?.samplers.contextSize ?? 8192) - (preset?.samplers.maxTokens ?? 512) - 800 // reserve for system/response
     let used = 0
     // messages above the summary cutoff already left the prompt; the summary
     // covers them, so only the stretch below can fall out of context
@@ -538,7 +551,7 @@ export function ChatView() {
       if (used > budget) return i // messages at index <= i are out of context
     }
     return -1
-  }, [chat, presets])
+  }, [chat, budget])
 
   // Actual spend: sum the REAL per-generation costs the engine reported on
   // each swipe. No pricing table is guessed client-side — messages generated
@@ -574,7 +587,14 @@ export function ChatView() {
     if (!chat || !character) closeChat()
   }, [chat, character, closeChat])
 
-  if (!chat || !character) {
+  // Rows get only the card fields they draw, held while those stay the same:
+  // typing in this card's description would otherwise re-render every row.
+  const rowCharacter = useMemo<RowCharacter | null>(
+    () => character && { id: character.id, name: character.name, avatar: character.avatar, colors: character.colors, isGroup: character.isGroup, members: character.members },
+    [character?.id, character?.name, character?.avatar, character?.colors, character?.isGroup, character?.members], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+
+  if (!chat || !character || !rowCharacter) {
     return <ChatsView />
   }
 
@@ -889,7 +909,7 @@ export function ChatView() {
                           }
                         />
                         <div className="pointer-events-none min-w-0 flex-1 opacity-95">
-                          <MessageRow chat={chat} message={msg} index={i} character={character} isLast={false} />
+                          <MessageRow chat={chat} message={msg} index={i} character={rowCharacter} isLast={false} />
                         </div>
                       </label>
                     )
@@ -899,7 +919,7 @@ export function ChatView() {
                     chat={chat}
                     message={msg}
                     index={i}
-                    character={character}
+                    character={rowCharacter}
                     isLast={i === lastReplyIndex}
                     summarized={i < summaryCutIndex}
                     slidePhase={swipeFx && i >= swipeFx.index && i < swipeFx.index + 100 ? swipeFx.phase : null}

@@ -1,6 +1,6 @@
 import { useViewMemory, useViewScroll } from '@/lib/view-memory'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { BookOpenText, Plus, Trash, Copy, MagnifyingGlass, Globe, Flask, Pulse, CaretDown, CaretRight, GearSix, DotsThreeVertical, ArrowSquareOut, DownloadSimple } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Button } from '@/components/ui/button'
@@ -195,6 +195,15 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest, onActive }:
 
   const upEntry = (id: string, patch: Partial<LoreEntry>) =>
     onUpdate({ entries: book.entries.map((e) => e.id === id ? { ...e, ...patch } : e) })
+  const entryActions = useRef<EntryActions>(null!)
+  entryActions.current = {
+    toggleOpen: (id) => setOpenIds((o) => o.includes(id) ? o.filter((x) => x !== id) : [...o, id]),
+    select: (id, on) => setSelected((s) => on ? [...s, id] : s.filter((x) => x !== id)),
+    update: upEntry,
+    remove: (id) => onUpdate({ entries: book.entries.filter((x) => x.id !== id) }),
+    duplicate: (e) => { onUpdate({ entries: [...book.entries, { ...e, id: uid('entry'), title: `${e.title} (copy)` }] }); toast.success('Entry duplicated') },
+    copy: setCopyEntry,
+  }
 
   return (
     // @container: the detail pane spans from a phone page to a narrow drawer
@@ -367,56 +376,7 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest, onActive }:
       </div>
 
         <ul className="flex flex-col gap-1.5 p-3">
-          {pagedEntries.map((e) => {
-            const open = openIds.includes(e.id)
-            return (
-              <li key={e.id} className={cn('rounded-md border border-border', !e.enabled && 'opacity-50')}>
-                <div className="flex items-center gap-2 px-2.5 py-1.5">
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(e.id)}
-                    onChange={(ev) => setSelected((s) => ev.target.checked ? [...s, e.id] : s.filter((x) => x !== e.id))}
-                    aria-label={`Select ${e.title}`}
-                    className="size-3.5 accent-primary"
-                  />
-                  <button type="button" onClick={() => setOpenIds((o) => open ? o.filter((x) => x !== e.id) : [...o, e.id])} className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left" aria-expanded={open}>
-                    <span className="flex w-full min-w-0 items-center gap-2">
-                      {open ? <CaretDown className="size-3.5 shrink-0" aria-hidden="true" /> : <CaretRight className="size-3.5 shrink-0" aria-hidden="true" />}
-                      <LoreStatusIcon status={e.status} />
-                      <span className="sr-only">{LORE_STATUS_LABEL[e.status]}</span>
-                      {/* title owns the line — keys wrap below it, sharing a row
-                          with three badges starved it to nothing in the drawer */}
-                      <span className="min-w-0 flex-1 truncate text-sm font-medium">{e.title}</span>
-                      <span className="ml-auto flex shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
-                        {e.probability < 100 && <span>{e.probability}%</span>}
-                        <span>{formatTokens(estimateTokens(e.content))} tok</span>
-                      </span>
-                    </span>
-                    {!open && e.keys.length > 0 && (
-                      <span className="flex w-full flex-wrap gap-1 pl-11">
-                        {e.keys.slice(0, 3).map((k) => (
-                          <Badge key={k} variant="secondary" className="min-w-0 max-w-40 text-[10px]"><span className="truncate">{k}</span></Badge>
-                        ))}
-                        {e.keys.length > 3 && <span className="self-center text-[10px] text-muted-foreground">+{e.keys.length - 3}</span>}
-                      </span>
-                    )}
-                  </button>
-                  <Switch checked={e.enabled} onCheckedChange={(v) => upEntry(e.id, { enabled: v })} aria-label={`Enable ${e.title}`} />
-                </div>
-                <Collapsible open={open}>
-                  <CollapsibleContent>
-                    <EntryEditor
-                      entry={e}
-                      onChange={(patch) => upEntry(e.id, patch)}
-                      onDelete={() => onUpdate({ entries: book.entries.filter((x) => x.id !== e.id) })}
-                      onDuplicate={() => { onUpdate({ entries: [...book.entries, { ...e, id: uid('entry'), title: `${e.title} (copy)` }] }); toast.success('Entry duplicated') }}
-                      onCopyToBook={() => setCopyEntry(e)}
-                    />
-                  </CollapsibleContent>
-                </Collapsible>
-              </li>
-            )
-          })}
+          {pagedEntries.map((e) => <EntryRow key={e.id} entry={e} open={openIds.includes(e.id)} selected={selected.includes(e.id)} actions={entryActions} />)}
         </ul>
         {entries.length === 0 && (
           <p className="px-4 pb-8 text-center text-xs text-muted-foreground">{query ? 'No entries match.' : 'No entries yet.'}</p>
@@ -427,7 +387,7 @@ function BookEditor({ book, onUpdate, onDelete, onDuplicate, onTest, onActive }:
         <DialogContent className="max-h-[70dvh] overflow-y-auto sm:max-w-sm">
           <DialogHeader><DialogTitle>Copy “{copyEntry?.title}” to…</DialogTitle></DialogHeader>
           <ul className="flex flex-col gap-1">
-            {allBooks.filter((b) => b.id !== book.id).map((b) => (
+            {copyEntry && allBooks.filter((b) => b.id !== book.id).map((b) => (
               <li key={b.id}>
                 <Button variant="outline" size="sm" className="w-full justify-start" onClick={() => {
                   if (copyEntry) updateLorebook(b.id, { entries: [...b.entries, { ...copyEntry, id: uid('entry') }] })
@@ -491,6 +451,72 @@ function entryOptionSummary(e: LoreEntry): string {
   if (e.automationId.trim()) parts.push('automation')
   return parts.join(' · ')
 }
+
+type EntryActions = {
+  toggleOpen: (id: string) => void
+  select: (id: string, on: boolean) => void
+  update: (id: string, patch: Partial<LoreEntry>) => void
+  remove: (id: string) => void
+  duplicate: (entry: LoreEntry) => void
+  copy: (entry: LoreEntry) => void
+}
+
+// A row renders again only when its own entry, open or selected state
+// changes: typing in one entry re-rendered the whole page of entries.
+const EntryRow = memo(function EntryRow({ entry: e, open, selected, actions }: {
+  entry: LoreEntry
+  open: boolean
+  selected: boolean
+  actions: { current: EntryActions }
+}) {
+  return (
+    <li className={cn('rounded-md border border-border', !e.enabled && 'opacity-50')}>
+      <div className="flex items-center gap-2 px-2.5 py-1.5">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(ev) => actions.current.select(e.id, ev.target.checked)}
+          aria-label={`Select ${e.title}`}
+          className="size-3.5 accent-primary"
+        />
+        <button type="button" onClick={() => actions.current.toggleOpen(e.id)} className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left" aria-expanded={open}>
+          <span className="flex w-full min-w-0 items-center gap-2">
+            {open ? <CaretDown className="size-3.5 shrink-0" aria-hidden="true" /> : <CaretRight className="size-3.5 shrink-0" aria-hidden="true" />}
+            <LoreStatusIcon status={e.status} />
+            <span className="sr-only">{LORE_STATUS_LABEL[e.status]}</span>
+            {/* title owns the line — keys wrap below it, sharing a row
+                with three badges starved it to nothing in the drawer */}
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{e.title}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
+              {e.probability < 100 && <span>{e.probability}%</span>}
+              <span>{formatTokens(estimateTokens(e.content))} tok</span>
+            </span>
+          </span>
+          {!open && e.keys.length > 0 && (
+            <span className="flex w-full flex-wrap gap-1 pl-11">
+              {e.keys.slice(0, 3).map((k) => (
+                <Badge key={k} variant="secondary" className="min-w-0 max-w-40 text-[10px]"><span className="truncate">{k}</span></Badge>
+              ))}
+              {e.keys.length > 3 && <span className="self-center text-[10px] text-muted-foreground">+{e.keys.length - 3}</span>}
+            </span>
+          )}
+        </button>
+        <Switch checked={e.enabled} onCheckedChange={(v) => actions.current.update(e.id, { enabled: v })} aria-label={`Enable ${e.title}`} />
+      </div>
+      <Collapsible open={open}>
+        <CollapsibleContent>
+          <EntryEditor
+            entry={e}
+            onChange={(patch) => actions.current.update(e.id, patch)}
+            onDelete={() => actions.current.remove(e.id)}
+            onDuplicate={() => actions.current.duplicate(e)}
+            onCopyToBook={() => actions.current.copy(e)}
+          />
+        </CollapsibleContent>
+      </Collapsible>
+    </li>
+  )
+})
 
 function EntryEditor({ entry: e, onChange, onDelete, onDuplicate, onCopyToBook }: { entry: LoreEntry; onChange: (p: Partial<LoreEntry>) => void; onDelete: () => void; onDuplicate: () => void; onCopyToBook: () => void }) {
   // one switch for every entry: whoever works with the options keeps them open

@@ -280,337 +280,356 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
               </div>
             </TabsContent>
 
+            {/* Each tab builds its content only while selected: the lorebook tab alone
+                lists every book in the library, and building hidden tabs on every
+                keystroke in the fields above made typing lag. */}
             <TabsContent value="dialogue">
-              <Field label="Example dialogue" hint="Use <START> to separate example chats. {{user}} / {{char}} macros supported." value={c.exampleDialogue} onChange={(v) => up({ exampleDialogue: v })} rows={12} mono />
+              {tab === 'dialogue' && <>
+                <Field label="Example dialogue" hint="Use <START> to separate example chats. {{user}} / {{char}} macros supported." value={c.exampleDialogue} onChange={(v) => up({ exampleDialogue: v })} rows={12} mono />
+              </>}
             </TabsContent>
 
             <TabsContent value="advanced" className="flex flex-col gap-4">
-              <Field label="System prompt override" value={c.systemPromptOverride} onChange={(v) => up({ systemPromptOverride: v })} rows={3} />
-              <Field label="Post-history instructions" value={c.postHistoryInstructions} onChange={(v) => up({ postHistoryInstructions: v })} rows={3} />
-              <div className="grid gap-3 sm:grid-cols-[1fr_100px_140px]">
-                <Field label="Depth prompt" value={c.depthPrompt.text} onChange={(v) => up({ depthPrompt: { ...c.depthPrompt, text: v } })} rows={2} />
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">@ depth</Label>
-                  <Input type="number" value={c.depthPrompt.depth} onChange={(e) => up({ depthPrompt: { ...c.depthPrompt, depth: Number(e.target.value) } })} aria-label="Depth" />
+              {tab === 'advanced' && <>
+                <Field label="System prompt override" value={c.systemPromptOverride} onChange={(v) => up({ systemPromptOverride: v })} rows={3} />
+                <Field label="Post-history instructions" value={c.postHistoryInstructions} onChange={(v) => up({ postHistoryInstructions: v })} rows={3} />
+                <div className="grid gap-3 sm:grid-cols-[1fr_100px_140px]">
+                  <Field label="Depth prompt" value={c.depthPrompt.text} onChange={(v) => up({ depthPrompt: { ...c.depthPrompt, text: v } })} rows={2} />
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">@ depth</Label>
+                    <Input type="number" value={c.depthPrompt.depth} onChange={(e) => up({ depthPrompt: { ...c.depthPrompt, depth: Number(e.target.value) } })} aria-label="Depth" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Role</Label>
+                    <Select value={c.depthPrompt.role} onValueChange={(v) => up({ depthPrompt: { ...c.depthPrompt, role: v as never } })}>
+                      <SelectTrigger aria-label="Depth prompt role"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="system">system</SelectItem>
+                        <SelectItem value="user">user</SelectItem>
+                        <SelectItem value="assistant">assistant</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">Role</Label>
-                  <Select value={c.depthPrompt.role} onValueChange={(v) => up({ depthPrompt: { ...c.depthPrompt, role: v as never } })}>
-                    <SelectTrigger aria-label="Depth prompt role"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="system">system</SelectItem>
-                      <SelectItem value="user">user</SelectItem>
-                      <SelectItem value="assistant">assistant</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <VariantField
+                  label="Scenario"
+                  value={c.scenario}
+                  onChange={(v) => up({ scenario: v })}
+                  variants={c.scenarioVariants}
+                  onVariantsChange={(scenarioVariants) => up({ scenarioVariants })}
+                  active={variantIndex(c.scenarioVariants, c.variantSelection?.scenario)}
+                  onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), scenario: id } })}
+                  rows={2}
+                />
+                <VariantField
+                  label="Personality summary"
+                  value={c.personality}
+                  onChange={(v) => up({ personality: v })}
+                  variants={c.personalityVariants}
+                  onVariantsChange={(personalityVariants) => up({ personalityVariants })}
+                  active={variantIndex(c.personalityVariants, c.variantSelection?.personality)}
+                  onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), personality: id } })}
+                  rows={2}
+                />
+                <Collapsible>
+                  <CollapsibleTrigger render={<Button variant="outline" size="sm" className="text-xs">Creator notes (spoiler)</Button>} />
+                  <CollapsibleContent className="pt-2">
+                    <Textarea value={c.creatorNotes} rows={3} onChange={(e) => up({ creatorNotes: e.target.value })} aria-label="Creator notes" className="text-sm" />
+                  </CollapsibleContent>
+                </Collapsible>
+                <TalkativenessField
+                  value={(c.cardExtras?.extensions as { talkativeness?: unknown } | undefined)?.talkativeness}
+                  onChange={(v) => up({ cardExtras: { ...c.cardExtras, extensions: { ...(c.cardExtras?.extensions as Record<string, unknown> | undefined), talkativeness: String(v) } } })}
+                />
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Creator</Label>
+                    <Input value={c.creator} onChange={(e) => up({ creator: e.target.value })} aria-label="Creator" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Version</Label>
+                    <Input value={c.version} onChange={(e) => up({ version: e.target.value })} aria-label="Version" />
+                  </div>
                 </div>
-              </div>
-              <VariantField
-                label="Scenario"
-                value={c.scenario}
-                onChange={(v) => up({ scenario: v })}
-                variants={c.scenarioVariants}
-                onVariantsChange={(scenarioVariants) => up({ scenarioVariants })}
-                active={variantIndex(c.scenarioVariants, c.variantSelection?.scenario)}
-                onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), scenario: id } })}
-                rows={2}
-              />
-              <VariantField
-                label="Personality summary"
-                value={c.personality}
-                onChange={(v) => up({ personality: v })}
-                variants={c.personalityVariants}
-                onVariantsChange={(personalityVariants) => up({ personalityVariants })}
-                active={variantIndex(c.personalityVariants, c.variantSelection?.personality)}
-                onActiveChange={(id) => up({ variantSelection: { ...(c.variantSelection ?? {}), personality: id } })}
-                rows={2}
-              />
-              <Collapsible>
-                <CollapsibleTrigger render={<Button variant="outline" size="sm" className="text-xs">Creator notes (spoiler)</Button>} />
-                <CollapsibleContent className="pt-2">
-                  <Textarea value={c.creatorNotes} rows={3} onChange={(e) => up({ creatorNotes: e.target.value })} aria-label="Creator notes" className="text-sm" />
-                </CollapsibleContent>
-              </Collapsible>
-              <TalkativenessField
-                value={(c.cardExtras?.extensions as { talkativeness?: unknown } | undefined)?.talkativeness}
-                onChange={(v) => up({ cardExtras: { ...c.cardExtras, extensions: { ...(c.cardExtras?.extensions as Record<string, unknown> | undefined), talkativeness: String(v) } } })}
-              />
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">Creator</Label>
-                  <Input value={c.creator} onChange={(e) => up({ creator: e.target.value })} aria-label="Creator" />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">Version</Label>
-                  <Input value={c.version} onChange={(e) => up({ version: e.target.value })} aria-label="Version" />
-                </div>
-              </div>
+              </>}
             </TabsContent>
 
             <TabsContent value="lorebook" className="flex flex-col gap-3">
-              <p className="text-xs text-muted-foreground">
-                {embeddedBook ? `${embeddedBook.name}: ${embeddedBook.entries.length} entries, imported and linked to this character.` : c.embeddedLorebookId ? 'The linked embedded lorebook is missing.' : retainedBook ? 'Embedded lorebook kept in the card. Not active.' : 'No embedded lorebook.'}
-              </p>
-              {!c.embeddedLorebookId && !!retainedBook && <Button variant="outline" size="sm" disabled={importingLore} onClick={() => void importLore()}>{importingLore ? 'Importing…' : 'Import embedded lorebook'}</Button>}
-              {embeddedBook && <Button variant="outline" size="sm" onClick={() => focusLorebook(embeddedBook.id)}>Manage lorebooks</Button>}
-              <Label className="text-xs">Additional linked lorebooks</Label>
-              <div className="flex flex-col gap-1.5">
-                {lorebooks.filter((b) => !b.isEmbedded).map((b) => (
-                  <label key={b.id} className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm">
-                    <Switch
-                      checked={c.linkedLorebookIds.includes(b.id)}
-                      onCheckedChange={(v) => up({ linkedLorebookIds: v ? [...c.linkedLorebookIds, b.id] : c.linkedLorebookIds.filter((x) => x !== b.id) })}
-                      aria-label={`Link ${b.name}`}
-                    />
-                    {b.name}
-                    <Badge variant="outline" className="ml-auto text-[10px]">{b.entries.length} entries</Badge>
-                  </label>
-                ))}
-              </div>
+              {tab === 'lorebook' && <>
+                <p className="text-xs text-muted-foreground">
+                  {embeddedBook ? `${embeddedBook.name}: ${embeddedBook.entries.length} entries, imported and linked to this character.` : c.embeddedLorebookId ? 'The linked embedded lorebook is missing.' : retainedBook ? 'Embedded lorebook kept in the card. Not active.' : 'No embedded lorebook.'}
+                </p>
+                {!c.embeddedLorebookId && !!retainedBook && <Button variant="outline" size="sm" disabled={importingLore} onClick={() => void importLore()}>{importingLore ? 'Importing…' : 'Import embedded lorebook'}</Button>}
+                {embeddedBook && <Button variant="outline" size="sm" onClick={() => focusLorebook(embeddedBook.id)}>Manage lorebooks</Button>}
+                <Label className="text-xs">Additional linked lorebooks</Label>
+                <div className="flex flex-col gap-1.5">
+                  {lorebooks.filter((b) => !b.isEmbedded).map((b) => (
+                    <label key={b.id} className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm">
+                      <Switch
+                        checked={c.linkedLorebookIds.includes(b.id)}
+                        onCheckedChange={(v) => up({ linkedLorebookIds: v ? [...c.linkedLorebookIds, b.id] : c.linkedLorebookIds.filter((x) => x !== b.id) })}
+                        aria-label={`Link ${b.name}`}
+                      />
+                      {b.name}
+                      <Badge variant="outline" className="ml-auto text-[10px]">{b.entries.length} entries</Badge>
+                    </label>
+                  ))}
+                </div>
+              </>}
             </TabsContent>
 
             <TabsContent value="colors" className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label className="text-xs">Character CSS</Label>
-                <Textarea
-                  value={c.css}
-                  onChange={(e) => up({ css: e.target.value })}
-                  placeholder={'.mes_text q { color: #ffb454; }\n.mes_text { font-style: italic; }'}
-                  className="min-h-24 font-mono text-xs"
-                  aria-label="Character CSS"
-                />
-                <p className="text-[11px] text-muted-foreground">
-                  Applied only while one of this character&apos;s chats is open. Hook message text with{' '}
-                  <code className="font-mono">.mes_text</code>.
-                </p>
-              </div>
-              {([['name', 'Name color'], ['dialogue', 'Dialogue highlight'], ['bubble', 'Bubble tint']] as const).map(([key, label]) => (
-                <div key={key} className="flex items-center gap-3">
-                  <Label className="w-36 text-xs">{label}</Label>
-                  <input
-                    type="color"
-                    value={c.colors[key] || '#888888'}
-                    onChange={(e) => up({ colors: { ...c.colors, [key]: e.target.value } })}
-                    aria-label={label}
-                    className="size-8 cursor-pointer rounded border-0 bg-transparent p-0"
+              {tab === 'colors' && <>
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-xs">Character CSS</Label>
+                  <Textarea
+                    value={c.css}
+                    onChange={(e) => up({ css: e.target.value })}
+                    placeholder={'.mes_text q { color: #ffb454; }\n.mes_text { font-style: italic; }'}
+                    className="min-h-24 font-mono text-xs"
+                    aria-label="Character CSS"
                   />
-                  <span className="text-xs text-muted-foreground">{c.colors[key] || 'unset'}</span>
+                  <p className="text-[11px] text-muted-foreground">
+                    Applied only while one of this character&apos;s chats is open. Hook message text with{' '}
+                    <code className="font-mono">.mes_text</code>.
+                  </p>
                 </div>
-              ))}
-              <Button variant="outline" size="sm" className="w-fit" onClick={() => {
-                void dominantColor(c.avatar || DEFAULT_AVATAR)
-                  .then((hex) => { up({ colors: { ...c.colors, name: hex } }); toast.success(`Name color set to ${hex} from the avatar`) })
-                  .catch((e) => toast.error(String((e as Error).message ?? e)))
-              }}>
-                <Palette className="size-4" aria-hidden="true" />Extract from avatar
-              </Button>
+                {([['name', 'Name color'], ['dialogue', 'Dialogue highlight'], ['bubble', 'Bubble tint']] as const).map(([key, label]) => (
+                  <div key={key} className="flex items-center gap-3">
+                    <Label className="w-36 text-xs">{label}</Label>
+                    <input
+                      type="color"
+                      value={c.colors[key] || '#888888'}
+                      onChange={(e) => up({ colors: { ...c.colors, [key]: e.target.value } })}
+                      aria-label={label}
+                      className="size-8 cursor-pointer rounded border-0 bg-transparent p-0"
+                    />
+                    <span className="text-xs text-muted-foreground">{c.colors[key] || 'unset'}</span>
+                  </div>
+                ))}
+                <Button variant="outline" size="sm" className="w-fit" onClick={() => {
+                  void dominantColor(c.avatar || DEFAULT_AVATAR)
+                    .then((hex) => { up({ colors: { ...c.colors, name: hex } }); toast.success(`Name color set to ${hex} from the avatar`) })
+                    .catch((e) => toast.error(String((e as Error).message ?? e)))
+                }}>
+                  <Palette className="size-4" aria-hidden="true" />Extract from avatar
+                </Button>
+              </>}
             </TabsContent>
 
             <TabsContent value="sprites" className="flex flex-col gap-3">
-              <p className="text-xs text-muted-foreground">
-                Sprites shown in chat as the speaker&apos;s mood changes, picked from the latest message. Add a whole pack at once: each file lands on the expression its name spells (joy.png, anger.png, neutral.png).
-              </p>
-              <div className="flex items-end gap-2">
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs" htmlFor="new-expression">Add expression</Label>
-                  <Input
-                    id="new-expression"
-                    list="standard-expressions"
-                    value={newExpression}
-                    onChange={(e) => setNewExpression(e.target.value.replace(/[^a-zA-Z0-9-_ ]/g, ''))}
-                    placeholder="joy"
-                    className="h-8 w-36 text-xs"
-                    aria-label="New expression name"
-                  />
-                  <datalist id="standard-expressions">
-                    {STANDARD_EXPRESSIONS.map((e) => <option key={e} value={e} />)}
-                  </datalist>
+              {tab === 'sprites' && <>
+                <p className="text-xs text-muted-foreground">
+                  Sprites shown in chat as the speaker&apos;s mood changes, picked from the latest message. Add a whole pack at once: each file lands on the expression its name spells (joy.png, anger.png, neutral.png).
+                </p>
+                <div className="flex items-end gap-2">
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs" htmlFor="new-expression">Add expression</Label>
+                    <Input
+                      id="new-expression"
+                      list="standard-expressions"
+                      value={newExpression}
+                      onChange={(e) => setNewExpression(e.target.value.replace(/[^a-zA-Z0-9-_ ]/g, ''))}
+                      placeholder="joy"
+                      className="h-8 w-36 text-xs"
+                      aria-label="New expression name"
+                    />
+                    <datalist id="standard-expressions">
+                      {STANDARD_EXPRESSIONS.map((e) => <option key={e} value={e} />)}
+                    </datalist>
+                  </div>
+                  <Button
+                    variant="outline" size="sm" className="h-8 text-xs"
+                    disabled={!newExpression.trim()}
+                    onClick={() => {
+                      const name = newExpression.trim()
+                      if (!name || c.expressions.some((e) => e.name === name)) return
+                      up({ expressions: [...c.expressions, { name, url: null }] })
+                      setNewExpression('')
+                    }}
+                  >
+                    <Plus className="size-3.5" aria-hidden="true" /> Add
+                  </Button>
+                  <input ref={spriteInput} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { void assignSprites(e.target.files); e.target.value = '' }} />
+                  <Button variant="outline" size="sm" className="ml-auto h-8 text-xs" onClick={() => spriteInput.current?.click()}>Add sprite pack</Button>
                 </div>
-                <Button
-                  variant="outline" size="sm" className="h-8 text-xs"
-                  disabled={!newExpression.trim()}
-                  onClick={() => {
-                    const name = newExpression.trim()
-                    if (!name || c.expressions.some((e) => e.name === name)) return
-                    up({ expressions: [...c.expressions, { name, url: null }] })
-                    setNewExpression('')
-                  }}
-                >
-                  <Plus className="size-3.5" aria-hidden="true" /> Add
-                </Button>
-                <input ref={spriteInput} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { void assignSprites(e.target.files); e.target.value = '' }} />
-                <Button variant="outline" size="sm" className="ml-auto h-8 text-xs" onClick={() => spriteInput.current?.click()}>Add sprite pack</Button>
-              </div>
-              <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
-                {c.expressions.map((e) => (
-                  <div key={e.name} className="flex flex-col items-center gap-1 rounded-md border border-border p-2">
-                    {e.url ? (
-                      <img src={e.url} alt={`${e.name} expression`} className="size-16 rounded object-cover" />
-                    ) : (
-                      <div className="flex size-16 items-center justify-center rounded bg-muted text-[10px] text-muted-foreground">empty</div>
-                    )}
-                    <span className="flex w-full items-center gap-1 text-[11px]">
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+                  {c.expressions.map((e) => (
+                    <div key={e.name} className="flex flex-col items-center gap-1 rounded-md border border-border p-2">
+                      {e.url ? (
+                        <img src={e.url} alt={`${e.name} expression`} className="size-16 rounded object-cover" />
+                      ) : (
+                        <div className="flex size-16 items-center justify-center rounded bg-muted text-[10px] text-muted-foreground">empty</div>
+                      )}
+                      <span className="flex w-full items-center gap-1 text-[11px]">
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 truncate text-left hover:text-primary"
+                          title="Set as default expression"
+                          onClick={() => up({ defaultExpression: e.name })}
+                        >
+                          {e.name}
+                        </button>
+                        {c.defaultExpression === e.name && <Badge variant="secondary" className="text-[9px]">def</Badge>}
                       <button
                         type="button"
-                        className="min-w-0 flex-1 truncate text-left hover:text-primary"
-                        title="Set as default expression"
-                        onClick={() => up({ defaultExpression: e.name })}
-                      >
-                        {e.name}
-                      </button>
-                      {c.defaultExpression === e.name && <Badge variant="secondary" className="text-[9px]">def</Badge>}
-                    <button
-                      type="button"
-                      className="text-muted-foreground hover:text-destructive"
-                      aria-label={`Delete ${e.name} sprite`}
-                      onClick={() => up({
-                        expressions: c.expressions.filter((x) => x.name !== e.name),
-                        ...(c.defaultExpression === e.name ? { defaultExpression: c.expressions.find((x) => x.name !== e.name)?.name ?? undefined } : {}),
-                      })}
-                    ><X className="size-3" aria-hidden="true" /></button>
-                    </span>
-                    <label className="cursor-pointer text-[10px] text-primary hover:underline">
-                      set
-                      <input type="file" accept="image/*" className="hidden" onChange={(ev) => { void setSprite(e.name, ev.target.files?.[0]); ev.target.value = '' }} />
-                    </label>
-                  </div>
-                ))}
-              </div>
+                        className="text-muted-foreground hover:text-destructive"
+                        aria-label={`Delete ${e.name} sprite`}
+                        onClick={() => up({
+                          expressions: c.expressions.filter((x) => x.name !== e.name),
+                          ...(c.defaultExpression === e.name ? { defaultExpression: c.expressions.find((x) => x.name !== e.name)?.name ?? undefined } : {}),
+                        })}
+                      ><X className="size-3" aria-hidden="true" /></button>
+                      </span>
+                      <label className="cursor-pointer text-[10px] text-primary hover:underline">
+                        set
+                        <input type="file" accept="image/*" className="hidden" onChange={(ev) => { void setSprite(e.name, ev.target.files?.[0]); ev.target.value = '' }} />
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </>}
             </TabsContent>
 
             <TabsContent value="gallery" className="flex flex-col gap-3">
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
-                {pagedGallery.map((g) => (
+              {tab === 'gallery' && <>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+                  {pagedGallery.map((g) => (
+                    <button
+                      key={g.id}
+                      type="button"
+                      onClick={() => setLightboxId(g.id)}
+                      className="group relative aspect-square overflow-hidden rounded-md border border-border transition-opacity hover:opacity-85"
+                      aria-label={`Open ${g.caption || 'gallery item'}`}
+                    >
+                      {g.type === 'video' ? (
+                        <video src={g.url} className="size-full object-cover" muted playsInline />
+                      ) : (
+                        <img src={g.url} alt={g.caption} className="size-full object-cover" loading="lazy" />
+                      )}
+                    </button>
+                  ))}
                   <button
-                    key={g.id}
                     type="button"
-                    onClick={() => setLightboxId(g.id)}
-                    className="group relative aspect-square overflow-hidden rounded-md border border-border transition-opacity hover:opacity-85"
-                    aria-label={`Open ${g.caption || 'gallery item'}`}
+                    onClick={() => galleryInput.current?.click()}
+                    className="flex aspect-square flex-col items-center justify-center gap-1 rounded-md border border-dashed border-border text-xs text-muted-foreground hover:bg-accent/50"
                   >
-                    {g.type === 'video' ? (
-                      <video src={g.url} className="size-full object-cover" muted playsInline />
-                    ) : (
-                      <img src={g.url} alt={g.caption} className="size-full object-cover" loading="lazy" />
-                    )}
+                    <Plus className="size-5" aria-hidden="true" /> Add
                   </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => galleryInput.current?.click()}
-                  className="flex aspect-square flex-col items-center justify-center gap-1 rounded-md border border-dashed border-border text-xs text-muted-foreground hover:bg-accent/50"
-                >
-                  <Plus className="size-5" aria-hidden="true" /> Add
-                </button>
-              </div>
-              <Pager total={c.gallery.length} page={safeGalleryPage} pageSize={GALLERY_PAGE} onPage={setGalleryPage} />
-              {c.gallery.length === 0 && (
-                <p className="text-xs text-muted-foreground">No gallery items yet. Add images of this character.</p>
-              )}
-              <input ref={galleryInput} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(e) => { void addGallery(e.target.files); e.target.value = '' }} />
+                </div>
+                <Pager total={c.gallery.length} page={safeGalleryPage} pageSize={GALLERY_PAGE} onPage={setGalleryPage} />
+                {c.gallery.length === 0 && (
+                  <p className="text-xs text-muted-foreground">No gallery items yet. Add images of this character.</p>
+                )}
+                <input ref={galleryInput} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(e) => { void addGallery(e.target.files); e.target.value = '' }} />
 
-              {/* Lightbox: full item + caption + set-as-avatar + delete */}
-              <Dialog open={!!lightboxItem} onOpenChange={(o) => !o && setLightboxId(null)}>
-                <DialogContent className="max-h-[85dvh] sm:max-w-lg">
-                  <DialogHeader>
-                    <DialogTitle>{lightboxItem?.caption || 'Gallery item'} · {lightboxIndex + 1} of {c.gallery.length}</DialogTitle>
-                  </DialogHeader>
-                  {lightboxItem && (
-                    <div className="flex flex-col gap-3">
-                      <div className="flex items-center justify-center overflow-hidden rounded-md border border-border bg-muted/30">
-                        {lightboxItem.type === 'video' ? (
-                          <video src={lightboxItem.url} className="max-h-[45dvh] w-full" controls />
-                        ) : (
-                          <img src={lightboxItem.url} alt={lightboxItem.caption} className="max-h-[45dvh] w-full object-contain" />
-                        )}
-                      </div>
-                      <Input
-                        value={lightboxItem.caption}
-                        onChange={(e) => up({ gallery: c.gallery.map((x) => x.id === lightboxItem.id ? { ...x, caption: e.target.value } : x) })}
-                        aria-label="Caption"
-                        placeholder="Caption"
-                      />
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button variant="outline" size="sm" disabled={lightboxIndex === 0} onClick={() => setLightboxId(c.gallery[lightboxIndex - 1]!.id)} aria-label="Previous item">
-                          <CaretLeft className="size-4" aria-hidden="true" />
-                        </Button>
-                        <Button variant="outline" size="sm" disabled={lightboxIndex >= c.gallery.length - 1} onClick={() => setLightboxId(c.gallery[lightboxIndex + 1]!.id)} aria-label="Next item">
-                          <CaretRight className="size-4" aria-hidden="true" />
-                        </Button>
-                        {lightboxItem.type === 'image' && (
-                          <Button variant="outline" size="sm" onClick={() => { up({ avatar: lightboxItem.url }); toast.success('Set as avatar') }}>
-                            <ImageIcon className="size-4" aria-hidden="true" /> Set as avatar
+                {/* Lightbox: full item + caption + set-as-avatar + delete */}
+                <Dialog open={!!lightboxItem} onOpenChange={(o) => !o && setLightboxId(null)}>
+                  <DialogContent className="max-h-[85dvh] sm:max-w-lg">
+                    <DialogHeader>
+                      <DialogTitle>{lightboxItem?.caption || 'Gallery item'} · {lightboxIndex + 1} of {c.gallery.length}</DialogTitle>
+                    </DialogHeader>
+                    {lightboxItem && (
+                      <div className="flex flex-col gap-3">
+                        <div className="flex items-center justify-center overflow-hidden rounded-md border border-border bg-muted/30">
+                          {lightboxItem.type === 'video' ? (
+                            <video src={lightboxItem.url} className="max-h-[45dvh] w-full" controls />
+                          ) : (
+                            <img src={lightboxItem.url} alt={lightboxItem.caption} className="max-h-[45dvh] w-full object-contain" />
+                          )}
+                        </div>
+                        <Input
+                          value={lightboxItem.caption}
+                          onChange={(e) => up({ gallery: c.gallery.map((x) => x.id === lightboxItem.id ? { ...x, caption: e.target.value } : x) })}
+                          aria-label="Caption"
+                          placeholder="Caption"
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button variant="outline" size="sm" disabled={lightboxIndex === 0} onClick={() => setLightboxId(c.gallery[lightboxIndex - 1]!.id)} aria-label="Previous item">
+                            <CaretLeft className="size-4" aria-hidden="true" />
                           </Button>
-                        )}
-                        <Button
-                          variant="ghost" size="sm" className="ml-auto text-destructive"
-                          onClick={() => void confirm({
-                            title: 'Remove this item?',
-                            description: 'It is deleted from the character card.',
-                          }).then((yes) => {
-                            if (!yes) return
-                            up({ gallery: c.gallery.filter((x) => x.id !== lightboxItem.id) })
-                            setLightboxId(null)
-                          })}
-                        >
-                          <Trash className="size-4" aria-hidden="true" /> Delete
-                        </Button>
+                          <Button variant="outline" size="sm" disabled={lightboxIndex >= c.gallery.length - 1} onClick={() => setLightboxId(c.gallery[lightboxIndex + 1]!.id)} aria-label="Next item">
+                            <CaretRight className="size-4" aria-hidden="true" />
+                          </Button>
+                          {lightboxItem.type === 'image' && (
+                            <Button variant="outline" size="sm" onClick={() => { up({ avatar: lightboxItem.url }); toast.success('Set as avatar') }}>
+                              <ImageIcon className="size-4" aria-hidden="true" /> Set as avatar
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost" size="sm" className="ml-auto text-destructive"
+                            onClick={() => void confirm({
+                              title: 'Remove this item?',
+                              description: 'It is deleted from the character card.',
+                            }).then((yes) => {
+                              if (!yes) return
+                              up({ gallery: c.gallery.filter((x) => x.id !== lightboxItem.id) })
+                              setLightboxId(null)
+                            })}
+                          >
+                            <Trash className="size-4" aria-hidden="true" /> Delete
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </DialogContent>
-              </Dialog>
+                    )}
+                  </DialogContent>
+                </Dialog>
+              </>}
             </TabsContent>
 
             <TabsContent value="regex" className="flex flex-col gap-2">
-              <p className="text-xs text-muted-foreground">These scripts apply only to this character.</p>
+              {tab === 'regex' && <>
+                <p className="text-xs text-muted-foreground">These scripts apply only to this character.</p>
 
-              {characterScripts.length === 0 && <p className="text-xs text-muted-foreground">No character regex scripts.</p>}
-              {characterScripts.map((r) => (
-                <div key={r.id} className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm">
-                  <code className="text-xs text-muted-foreground">/{r.find}/{r.flags}</code>
-                  <Button variant="ghost" size="sm" onClick={() => focusRegex(r.id)}>{r.name}</Button>
-                  <Switch checked={r.enabled} onCheckedChange={(enabled) => updateRegex(r.id, { enabled })} aria-label={`Enable ${r.name}`} className="ml-auto" />
-                </div>
-              ))}
+                {characterScripts.length === 0 && <p className="text-xs text-muted-foreground">No character regex scripts.</p>}
+                {characterScripts.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm">
+                    <code className="text-xs text-muted-foreground">/{r.find}/{r.flags}</code>
+                    <Button variant="ghost" size="sm" onClick={() => focusRegex(r.id)}>{r.name}</Button>
+                    <Switch checked={r.enabled} onCheckedChange={(enabled) => updateRegex(r.id, { enabled })} aria-label={`Enable ${r.name}`} className="ml-auto" />
+                  </div>
+                ))}
+              </>}
             </TabsContent>
 
             <TabsContent value="voice" className="flex flex-col gap-3">
-              <p className="text-xs text-muted-foreground">
-                Per-character voice, overrides the app TTS settings when set. Leave off to follow Tools → TTS.
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">TTS provider</Label>
-                  <Select value={c.voiceProvider || 'none'} onValueChange={(v) => up({ voiceProvider: v ?? 'none' })}>
-                    <SelectTrigger aria-label="Voice provider"><SelectValue>{c.voiceProvider || 'none'}</SelectValue></SelectTrigger>
-                    <SelectContent>
-                      {['none', 'System (Web Speech)', 'Engine'].map((p) => <SelectItem key={p} value={p}>{p === 'none' ? 'none (follow app settings)' : p}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
+              {tab === 'voice' && <>
+                <p className="text-xs text-muted-foreground">
+                  Per-character voice, overrides the app TTS settings when set. Leave off to follow Tools → TTS.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">TTS provider</Label>
+                    <Select value={c.voiceProvider || 'none'} onValueChange={(v) => up({ voiceProvider: v ?? 'none' })}>
+                      <SelectTrigger aria-label="Voice provider"><SelectValue>{c.voiceProvider || 'none'}</SelectValue></SelectTrigger>
+                      <SelectContent>
+                        {['none', 'System (Web Speech)', 'Engine'].map((p) => <SelectItem key={p} value={p}>{p === 'none' ? 'none (follow app settings)' : p}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label className="text-xs">Voice</Label>
+                    <Select value={c.voiceId || ''} onValueChange={(v) => up({ voiceId: v ?? '' })}>
+                      <SelectTrigger aria-label="Voice"><SelectValue>{c.voiceId ? (c.voiceId.includes('-') ? c.voiceId.replace(/^([a-z]{2}-[A-Z]{2})-(.+?)Neural$/, '$2 ($1)') : c.voiceId) : 'default'}</SelectValue></SelectTrigger>
+                      <SelectContent>
+                        {voiceOptions.map((v) => <SelectItem key={v.value} value={v.value}>{v.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">Voice</Label>
-                  <Select value={c.voiceId || ''} onValueChange={(v) => up({ voiceId: v ?? '' })}>
-                    <SelectTrigger aria-label="Voice"><SelectValue>{c.voiceId ? (c.voiceId.includes('-') ? c.voiceId.replace(/^([a-z]{2}-[A-Z]{2})-(.+?)Neural$/, '$2 ($1)') : c.voiceId) : 'default'}</SelectValue></SelectTrigger>
-                    <SelectContent>
-                      {voiceOptions.map((v) => <SelectItem key={v.value} value={v.value}>{v.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <Button variant="outline" size="sm" className="w-fit" onClick={() => {
-                if (c.voiceProvider === 'none' || !c.voiceProvider) {
-                  speechToast.info('Pick a provider first. Engine uses the speech endpoints configured in the app')
-                  return
-                }
-                void speakText(`Hello, traveler. I am ${c.name}.`, {
-                  provider: c.voiceProvider, narratorVoice: c.voiceId || 'alloy', speed: 1, model: 'tts-1', engineProvider: 'edge',
-                  autoPlay: false, onlyQuotes: false, skipAsterisks: true, skipCodeblocks: true, charVoices: {},
-                }).then((played) => {
-                  if (!played) speechToast.info('Nothing played, check the voice settings')
-                }).catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
-              }}>Test voice</Button>
+                <Button variant="outline" size="sm" className="w-fit" onClick={() => {
+                  if (c.voiceProvider === 'none' || !c.voiceProvider) {
+                    speechToast.info('Pick a provider first. Engine uses the speech endpoints configured in the app')
+                    return
+                  }
+                  void speakText(`Hello, traveler. I am ${c.name}.`, {
+                    provider: c.voiceProvider, narratorVoice: c.voiceId || 'alloy', speed: 1, model: 'tts-1', engineProvider: 'edge',
+                    autoPlay: false, onlyQuotes: false, skipAsterisks: true, skipCodeblocks: true, charVoices: {},
+                  }).then((played) => {
+                    if (!played) speechToast.info('Nothing played, check the voice settings')
+                  }).catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
+                }}>Test voice</Button>
+              </>}
             </TabsContent>
           </div>
         </ScrollArea>

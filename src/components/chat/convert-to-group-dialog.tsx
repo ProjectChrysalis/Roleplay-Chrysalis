@@ -14,6 +14,21 @@ const toast = createToast('chat')
 export function ConvertToGroupDialog({
   chat, character, open, onOpenChange,
 }: { chat: Chat; character: Character; open: boolean; onOpenChange: (o: boolean) => void }) {
+  // The picker lists the whole library: it subscribes and builds its rows
+  // only while shown (through the close animation), not on every render of
+  // the chat behind it.
+  const [shown, setShown] = useState(open)
+  if (open && !shown) setShown(true)
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange} onOpenChangeComplete={(o) => { if (!o) setShown(false) }}>
+      {shown && <ConvertToGroupBody chat={chat} character={character} onOpenChange={onOpenChange} />}
+    </Dialog>
+  )
+}
+
+function ConvertToGroupBody({
+  chat, character, onOpenChange,
+}: { chat: Chat; character: Character; onOpenChange: (o: boolean) => void }) {
   const characters = useApp((s) => s.characters)
   const convertToGroup = useApp((s) => s.convertToGroup)
   const [selected, setSelected] = useState<string[]>([])
@@ -31,33 +46,31 @@ export function ConvertToGroupDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Convert to group chat</DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-muted-foreground">
-          {character.name} stays in the group; pick who joins. Chat history is preserved.
-        </p>
-        <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
-          {candidates.map((c) => (
-            <label key={c.id} className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-accent">
-              <Checkbox checked={selected.includes(c.id)} onCheckedChange={() => toggle(c.id)} aria-label={`Add ${c.name}`} />
-              <Avatar className="size-7">
-                <AvatarImage src={c.avatar || DEFAULT_AVATAR} alt="" />
-                <AvatarFallback>{c.name.slice(0, 2)}</AvatarFallback>
-              </Avatar>
-              <span className="truncate text-sm">{c.name}</span>
-            </label>
-          ))}
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={selected.length === 0} onClick={convert}>
-            Convert ({selected.length + 1} members)
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <DialogContent className="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>Convert to group chat</DialogTitle>
+      </DialogHeader>
+      <p className="text-sm text-muted-foreground">
+        {character.name} stays in the group; pick who joins. Chat history is preserved.
+      </p>
+      <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+        {candidates.map((c) => (
+          <label key={c.id} className="flex min-h-11 cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-accent">
+            <Checkbox checked={selected.includes(c.id)} onCheckedChange={() => toggle(c.id)} aria-label={`Add ${c.name}`} />
+            <Avatar className="size-7">
+              <AvatarImage src={c.avatar || DEFAULT_AVATAR} alt="" />
+              <AvatarFallback>{c.name.slice(0, 2)}</AvatarFallback>
+            </Avatar>
+            <span className="truncate text-sm">{c.name}</span>
+          </label>
+        ))}
+      </div>
+      <DialogFooter>
+        <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button disabled={selected.length === 0} onClick={convert}>
+          Convert ({selected.length + 1} members)
+        </Button>
+      </DialogFooter>
+    </DialogContent>
   )
 }

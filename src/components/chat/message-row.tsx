@@ -1,6 +1,7 @@
 import { ImageLightbox } from '@/components/ui/image-lightbox'
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { CaretDown, PencilSimple, Copy, Trash, ArrowsClockwise, Translate, SpeakerHigh, Ghost, GitBranch, Eye, CaretLeft, CaretRight, Info, Scan, Brain, DotsThree, CircleNotch, Square, ArrowsOut, Wrench, ArrowUp, ArrowDown, BookOpenText } from '@phosphor-icons/react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -23,6 +24,7 @@ import { ModelMark } from '@/components/model-mark'
 import { useTouchUi } from '@/hooks/use-touch-ui'
 import { useApp, chatPresetId, chatPersonaId } from '@/lib/store'
 import { useDisplayTexts, type DisplayScript } from '@/hooks/use-display-texts'
+import { usePacedStream } from '@/hooks/use-paced-stream'
 import { cssAttrValue } from '@/lib/scope-css'
 import { balanceStreamingMarkdown } from '@/lib/rich-parts'
 import { j } from '@/lib/engine'
@@ -215,13 +217,16 @@ function ThinkBlock({ text, ms, live, open, onOpenChange, onEdit, onRemove }: {
 /** stable fallback: a fresh {} would make every render a new value */
 const EMPTY_THINK_OPEN: Record<number, boolean> = {}
 
+/** The card fields a row draws; ChatView holds this object while they stay the same. */
+export type RowCharacter = Pick<Character, 'id' | 'name' | 'avatar' | 'colors' | 'isGroup' | 'members'>
+
 export const MessageRow = memo(function MessageRow({
   chat, message, index, character, isLast, slidePhase, swipeBusy = false, onSwipeFx, summarized = false,
 }: {
   chat: Chat
   message: Message
   index: number
-  character: Character
+  character: RowCharacter
   isLast: boolean
   /** above the chat's summary cutoff: shown, but no longer in the prompt */
   summarized?: boolean
@@ -233,7 +238,6 @@ export const MessageRow = memo(function MessageRow({
 }) {
   const settings = useApp((s) => s.settings)
   const streamingModel = useApp((s) => s.streaming?.messageId === message.id ? s.streaming.model : undefined)
-  const characters = useApp((s) => s.characters)
   const setSwipe = useApp((s) => s.setSwipe)
   const sendMessage = useApp((s) => s.sendMessage)
   const regenerate = useApp((s) => s.regenerate)
@@ -244,7 +248,21 @@ export const MessageRow = memo(function MessageRow({
   const forkAndOpen = useApp((s) => s.forkAndOpen)
   const compactChat = useApp((s) => s.compactChat)
   const undoCompaction = useApp((s) => s.undoCompaction)
-  const personas = useApp((s) => s.personas)
+  // Rows select the one record of each kind they show. Subscribing to the
+  // whole lists re-rendered every visible row on each keystroke in the
+  // character, persona and preset editors.
+  const currentPersona = useApp((s) => s.personas.find((p) => p.id === chatPersonaId(s, chat)))
+  const authorPersona = useApp((s) => message.role !== 'user' ? null
+    : (message.personaId ? s.personas.find((p) => p.id === message.personaId) : undefined)
+      ?? (message.authorName ? s.personas.find((p) => p.name === message.authorName) : undefined)
+      ?? null)
+  const speakerId = message.role === 'user' ? null : (message.characterId ?? chat.characterId)
+  const speakerCard = useApp(useShallow((s) => {
+    const c = speakerId ? s.characters.find((x) => x.id === speakerId) : undefined
+    return c ? { name: c.name, avatar: c.avatar, expressions: c.expressions, defaultExpression: c.defaultExpression } : null
+  }))
+  const presetId = useApp((s) => chatPresetId(s, chat))
+  const presetSamplers = useApp((s) => (s.presets.find((p) => p.id === presetId) ?? s.presets[0])!.samplers)
 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -273,9 +291,7 @@ export const MessageRow = memo(function MessageRow({
   const [reasonEditing, setReasonEditing] = useState(false)
   const [reasonDraft, setReasonDraft] = useState('')
   const setView = useApp((s) => s.setView)
-  const presets = useApp((s) => s.presets)
   const setMessageTranslation = useApp((s) => s.setMessageTranslation)
-  const presetSamplers = (presets.find((p) => p.id === chatPresetId({ presets }, chat)) ?? presets[0])!.samplers
 
   /** The translation renders INLINE under the original text and
    *  persists on the message. */
@@ -301,7 +317,7 @@ export const MessageRow = memo(function MessageRow({
   const isSpeaking = useSpeakingKey() === speakKey
   const speak = () => {
     if (isSpeaking) { stopSpeaking(); return }
-    const charVoice = !isUser && speaker && 'voiceProvider' in speaker ? speaker : null
+    const charVoice = speakerId ? useApp.getState().characters.find((c) => c.id === speakerId) ?? null : null
     speakText(rawContent, voiceFor(settings.tts, charVoice), speakKey)
       .then((played) => {
         if (!played) speechToast.info('Pick a TTS provider in Settings → Sound. “System (Web Speech)” uses the browser’s built-in voices')
@@ -309,14 +325,14 @@ export const MessageRow = memo(function MessageRow({
       .catch((e: Error) => speechToast.error(`TTS failed: ${e.message}`))
   }
 
-  // narrow streaming subscription: primitives only, so a tick for ONE
-  // message re-renders just that row (the whole-object selector re-rendered
-  // every mounted row 30-60x/s during generation — the scroll jank)
-  const streamingShown = useApp((s) => (s.streaming?.messageId === message.id ? s.streaming.shown : -1))
-  const streamingFull = useApp((s) => (s.streaming?.messageId === message.id ? s.streaming.full : ''))
-  const streamingMarks = useApp((s) => (s.streaming?.messageId === message.id ? s.streaming.marks : undefined))
-  const streamingThinking = useApp((s) => (s.streaming?.messageId === message.id ? s.streaming.thinking : undefined))
-  const streamingThinkMs = useApp((s) => (s.streaming?.messageId === message.id ? s.streaming.thinkingMs : undefined))
+  // only the streaming row subscribes to the stream, and its ticks arrive
+  // paced to what re-rendering this row costs
+  const stream = usePacedStream(message.id)
+  const streamingShown = stream ? stream.shown : -1
+  const streamingFull = stream?.full ?? ''
+  const streamingMarks = stream?.marks
+  const streamingThinking = stream?.thinking
+  const streamingThinkMs = stream?.thinkingMs
   // the live box, the timeline blocks and the committed block all read one
   // per-occurrence map, so a close during streaming can never reopen on commit
   const thinkBoxRef = useRef<HTMLDivElement | null>(null)
@@ -448,15 +464,14 @@ export const MessageRow = memo(function MessageRow({
       if (!r.scopeTargetId) return false
       if (r.scope === 'chat') return r.scopeTargetId === chat.id
       if (r.scope === 'character') return r.scopeTargetId === chat.characterId || (!!character.isGroup && (character.members ?? []).includes(r.scopeTargetId))
-      if (r.scope === 'preset') return r.scopeTargetId === chatPresetId({ presets }, chat)
+      if (r.scope === 'preset') return r.scopeTargetId === presetId
       return true
     }
     // scripts bound to a depth window only apply inside it (same count the
     // engine uses at assembly)
     // global first, then preset-bound, then scoped — same order the engine runs
     const rank = (r: RegexScript) => (r.scope === 'global' ? 0 : r.scope === 'preset' ? 1 : 2)
-    const persona = personas.find((p) => p.id === chatPersonaId({ personas }, chat))
-    const userName = persona?.name ?? 'User'
+    const userName = currentPersona?.name ?? 'User'
     // replacement macros use the chat's global names — only the trim pass is
     // speaker-aware in the source format, keep the same split here
     const charName = character.name
@@ -482,7 +497,7 @@ export const MessageRow = memo(function MessageRow({
       resolved.push({ find, flags: r.flags ?? 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
     }
     return resolved
-  }, [regexScripts, message.role, personas, presets, chat, character, depth])
+  }, [regexScripts, message.role, currentPersona?.name, presetId, chat, character, depth])
   // while streaming, unclosed emphasis/fence markers get synthetic closers
   // so each tick renders as finished markdown (never committed)
   const rawDisplayed = isStreamingThis ? balanceStreamingMarkdown(rawContent) : rawContent
@@ -521,14 +536,7 @@ export const MessageRow = memo(function MessageRow({
   const cssScope = `[data-message-id="${cssAttrValue(message.id)}"]`
   // user messages keep the persona they were SENT under: match the stored
   // author name first so mid-chat persona switches never repaint history
-  const currentPersona = personas.find((p) => p.id === chatPersonaId({ personas }, chat))
-  const authorPersona = !isUser ? null
-    : (message.personaId ? personas.find((p) => p.id === message.personaId) : undefined)
-      ?? (message.authorName ? personas.find((p) => p.name === message.authorName) : undefined)
-      ?? null
-  const speaker = isUser
-    ? authorPersona ?? currentPersona
-    : characters.find((c) => c.id === (message.characterId ?? chat.characterId))
+  const speaker = isUser ? authorPersona ?? currentPersona : speakerCard
   const name = isUser ? (message.authorName ?? currentPersona?.name ?? 'You') : (speaker?.name ?? character.name)
   const avatar = isUser ? ((authorPersona ?? currentPersona)?.avatar ?? DEFAULT_AVATAR) : (speaker && 'avatar' in speaker ? speaker.avatar : character.avatar)
   // expression sprites: the reply's own words pick the sprite (keyword

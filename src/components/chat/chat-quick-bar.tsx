@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { createToast } from '@/lib/notifications'
 import { chatPersonaLock, chatPresetId, useApp } from '@/lib/store'
 import type { ID } from '@/lib/types'
@@ -49,7 +50,10 @@ function LockItem({ value, label, on, onToggle }: { value: string; label: string
 
 export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
   const chat = useApp((s) => s.chats.find((c) => c.id === chatId))
-  const presets = useApp((s) => s.presets)
+  // ids and names only: editing a preset's prompts must not re-render this bar
+  const presets = useApp(useShallow((s) => s.presets.map((p) => p.id)))
+  const presetNames = useApp(useShallow((s) => s.presets.map((p) => p.name)))
+  const presetId = useApp((s) => chatPresetId(s, chat))
   const personas = useApp((s) => s.personas)
   const profiles = useApp((s) => s.connectionProfiles)
   const models = useApp((s) => s.models)
@@ -67,7 +71,8 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
   const [manageOpen, setManageOpen] = useState(false)
   if (!chat) return null
 
-  const preset = presets.find((p) => p.id === chatPresetId({ presets }, chat))
+  const presetIndex = presetId ? presets.indexOf(presetId) : -1
+  const preset = presetIndex < 0 ? undefined : { id: presets[presetIndex]!, name: presetNames[presetIndex]! }
   const personaLock = chatPersonaLock({ personas }, chat)
   const persona = personas.find((p) => p.id === personaLock.id)
   const locked = chat.presetLocked || personaLock.kind !== null
@@ -120,10 +125,10 @@ export function ChatQuickSwitch({ chatId }: { chatId: ID }) {
               <CommandEmpty>Nothing matches.</CommandEmpty>
 
               <CommandGroup heading={`Preset: ${preset?.name ?? 'none'}`}>
-                {presets.slice(0, GROUP_CAP).map((p) => (
-                  <CommandItem key={p.id} value={`preset ${p.name}`} onSelect={() => pickPreset(p.id)}>
-                    <Check className={cn('size-3.5 shrink-0', p.id === preset?.id ? 'opacity-100' : 'opacity-0')} aria-hidden="true" />
-                    <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                {presets.slice(0, GROUP_CAP).map((id, i) => (
+                  <CommandItem key={id} value={`preset ${presetNames[i]}`} onSelect={() => pickPreset(id)}>
+                    <Check className={cn('size-3.5 shrink-0', id === preset?.id ? 'opacity-100' : 'opacity-0')} aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate">{presetNames[i]}</span>
                   </CommandItem>
                 ))}
                 {presets.length > GROUP_CAP && <GroupCapHint hidden={presets.length - GROUP_CAP} />}
