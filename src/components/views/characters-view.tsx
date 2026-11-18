@@ -1,5 +1,5 @@
 
-import { useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useMemo, useRef, useState } from 'react'
 import { MagnifyingGlass, Star, SquaresFour, List, Plus, UploadSimple, Chats, Copy, Trash, Tag, DotsThree, CheckSquare, DownloadSimple, Users, FileCode, LinkSimple, UserCircle } from '@phosphor-icons/react'
 import { createToast } from '@/lib/notifications'
 import { Input } from '@/components/ui/input'
@@ -157,21 +157,35 @@ export function CharactersView() {
 
   const active = characters.find((c) => c.id === activeCharacterId)
 
+  // the editor is drawn from here too: while it is open, saves change
+  // `characters` on every keystroke, so the browser's lists stand idle.
+  // A large library is sorted once per change, lowercased once per card, and
+  // the filter trails the search box so typing never waits on it
+  const browsing = !active
+  const sorted = useMemo(() => browsing ? sortCharacters(characters, chats, sort) : [], [browsing, characters, chats, sort])
+  const deferredQuery = useDeferredValue(query)
   const filtered = useMemo(() => {
-    const q = query.toLowerCase()
-    const list = characters.filter((c) =>
-      (!q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q) || c.tags.some((t) => t.includes(q))) &&
-      (tagFilter.every((t) => c.tags.includes(t))),
+    const q = deferredQuery.toLowerCase()
+    if (!q && !tagFilter.length) return sorted
+    return sorted.filter((c) =>
+      (!q || haystack(c).includes(q) || c.tags.some((t) => t.includes(q))) &&
+      tagFilter.every((t) => c.tags.includes(t)),
     )
-    return sortCharacters(list, chats, sort)
-  }, [characters, chats, query, sort, tagFilter])
+  }, [sorted, deferredQuery, tagFilter])
+  const chatCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    if (browsing) for (const ch of chats) counts.set(ch.characterId, (counts.get(ch.characterId) ?? 0) + 1)
+    return counts
+  }, [browsing, chats])
+  const tagCounts = useMemo(() => browsing ? countTags(characters) : new Map<string, number>(), [browsing, characters])
 
-  const favorites = characters.filter((c) => c.favorite)
+  const favorites = useMemo(() => browsing ? characters.filter((c) => c.favorite) : [], [browsing, characters])
 
   /** Tag filter chips: the tag manager owns color, visibility and order —
    *  tags in use but never configured in the manager fall back to neutral
    *  chips at the end (alphabetical). */
   const tagChips = useMemo(() => {
+    if (!browsing) return []
     const meta = new Map(tags.map((t) => [t.name, t]))
     return Array.from(new Set(characters.flatMap((c) => c.tags)))
       .filter((name) => meta.get(name)?.visible !== false)
@@ -181,7 +195,7 @@ export function CharactersView() {
         return oa !== ob ? oa - ob : a.localeCompare(b)
       })
       .map((name) => ({ name, tag: meta.get(name) }))
-  }, [characters, tags])
+  }, [browsing, characters, tags])
 
   const PAGE_SIZE = 24
   const paged = useMemo(() => filtered.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [filtered, page])
@@ -265,7 +279,7 @@ export function CharactersView() {
       <div className="flex items-center gap-1.5 border-b border-border px-4 py-1.5">
         <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-0.5 no-scrollbar">
           {tagChips.map(({ name, tag }) => {
-            const n = characters.filter((c) => c.tags.includes(name)).length
+            const n = tagCounts.get(name) ?? 0
             const active = tagFilter.includes(name)
             return (
               <button
@@ -333,7 +347,7 @@ export function CharactersView() {
         ) : grid ? (
           <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
             {paged.map((c) => {
-              const chatCount = chats.filter((ch) => ch.characterId === c.id).length
+              const chatCount = chatCounts.get(c.id) ?? 0
               const tokens = estimateTokens(c.description + c.personality + c.scenario + c.firstMessage + c.exampleDialogue)
               return (
                 <div key={c.id} className={cn('group relative flex flex-col overflow-hidden rounded-lg border border-border bg-card transition-colors hover:border-primary/50', selected.includes(c.id) && 'border-primary')}>
@@ -513,12 +527,27 @@ export function CharactersView() {
   )
 }
 
+/** Search text per card; a saved card is a new object, so only it is redone. */
+const haystacks = new WeakMap<object, string>()
+function haystack(c: { name: string; description: string }): string {
+  let text = haystacks.get(c)
+  if (text === undefined) haystacks.set(c, text = `${c.name}\n${c.description}`.toLowerCase())
+  return text
+}
+
+function countTags(characters: { tags: string[] }[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const c of characters) for (const t of c.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+  return counts
+}
+
 function TagManager({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const tags = useApp((s) => s.tags)
   const updateTag = useApp((s) => s.updateTag)
   const addTag = useApp((s) => s.addTag)
   const deleteTag = useApp((s) => s.deleteTag)
   const characters = useApp((s) => s.characters)
+  const tagCounts = useMemo(() => countTags(characters), [characters])
   const [newName, setNewName] = useState('')
 
   return (
@@ -548,7 +577,7 @@ function TagManager({ open, onOpenChange }: { open: boolean; onOpenChange: (o: b
                 text
                 <input type="color" value={t.textColor} onChange={(e) => updateTag(t.id, { textColor: e.target.value })} aria-label={`${t.name} text color`} className="size-6 cursor-pointer rounded border-0 bg-transparent p-0" />
               </label>
-              <span className="ml-auto text-[11px] text-muted-foreground">{characters.filter((c) => c.tags.includes(t.name)).length}</span>
+              <span className="ml-auto text-[11px] text-muted-foreground">{tagCounts.get(t.name) ?? 0}</span>
               <Switch checked={t.visible} onCheckedChange={(v) => updateTag(t.id, { visible: v })} aria-label={`Toggle visibility of ${t.name}`} />
               <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
                 folder
