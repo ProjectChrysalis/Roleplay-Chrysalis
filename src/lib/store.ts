@@ -295,6 +295,9 @@ let flushStreamDeltas: (() => void) | null = null
  *  the engine) can briefly revert optimistic local mutations */
 let hydrateRunning = false
 let hydrateQueued = false
+/** Settles when the hydrate in flight has landed. */
+let hydrateLanded: Promise<void> = Promise.resolve()
+let landHydrate = () => {}
 /** Mutation epoch: bumped by EVERY optimistic write to server-backed data.
  *  A read that STARTED before a mutation (hydrate, refreshChat, refreshLists)
  *  snapshots pre-mutation state; if it APPLIES after the optimistic write it
@@ -410,6 +413,7 @@ export const useApp = create<AppState>()(
       hydrate: async () => {
         if (hydrateRunning) { hydrateQueued = true; return }
         hydrateRunning = true
+        hydrateLanded = new Promise((resolve) => { landHydrate = resolve })
         await saves.settled()
         const seqAtStart = mutateSeq
         try {
@@ -724,10 +728,12 @@ export const useApp = create<AppState>()(
             set({ streaming: { ...st, marks } })
           }, () => {
             // a connection was added/changed engine-side (usually from another
-            // tab): the model catalog and connection list are stale — the
-            // engine emits AFTER discovery finished, so a plain hydrate lands
-            // the fresh list, no view re-entry needed
-            void get().hydrate()
+            // tab), or the engine's model catalog updated: the model and
+            // connection lists are stale, nothing else. The engine emits AFTER
+            // discovery finished, so one read lands the fresh lists
+            void Promise.all([fetchModels(), fetchEngineConnections()])
+              .then(([models, engineConnections]) => set({ models, engineConnections }))
+              .catch(() => undefined)
           }, (chatId, speakerId, name) => {
             // a group reply starts under the group's own id: the member who
             // is actually speaking takes the pending row over, so a stopped
@@ -755,6 +761,7 @@ export const useApp = create<AppState>()(
         }
         } finally {
           hydrateRunning = false
+          landHydrate()
           if (hydrateQueued) { hydrateQueued = false; void get().hydrate() }
         }
       },
@@ -2108,6 +2115,9 @@ const MAX_RECORD_READS = 40
 export function classifyDataPath(path: string): DataChange | null {
   const segs = path.replace(/\\/g, '/').split('/').filter(Boolean)
   if (segs[0] !== 'data' || segs.length < 2) return null
+  // files are written beside their place as <name>.<uuid>.tmp, then renamed
+  const last = segs.length - 1
+  segs[last] = segs[last]!.replace(/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i, '')
   const dir = segs[1]!
   if (segs.length === 2) {
     if (ENGINE_STATE.has(dir)) return { kind: 'skip' }
@@ -2118,8 +2128,7 @@ export function classifyDataPath(path: string): DataChange | null {
   const name = segs[2]!
   if (dir === 'characters') return name.startsWith('_') || name.startsWith('.') ? { kind: 'skip' } : { kind: 'characters', id: name }
   if (segs.length > 3) return null
-  // files are written beside their place as <name>.<uuid>.tmp, then renamed
-  const file = name.replace(/\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i, '')
+  const file = name
   if (file.startsWith('_') || file.startsWith('.')) return { kind: 'skip' }
   if (dir === 'chats') {
     const id = file.split('.')[0]
@@ -2147,7 +2156,11 @@ function takeDataChanges(set: SetFn, get: GetFn) {
 
 async function applyDataChanges(set: SetFn, get: GetFn, paths: string[] | null) {
   const changes = paths?.map(classifyDataPath)
-  const full = !changes || changes.some((c) => c === null) || hydrateRunning
+  if (changes?.every((c) => c?.kind === 'skip')) return
+  // a hydrate in flight may have read before these changes: the targeted
+  // refresh follows it instead of starting a second full read
+  if (hydrateRunning) await hydrateLanded
+  const full = !changes || changes.some((c) => c === null)
   const records = new Map<RecordKind, Set<string>>()
   const chats = new Set<ID>()
   let settings = false

@@ -47,6 +47,8 @@ test('changed paths name the record they belong to', () => {
   expect(classifyDataPath(`data/presets/p1.json.${uuid}.tmp`)).toEqual({ kind: 'presets', id: 'p1' })
   expect(classifyDataPath('data/lorebooks/world.json')).toEqual({ kind: 'lorebooks', id: 'world' })
   expect(classifyDataPath('data/settings.json')).toEqual({ kind: 'settings' })
+  expect(classifyDataPath(`data/library.json.${uuid}.tmp`)).toEqual({ kind: 'settings' })
+  expect(classifyDataPath(`data/variables.json.${uuid}.tmp`)).toEqual({ kind: 'skip' })
   expect(classifyDataPath('data/databank/f1.json')).toEqual({ kind: 'settings' })
   for (const skipped of ['data/presets/_default.json', 'data/lorebooks/.vectors.json', 'data/variables.json', 'data/__media/ab.png', 'data/regex/_example.json']) {
     expect(classifyDataPath(skipped)).toEqual({ kind: 'skip' })
