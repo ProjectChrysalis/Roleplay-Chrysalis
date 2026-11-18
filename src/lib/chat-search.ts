@@ -37,13 +37,36 @@ export function searchHighlight(text: string, query: string): { text: string; ma
   return parts
 }
 
-/** Hydration replaces arrays even when saved search inputs are unchanged. */
+/** Hydration replaces arrays even when saved search inputs are unchanged.
+ *  Each chat's part is worked out once per chat object, so a change to one
+ *  chat (a long one runs to megabytes) redoes only that chat. */
 export function chatSearchRevision(chats: Chat[], characters: Pick<Character, 'id' | 'name'>[]): string {
-  return JSON.stringify([
-    chats.map((chat) => [chat.id, chat.characterId, chat.title, chat.folderId, chat.updatedAt,
+  return textHash(`${chats.map(chatPart).join('\n')}\n${JSON.stringify(characters.map((character) => [character.id, character.name]))}`)
+}
+
+const chatParts = new WeakMap<Chat, string>()
+function chatPart(chat: Chat): string {
+  let part = chatParts.get(chat)
+  if (part === undefined) {
+    part = textHash(JSON.stringify([chat.id, chat.characterId, chat.title, chat.folderId, chat.updatedAt,
       chat.messageCount, chat.preview,
       chat.messages.map((message) => [message.id, message.role, message.picture,
-        message.swipes[message.activeSwipe]?.content])]),
-    characters.map((character) => [character.id, character.name]),
-  ])
+        message.swipes[message.activeSwipe]?.content])]))
+    chatParts.set(chat, part)
+  }
+  return part
+}
+
+/** A 53-bit string hash, as base-36 text. */
+function textHash(text: string): string {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 2654435761)
+    h2 = Math.imul(h2 ^ c, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36)
 }

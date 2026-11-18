@@ -114,8 +114,10 @@ it('keeps search stable across hydration and invalidates saved text, filters and
   for (const patch of [{ title: 'Other' }, { folderId: 'work' }, { updatedAt: 2 }, { messageCount: 2 }, { preview: 'Sun' }]) {
     expect(chatSearchRevision([{ ...hydrated[0]!, ...patch }], characters)).not.toBe(revision)
   }
-  hydrated[0]!.messages[0]!.swipes[0]!.content = 'Sun'
-  expect(chatSearchRevision(hydrated, characters)).not.toBe(revision)
+  // the store replaces a chat object whenever one of its messages changes
+  const edited = JSON.parse(JSON.stringify(hydrated)) as typeof chats
+  edited[0]!.messages[0]!.swipes[0]!.content = 'Sun'
+  expect(chatSearchRevision(edited, characters)).not.toBe(revision)
   expect(chatSearchRevision(chats, [{ id: 'aria', name: 'Selene' }])).not.toBe(revision)
   expect(chatSearchRevision([], characters)).not.toBe(revision)
 })

@@ -1,5 +1,5 @@
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, MagnifyingGlass, Note, BookOpenText, GitBranch, GearSix, X, CaretUp, CaretDown, Brain, UserPlus, DotsThreeVertical, ImageSquare, Trash, Lightning, Storefront, ArrowRight } from '@phosphor-icons/react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
@@ -92,6 +92,9 @@ function findRanges(msgEl: HTMLElement, needle: string): Range[] {
 
 /** `doomed` ids are about to be removed; anchoring to one would restore
  *  nothing, so the first survivor in view takes the anchor instead. */
+/** Rows a chat paints first; the rest of the page follows right after. */
+const FIRST_ROWS = 12
+
 function captureAnchor(el: HTMLElement | null, doomed?: Set<ID>): ScrollAnchor | null {
   if (!el) return null
   const fold = el.getBoundingClientRect().top
@@ -189,7 +192,16 @@ export function ChatView() {
     return () => clearInterval(t)
   }, [autoMode, autoDelaySec, isStreaming, msgCount, chat, sendMessage])
   const pageSize = Math.max(10, settings.messagesToLoad || 50)
-  const [visibleCount, setVisibleCount] = useState(pageSize)
+  // A chat opens on its newest rows; the rest of the page follows once those
+  // are on screen, rendered in slices, so opening never holds a long frame.
+  // The count belongs to the chat it was set for: another chat starts over.
+  const firstRows = Math.min(pageSize, FIRST_ROWS)
+  const [shown, setShown] = useState({ chatId: activeChatId, count: firstRows })
+  const visibleCount = shown.chatId === activeChatId ? shown.count : firstRows
+  const setVisibleCount = (next: number | ((count: number) => number)) => setShown((s) => {
+    const count = s.chatId === activeChatId ? s.count : firstRows
+    return { chatId: activeChatId, count: typeof next === 'function' ? next(count) : next }
+  })
   // Message-deletion mode (entered from the composer's plus menu).
   const deleteMode = useApp((s) => s.deleteMode)
   const setDeleteMode = useApp((s) => s.setDeleteMode)
@@ -227,7 +239,18 @@ export function ChatView() {
   const { swipeFx, onSwipeFx } = useSwipeAnimation(scrollRef, activeChatId, settings.reducedMotion)
 
   // reset pagination + pinning when switching chats
-  useEffect(() => { setVisibleCount(pageSize); setPinned(true) }, [activeChatId, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setVisibleCount(firstRows); setPinned(true) }, [activeChatId, pageSize]) // eslint-disable-line react-hooks/exhaustive-deps
+  // grows once the first rows have painted: a transcript still loading has
+  // none, and a frame callback runs before that frame paints
+  const rowsLoaded = msgCount > 0
+  useEffect(() => {
+    if (visibleCount >= pageSize || !rowsLoaded) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const frame = requestAnimationFrame(() => {
+      timer = setTimeout(() => startTransition(() => setVisibleCount((c) => Math.max(c, pageSize))))
+    })
+    return () => { cancelAnimationFrame(frame); clearTimeout(timer) }
+  }, [visibleCount, pageSize, rowsLoaded]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // streaming typewriter tick
   useEffect(() => {
@@ -282,6 +305,12 @@ export function ChatView() {
     if (!row) return
     el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset
   })
+  // rows added above a reader at the bottom keep them at the bottom; one
+  // scrolled up keeps their place through the resize observer below
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight
+  }, [visibleCount])
   // Selection mode rebuilds every row (checkbox column) and swaps the composer
   // for the bulk bar. The store update lands before React re-renders, so this
   // is the last look at the layout the reader is actually looking at.

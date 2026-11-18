@@ -7,8 +7,11 @@
  * recreated.
  *
  * Nothing runs a user pattern on the render path. The worker is a single
- * serialized job queue: one pattern at a time, so a timeout blames exactly
- * the pattern that wedged it. Jobs with a lower priority number run first.
+ * serialized job queue; jobs with a lower priority number run first. A job is
+ * one pattern, or a whole chain of them over one text (a chain is hundreds of
+ * patterns on a heavy setup, and a round trip each cost more than the
+ * matching). A chain that times out cannot say which pattern wedged it, so
+ * callers rerun it one pattern at a time to find out.
  */
 
 export interface SafeRegexResult {
@@ -25,41 +28,56 @@ export interface SafeRegexResult {
 // Exported for the worker-semantics test; the engine itself only runs it
 // inside the Worker created below.
 export const WORKER_SRC = `
-self.onmessage = (e) => {
-  const { id, find, flags, replace, trims, macros, input } = e.data;
-  try {
-    const re = new RegExp(find, flags ?? "");
-    const trim = (v) => {
-      let t = v;
-      for (const s of (trims || [])) if (s) t = t.split(s).join("");
-      return t;
-    };
-    const subMacros = (t) => (macros
-      ? t.replace(/\\{\\{(user|char)\\}\\}/gi, (_, k) => macros[k.toLowerCase()] || "")
-      : t);
-    const matches = [];
-    let output = "";
-    let last = 0;
-    let m;
-    let guard = 0;
-    while ((m = re.exec(input)) !== null && guard++ < 5000) {
-      if (m[0].length === 0 && re.global) {
-        const pos = re.lastIndex;
-        const code = input.codePointAt(pos);
-        re.lastIndex += (re.unicode || re.unicodeSets) && code > 0xffff ? 2 : 1;
-      }
-      matches.push({ start: m.index, end: m.index + m[0].length });
-      let repl = String(replace ?? "").replace(/\\{\\{match\\}\\}/gi, "\\u0000");
-      repl = repl.replace(/\\$(\\d+)|\\$<([^>]+)>/g, (_, num, name) => {
-        const v = num != null ? m[Number(num)] : (m.groups ? m.groups[name] : undefined);
-        return v != null && v !== "" ? trim(v) : "";
-      });
-      repl = subMacros(repl.split("\\u0000").join(trim(m[0])));
-      output += input.slice(last, m.index) + repl;
-      last = m.index + m[0].length;
-      if (!re.global) break;
+const apply = (step, input) => {
+  const { find, flags, replace, trims, macros } = step;
+  const re = new RegExp(find, flags ?? "");
+  const trim = (v) => {
+    let t = v;
+    for (const s of (trims || [])) if (s) t = t.split(s).join("");
+    return t;
+  };
+  const subMacros = (t) => (macros
+    ? t.replace(/\\{\\{(user|char)\\}\\}/gi, (_, k) => macros[k.toLowerCase()] || "")
+    : t);
+  const matches = [];
+  let output = "";
+  let last = 0;
+  let m;
+  let guard = 0;
+  while ((m = re.exec(input)) !== null && guard++ < 5000) {
+    if (m[0].length === 0 && re.global) {
+      const pos = re.lastIndex;
+      const code = input.codePointAt(pos);
+      re.lastIndex += (re.unicode || re.unicodeSets) && code > 0xffff ? 2 : 1;
     }
-    output += input.slice(last);
+    matches.push({ start: m.index, end: m.index + m[0].length });
+    let repl = String(replace ?? "").replace(/\\{\\{match\\}\\}/gi, "\\u0000");
+    repl = repl.replace(/\\$(\\d+)|\\$<([^>]+)>/g, (_, num, name) => {
+      const v = num != null ? m[Number(num)] : (m.groups ? m.groups[name] : undefined);
+      return v != null && v !== "" ? trim(v) : "";
+    });
+    repl = subMacros(repl.split("\\u0000").join(trim(m[0])));
+    output += input.slice(last, m.index) + repl;
+    last = m.index + m[0].length;
+    if (!re.global) break;
+  }
+  output += input.slice(last);
+  return { output, matches };
+};
+self.onmessage = (e) => {
+  const { id, chain, input } = e.data;
+  if (chain) {
+    // a step that fails (a bad pattern) leaves the text as it was
+    let cur = input;
+    for (const step of chain) {
+      if (cur.length >= step.skipAt) continue;
+      try { cur = apply(step, cur).output; } catch {}
+    }
+    self.postMessage({ id, ok: true, output: cur });
+    return;
+  }
+  try {
+    const { output, matches } = apply(e.data, input);
     self.postMessage({ id, ok: true, output, matches });
   } catch (err) {
     self.postMessage({ id, ok: false, error: String((err && err.message) || err) });
@@ -203,6 +221,38 @@ export function runRegexSafe(
         resolve(r)
       },
     }
+    const at = queue.findIndex((q) => q.priority > priority)
+    if (at < 0) queue.push(job)
+    else queue.splice(at, 0, job)
+    pump()
+  })
+}
+
+export interface RegexStep {
+  find: string
+  flags: string
+  replace: string
+  trims?: string[]
+  macros?: Record<string, string>
+}
+
+/** Every step over `input` in one worker job. A step that already timed out
+ *  on text this long is skipped, as {@link isBadPattern} decides. A result
+ *  with `timedOut` names no pattern: rerun the steps one at a time. */
+export function runRegexChainSafe(steps: RegexStep[], input: string, opts: { timeoutMs?: number; priority?: number } = {}): Promise<SafeRegexResult> {
+  return new Promise((resolve) => {
+    const chain = steps.filter((st) => st.find).map((st) => ({
+      find: st.find,
+      flags: st.flags || "",
+      replace: st.replace,
+      trims: st.trims ?? [],
+      macros: st.macros,
+      skipAt: badPatterns.get(key(st.find, st.flags || "")) ?? Number.MAX_SAFE_INTEGER,
+    }))
+    if (!chain.length) { resolve({ ok: true, output: input }); return }
+    const id = ++seq
+    const priority = opts.priority ?? 0
+    const job: PendingJob = { id, priority, timeoutMs: opts.timeoutMs ?? 400, message: { id, chain, input }, resolve }
     const at = queue.findIndex((q) => q.priority > priority)
     if (at < 0) queue.push(job)
     else queue.splice(at, 0, job)

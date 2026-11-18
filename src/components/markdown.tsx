@@ -1,6 +1,15 @@
 
 import { Children, createContext, isValidElement, cloneElement, memo, useContext, type ReactNode, type ReactElement } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
+import { defaultUrlTransform, type Components } from 'react-markdown'
+import { toJsxRuntime } from 'hast-util-to-jsx-runtime'
+import { urlAttributes } from 'html-url-attributes'
+import { Fragment, jsx, jsxs } from 'react/jsx-runtime'
+import remarkParse from 'remark-parse'
+import remarkRehype from 'remark-rehype'
+import { unified } from 'unified'
+import { visit } from 'unist-util-visit'
+import { VFile } from 'vfile'
+import type { Root } from 'hast'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import remarkBreaks from 'remark-breaks'
@@ -149,6 +158,52 @@ const mdComponents = {
   style: ScopedStyle,
 } as const
 
+/** The markdown pipeline, built once per variant: setting one up runs every
+ *  plugin's setup (the highlighter registers its grammars), which cost more
+ *  than parsing a message. Text without a `<` holds no HTML, so it skips the
+ *  raw-HTML pass, a second full parse of the tree. */
+const pipelines = new Map<string, ReturnType<typeof buildPipeline>>()
+function buildPipeline(html: boolean, allowStyles: boolean) {
+  const base = unified()
+    .use(remarkParse)
+    // remark-breaks: single newlines render as breaks
+    .use(remarkGfm, { singleTilde: false })
+    .use(remarkMath)
+    .use(remarkBreaks)
+    .use(remarkRehype, { allowDangerousHtml: true })
+  // raw HTML parsed, then sanitized BEFORE katex/highlight so their
+  // generated markup isn't stripped by the allowlist
+  return (html ? base.use(rehypeRaw) : base)
+    .use(rehypeSanitize, allowStyles ? htmlSchema : defaultSchema)
+    .use(rehypeKatex)
+    .use(rehypeHighlight, { detect: false, ignoreMissing: true })
+    .freeze()
+}
+
+function renderMarkdown(text: string, allowStyles: boolean, components: Components): ReactNode {
+  const html = text.includes('<')
+  const id = `${html}:${allowStyles}`
+  let pipeline = pipelines.get(id)
+  if (!pipeline) pipelines.set(id, pipeline = buildPipeline(html, allowStyles))
+  const file = new VFile(text)
+  const tree = pipeline.runSync(pipeline.parse(file), file) as Root
+  visit(tree, (node, index, parent) => {
+    // HTML the raw pass left behind shows as the text it was written as
+    if (node.type === 'raw' && parent && typeof index === 'number') {
+      parent.children[index] = { type: 'text', value: node.value }
+      return index
+    }
+    if (node.type !== 'element') return
+    for (const key in urlAttributes) {
+      const test = urlAttributes[key]
+      if (Object.hasOwn(node.properties, key) && (test === null || test?.includes(node.tagName))) {
+        node.properties[key] = defaultUrlTransform(String(node.properties[key] || ''))
+      }
+    }
+  })
+  return toJsxRuntime(tree, { Fragment, components, ignoreInvalidStyle: true, jsx, jsxs, passKeys: true, passNode: true })
+}
+
 // memoized: re-parses markdown (remark/rehype/KaTeX/highlight) ONLY when the
 // content string actually changes — not on every parent re-render
 export const Markdown = memo(function Markdown({ content, className, scope, allowStyles = true, imageUrl, imageComponent }: { content: string; className?: string; scope?: string; allowStyles?: boolean; imageUrl?: (url: string) => string; imageComponent?: Components['img'] }) {
@@ -173,21 +228,11 @@ export const Markdown = memo(function Markdown({ content, className, scope, allo
       )}
     >
       <StyleScope.Provider value={scope ?? '.mes_text'}>
-        <ReactMarkdown
-          // remark-breaks: single newlines render as breaks
-          remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkMath, remarkBreaks]}
-          rehypePlugins={[
-            // raw HTML parsed, then sanitized BEFORE katex/highlight so their
-            // generated markup isn't stripped by the allowlist
-            rehypeRaw,
-            [rehypeSanitize, allowStyles ? htmlSchema : defaultSchema],
-            rehypeKatex,
-            [rehypeHighlight, { detect: false, ignoreMissing: true }],
-          ]}
-          components={imageComponent ? { ...mdComponents, img: imageComponent } : imageUrl ? { ...mdComponents, img: ({ src, alt }) => <img src={typeof src === 'string' ? imageUrl(src) : undefined} alt={alt ?? ''} loading="lazy" /> } : mdComponents}
-        >
-          {holdHtmlBlocks(separateLinkTitles(content))}
-        </ReactMarkdown>
+        {renderMarkdown(
+          holdHtmlBlocks(separateLinkTitles(content)),
+          allowStyles,
+          imageComponent ? { ...mdComponents, img: imageComponent } : imageUrl ? { ...mdComponents, img: ({ src, alt }) => <img src={typeof src === 'string' ? imageUrl(src) : undefined} alt={alt ?? ''} loading="lazy" /> } : mdComponents,
+        )}
       </StyleScope.Provider>
     </div>
   )

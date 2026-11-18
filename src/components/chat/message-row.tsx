@@ -34,6 +34,72 @@ import { estimateTokens, formatCost, formatTokens, knownCost } from '@/lib/token
 import { DEFAULT_AVATAR, cn, copyText, readableNameColor, shortModel } from '@/lib/utils'
 import { createToast } from '@/lib/notifications'
 
+/** One formatter for every row: building one per call is most of the cost. */
+const TIME = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' })
+const timeOf = (at: number | undefined) => (Number.isFinite(at) ? TIME.format(at) : '')
+
+/** Resolved display scripts per script set, then per row inputs. */
+const sharedScripts = new WeakMap<RegexScript[], Map<string, DisplayScript[]>>()
+
+interface ScriptRow {
+  role: Message['role']
+  userName: string
+  presetId: string | null | undefined
+  chatId: string
+  characterId: string
+  charName: string
+  isGroup: boolean
+  members: string[]
+  depth: number
+}
+
+/** The display-stage scripts that apply to one row, resolved for the worker. */
+function resolveDisplayScripts(scripts: RegexScript[], row: ScriptRow): DisplayScript[] {
+  // Regex scripts arrive from arbitrary import zips — a hostile pattern
+  // ((a+)+b) backtracks catastrophically, and RegExp can't be interrupted.
+  // Every script runs in the regex worker off the render path, where a
+  // timeout can kill it; capping the pattern length bounds what ships.
+  const MAX_PATTERN = 500
+  const inScope = (r: RegexScript): boolean => {
+    if (r.scope === 'global') return true
+    if (!r.scopeTargetId) return false
+    if (r.scope === 'chat') return r.scopeTargetId === row.chatId
+    if (r.scope === 'character') return r.scopeTargetId === row.characterId || (row.isGroup && row.members.includes(r.scopeTargetId))
+    if (r.scope === 'preset') return r.scopeTargetId === row.presetId
+    return true
+  }
+  // scripts bound to a depth window only apply inside it (same count the
+  // engine uses at assembly)
+  // global first, then preset-bound, then scoped — same order the engine runs
+  const rank = (r: RegexScript) => (r.scope === 'global' ? 0 : r.scope === 'preset' ? 1 : 2)
+  const userName = row.userName
+  // replacement macros use the chat's global names — only the trim pass is
+  // speaker-aware in the source format, keep the same split here
+  const charName = row.charName
+  const subMacros = (t: string) => t.replace(/\{\{(user|char)\}\}/gi, (_, k: string) => (k.toLowerCase() === 'user' ? userName : charName))
+  const escapeLiteral = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const resolved: DisplayScript[] = []
+  for (const r of [...scripts].sort((a, b) => rank(a) - rank(b) || a.order - b.order)) {
+    // display-stage scripts only: saved-text scripts already ran when the
+    // message was stored, prompt-only ones never touch what is shown
+    if (!r.enabled || !r.markdownOnly || !r.find || r.find.length > MAX_PATTERN) continue
+    if (!(row.role === 'user' ? r.placements.userInput : r.placements.aiOutput)) continue
+    if (!inScope(r)) continue
+    if (r.minDepth != null && row.depth < r.minDepth) continue
+    if (r.maxDepth != null && row.depth > r.maxDepth) continue
+    // same replace semantics as the engine: {{match}} is the whole
+    // (trimmed) match, $n / $<name> pull captured groups, missing groups
+    // vanish, trims erase from each, macros substitute (user/char names)
+    let find = r.find
+    if (r.macroMode === 'raw') find = subMacros(find)
+    else if (r.macroMode === 'escaped') {
+      find = find.replace(/\{\{(user|char)\}\}/gi, (_, k: string) => escapeLiteral(k.toLowerCase() === 'user' ? userName : charName))
+    }
+    resolved.push({ find, flags: r.flags ?? 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
+  }
+  return resolved
+}
+
 const toast = createToast('chat')
 const memoryToast = createToast('memory')
 const speechToast = createToast('speech')
@@ -454,50 +520,20 @@ export const MessageRow = memo(function MessageRow({
   if (depthAt.current?.text !== rawContent) depthAt.current = { text: rawContent, depth: liveDepth }
   const depth = depthAt.current.depth
   const displayScripts = useMemo<DisplayScript[]>(() => {
-    // Regex scripts arrive from arbitrary import zips — a hostile pattern
-    // ((a+)+b) backtracks catastrophically, and RegExp can't be interrupted.
-    // Every script runs in the regex worker off the render path, where a
-    // timeout can kill it; capping the pattern length bounds what ships.
-    const MAX_PATTERN = 500
-    const inScope = (r: RegexScript): boolean => {
-      if (r.scope === 'global') return true
-      if (!r.scopeTargetId) return false
-      if (r.scope === 'chat') return r.scopeTargetId === chat.id
-      if (r.scope === 'character') return r.scopeTargetId === chat.characterId || (!!character.isGroup && (character.members ?? []).includes(r.scopeTargetId))
-      if (r.scope === 'preset') return r.scopeTargetId === presetId
-      return true
+    // every row of a chat resolves the same list (depth aside): one shared
+    // copy per input set, so the rows also share their regex results
+    const row: ScriptRow = {
+      role: message.role, userName: currentPersona?.name ?? 'User', presetId, chatId: chat.id, characterId: chat.characterId,
+      charName: character.name, isGroup: !!character.isGroup, members: character.members ?? [], depth,
     }
-    // scripts bound to a depth window only apply inside it (same count the
-    // engine uses at assembly)
-    // global first, then preset-bound, then scoped — same order the engine runs
-    const rank = (r: RegexScript) => (r.scope === 'global' ? 0 : r.scope === 'preset' ? 1 : 2)
-    const userName = currentPersona?.name ?? 'User'
-    // replacement macros use the chat's global names — only the trim pass is
-    // speaker-aware in the source format, keep the same split here
-    const charName = character.name
-    const subMacros = (t: string) => t.replace(/\{\{(user|char)\}\}/gi, (_, k: string) => (k.toLowerCase() === 'user' ? userName : charName))
-    const escapeLiteral = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const resolved: DisplayScript[] = []
-    for (const r of [...regexScripts].sort((a, b) => rank(a) - rank(b) || a.order - b.order)) {
-      // display-stage scripts only: saved-text scripts already ran when the
-      // message was stored, prompt-only ones never touch what is shown
-      if (!r.enabled || !r.markdownOnly || !r.find || r.find.length > MAX_PATTERN) continue
-      if (!(message.role === 'user' ? r.placements.userInput : r.placements.aiOutput)) continue
-      if (!inScope(r)) continue
-      if (r.minDepth != null && depth < r.minDepth) continue
-      if (r.maxDepth != null && depth > r.maxDepth) continue
-      // same replace semantics as the engine: {{match}} is the whole
-      // (trimmed) match, $n / $<name> pull captured groups, missing groups
-      // vanish, trims erase from each, macros substitute (user/char names)
-      let find = r.find
-      if (r.macroMode === 'raw') find = subMacros(find)
-      else if (r.macroMode === 'escaped') {
-        find = find.replace(/\{\{(user|char)\}\}/gi, (_, k: string) => escapeLiteral(k.toLowerCase() === 'user' ? userName : charName))
-      }
-      resolved.push({ find, flags: r.flags ?? 'g', replace: r.replace, trims: r.trimStrings.filter(Boolean), macros: { user: userName, char: charName } })
-    }
-    return resolved
-  }, [regexScripts, message.role, currentPersona?.name, presetId, chat, character, depth])
+    const depthBound = regexScripts.some((r) => r.minDepth != null || r.maxDepth != null)
+    const key = [row.role, row.userName, row.presetId, row.chatId, row.characterId, row.charName, row.isGroup, row.members.join(','), depthBound ? depth : ''].join('\u0000')
+    let shared = sharedScripts.get(regexScripts)
+    if (!shared) sharedScripts.set(regexScripts, shared = new Map())
+    let list = shared.get(key)
+    if (!list) shared.set(key, list = resolveDisplayScripts(regexScripts, row))
+    return list
+  }, [regexScripts, message.role, currentPersona?.name, presetId, chat.id, chat.characterId, character, depth])
   // while streaming, unclosed emphasis/fence markers get synthetic closers
   // so each tick renders as finished markdown (never committed)
   const rawDisplayed = isStreamingThis ? balanceStreamingMarkdown(rawContent) : rawContent
@@ -800,7 +836,7 @@ export const MessageRow = memo(function MessageRow({
               </span>
               {settings.showTimestamps && (
                 <span className="text-muted-foreground">
-                  {new Date(isUser ? message.timestamp : swipe?.createdAt ?? message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  {timeOf(isUser ? message.timestamp : swipe?.createdAt ?? message.timestamp)}
                 </span>
               )}
               {settings.hideAvatars && settings.showMessageIds && <span className="text-muted-foreground">#{index}</span>}
