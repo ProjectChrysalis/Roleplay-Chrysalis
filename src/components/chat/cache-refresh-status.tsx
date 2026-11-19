@@ -82,11 +82,14 @@ export function CacheRefreshStatus({ chatId }: { chatId: string }) {
   const usage = status?.usage ?? []
   const cost = usage.length && usage.every((u) => u.costTotal != null) ? usage.reduce((total, u) => total + u.costTotal!, 0) : null
   const tokens = usage.reduce((total, u) => total + u.input + u.output + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0), 0)
+  const spent = usage.length > 0 ? `${tokens.toLocaleString()} tokens · ${cost != null ? formatCost(cost) : 'Cost unknown'}` : ''
+  // one line at every width: the message truncates and the usage moves into
+  // the tooltip on narrow screens, so the strip never grows taller
   return (
-    <div className="relative flex shrink-0 flex-wrap items-center justify-end gap-2 border-b px-3 py-1 text-xs text-muted-foreground" aria-live="polite">
-      <span>{error || (busy ? 'Cache refresh paused while generating' : status?.nextAt ? `Cache refresh in ${Math.max(0, Math.ceil((status.nextAt - now) / 1000))}s · ${status.remaining} left` : status?.message || 'Waiting for cache refresh status')}</span>
-      {usage.length > 0 && <span title="Refresh usage, separate from reply generation">{tokens.toLocaleString()} tokens · {cost != null ? formatCost(cost) : 'Cost unknown'}</span>}
-      {status?.state === 'scheduled' && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs" onClick={() => void poll.current?.(true)}>Stop</Button>}
+    <div className="relative flex h-7 shrink-0 items-center justify-end gap-2 border-b px-3 text-xs text-muted-foreground" aria-live="polite" title={spent ? `Refresh usage: ${spent}` : undefined}>
+      <span className="min-w-0 truncate">{error || (busy ? 'Cache refresh paused while generating' : status?.nextAt ? `Cache refresh in ${Math.max(0, Math.ceil((status.nextAt - now) / 1000))}s · ${status.remaining} left` : status?.message || 'Waiting for cache refresh status')}</span>
+      {spent && <span className="hidden shrink-0 sm:inline" title="Refresh usage, separate from reply generation">{spent}</span>}
+      {status?.state === 'scheduled' && <Button variant="ghost" size="sm" className="h-5 shrink-0 px-1 text-xs" onClick={() => void poll.current?.(true)}>Stop</Button>}
     </div>
   )
 }

@@ -679,8 +679,6 @@ export function ChatView() {
         />
       )}
 
-      <CacheRefreshStatus chatId={chat.id} />
-
       {/* Header + group bar PINNED above the message log — the one view where
           the top row stays visible at all times (back, name, search, preset
           switcher are crucial chrome). `text-sm` & co are rem-based, so the
@@ -824,6 +822,10 @@ export function ChatView() {
           </DropdownMenuContent>
         </DropdownMenu>
       </nav>
+
+      {/* below the chrome, so the mobile section bar keeps the top row its
+          drawers are placed against */}
+      <CacheRefreshStatus chatId={chat.id} />
 
       {/* Find bar */}
       {findOpen && (
