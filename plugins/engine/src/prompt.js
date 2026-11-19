@@ -4,6 +4,7 @@ import { expandMacros, macroCard } from "./macros.js";
 import { loadMemories, recallMemories } from "./memories.js";
 import { defaultPresetId } from "./presets.js";
 import { loadRegexScripts, runRegexScripts } from "./regex.js";
+import { presetThinkTags } from "./thinking.js";
 import { globalVars, transcriptMacros } from "./variables.js";
 import { activateWorldInfo, presetMaxCtx, wiBudgetChars } from "./world-info.js";
 
@@ -428,7 +429,7 @@ export function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
       const ctx = { ...mc, charName: (visibleHist[i] && visibleHist[i].name) || charName };
       const pre = expandMacros(unesc(isUser ? chCfg.userPrefix : chCfg.charPrefix), ctx);
       const suf = expandMacros(unesc(isUser ? chCfg.userSuffix : chCfg.charSuffix), ctx);
-      const thinking = h.reasoning ? (preset.reasoningTags?.open || "<think>") + "\n" + h.reasoning + "\n" + (preset.reasoningTags?.close || "</think>") + "\n\n" : "";
+      const thinking = h.reasoning ? (presetThinkTags(preset)?.open || "<think>") + "\n" + h.reasoning + "\n" + (presetThinkTags(preset)?.close || "</think>") + "\n\n" : "";
       return pre + thinking + h.content + suf;
     }).join(sep);
     const role = chCfg.role === "user" || chCfg.role === "system" ? chCfg.role : "assistant";
@@ -647,7 +648,7 @@ export function assemble(fsx, meta, msgs, speaker, pendingUserText, opts) {
     ...(assistantPrefill ? { assistantPrefill } : {}),
     ...(cacheCfg ? { cache: cacheCfg } : {}),
     ...(preset && typeof preset.reasoning === "string" && preset.reasoning !== "off" ? { reasoning: preset.reasoning } : {}),
-    ...(preset && preset.reasoningTags && preset.reasoningTags.open && preset.reasoningTags.close ? { reasoningTags: preset.reasoningTags } : {}),
+    ...(presetThinkTags(preset) ? { reasoningTags: presetThinkTags(preset) } : {}),
     ...(preset && typeof preset.thinkingBudget === "number" && preset.thinkingBudget > 0 ? { thinkingBudget: preset.thinkingBudget } : {}),
     ...promptFormatOf(preset),
     presetName: preset && preset.name ? preset.name : "default",

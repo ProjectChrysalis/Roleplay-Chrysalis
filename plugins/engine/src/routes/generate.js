@@ -5,7 +5,7 @@ import { expandMacros } from "../macros.js";
 import { loadMemories, memoryExtractPrompt, memoryTranscript, mergeMemories, parseMemoriesReply, saveMemories } from "../memories.js";
 import { applyStashVars, llmFailReason, pendingOut } from "../passes.js";
 import { assemble, chatPersona, chatUserName } from "../prompt.js";
-import { continuedSwipeMeta, restoreSwipeThinking, syncSwipeThinking } from "../thinking.js";
+import { continuedSwipeMeta, restoreSwipeThinking, syncSwipeThinking, withPrefill } from "../thinking.js";
 import { esc, uid } from "../util.js";
 import { globalVars, transcriptMacros } from "../variables.js";
 import { cacheWiVectorBatch, embedCap, semanticEmbedWork, setEmbedCap } from "../vectors.js";
@@ -131,11 +131,9 @@ export function sendRoute(c) {
     const plan = group && req.stash && Array.isArray(req.stash.plan) ? req.stash.plan : null;
     if (group) speaker = (plan && members.find((m) => m.id === plan[0])) || null;
     if (!speaker) return err(400, "chat has no participating characters");
-    replyText = stripEchoedName(replyText, readJson("presets/" + (meta.presetId || "default") + ".json", null), !!group, speaker.name);
-    // assistant prefill: the committed message starts with it (servers that
-    // echo the trailing assistant turn are detected, not doubled)
-    const prefill = reply.assistantPrefill;
-    if (prefill && !replyText.startsWith(prefill)) replyText = prefill + replyText;
+    const sendPreset = readJson("presets/" + (meta.presetId || "default") + ".json", null);
+    replyText = stripEchoedName(replyText, sendPreset, !!group, speaker.name);
+    replyText = withPrefill(replyText, reply, sendPreset);
     replyText = onSave(replyText, "ai_output", speaker);
     if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
     const charMsg = {
@@ -171,7 +169,7 @@ export function sendRoute(c) {
 }
 // group: force a specific member to speak now
 export function nextSpeakerRoute(c) {
-  const { req, host, fsx, id, op, ok, err, body, touch, chat, meta, members, group, modelOf, onSave, markGenerating, genUsage, generationPreset, swipeMetaEntry, toolX } = c;
+  const { req, host, fsx, id, op, ok, err, readJson, body, touch, chat, meta, members, group, modelOf, onSave, markGenerating, genUsage, generationPreset, swipeMetaEntry, toolX } = c;
   if (op === "next" && req.method === "POST") {
     if (!group) return err(400, "not a group chat");
     const b = body();
@@ -201,9 +199,7 @@ export function nextSpeakerRoute(c) {
       return pendingOut(meta, { presetName: a.presetName, ...(a.trimmed ? { trimmed: a.trimmed } : {}) });
     }
     if (reply.model === "error") return err(503, llmFailReason(reply));
-    let replyText = String(reply.text || "").trim();
-    const prefill = reply.assistantPrefill;
-    if (prefill && !replyText.startsWith(prefill)) replyText = prefill + replyText;
+    let replyText = withPrefill(String(reply.text || "").trim(), reply, readJson("presets/" + (meta.presetId || "default") + ".json", null));
     replyText = onSave(replyText, "ai_output", speaker);
     if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
     const charMsg = {
@@ -277,9 +273,8 @@ export function swipeRoute(c) {
       return pendingOut(meta, { presetName: a.presetName });
     }
     if (reply.model === "error") return err(503, llmFailReason(reply));
-    let fresh = stripEchoedName(String(reply.text || "").trim(), readJson("presets/" + (meta.presetId || "default") + ".json", null), !!group, msg.name);
-    const swipPrefill = reply.assistantPrefill;
-    if (swipPrefill && !fresh.startsWith(swipPrefill)) fresh = swipPrefill + fresh;
+    const swipePreset = readJson("presets/" + (meta.presetId || "default") + ".json", null);
+    let fresh = withPrefill(stripEchoedName(String(reply.text || "").trim(), swipePreset, !!group, msg.name), reply, swipePreset);
     fresh = onSave(fresh, "ai_output", speaker);
     if (reply.reasoning) reply.reasoning = onSave(reply.reasoning, "reasoning", speaker);
     const previousMeta = syncSwipeThinking(msg, false).extra.swipeMeta;

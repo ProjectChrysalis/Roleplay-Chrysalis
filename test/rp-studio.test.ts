@@ -1507,6 +1507,27 @@ describe("rp studio engine: utility prompts", () => {
     expect(cont2.messages.some((x) => x.role === "user" && x.content.includes("KEEP GOING NOW"))).toBe(true);
   }, 30_000);
 
+  it("a prefill that opens a think block seeds the reasoning, not the message", async () => {
+    // reasoning switched off: the tags still ride from the sampler settings
+    const base = JSON.parse(fs.readFileSync(path.join(root, "presets", "default.json"), "utf8")) as Record<string, unknown> & { studio?: Record<string, unknown> };
+    delete base.reasoningTags;
+    base.studio = { ...base.studio, samplers: { assistantPrefill: "<think>\nAs Aria,", reasoning: { enabled: false, autoParse: true, thinkTagOpen: "<think>", thinkTagClose: "</think>" } } };
+    fs.writeFileSync(path.join(root, "presets", "default.json"), JSON.stringify(base));
+    const m = mockHost({ text: "Ember waves.", reasoning: "I greet them.", assistantPrefill: "<think>\nAs Aria,", model: "mock/model", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, costTotal: 0 } } as { text: string });
+    await drive(engineUrl, { method: "POST", path: "/chats", body: { characterId: "aria" } }, m);
+    const id = chatIdOf();
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/send`, body: { text: "hi" } }, m);
+    expect((m.requests[0]!.req as { reasoningTags?: unknown }).reasoningTags).toEqual({ open: "<think>", close: "</think>" });
+    const readMsgs = () => fs.readFileSync(path.join(root, "chats", `${id}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as { role?: string; text?: string; extra?: { reasoning?: string } }).filter((x) => x.role === "char");
+    const reply = readMsgs().at(-1)!;
+    expect(reply.text).toBe("Ember waves.");
+    expect(reply.extra?.reasoning).toBe("As Aria, I greet them.");
+    await drive(engineUrl, { method: "POST", path: `/chats/${id}/swipe`, body: {} }, m);
+    const swiped = readMsgs().at(-1)!;
+    expect(swiped.text).toBe("Ember waves.");
+    expect(swiped.extra?.reasoning).toBe("As Aria, I greet them.");
+  }, 30_000);
+
   it("verbosity rides the request body when set, nothing on auto", async () => {
     const base = JSON.parse(fs.readFileSync(path.join(root, "presets", "default.json"), "utf8")) as { studio?: Record<string, unknown> };
     base.studio = { ...base.studio, verbosity: "low" };

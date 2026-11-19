@@ -55,3 +55,41 @@ export function continuedSwipeMeta(original, continuation) {
     finishedAt: original?.finishedAt, sourceInfo: original?.sourceInfo,
     continuations: [...(original?.continuations || []), continuation] };
 }
+/** Puts the preset's prefill back on a committed reply. A prefill that leaves
+ *  a think block open (e.g. "<think>") hands that block to the model, whose
+ *  thinking comes back already split from the answer: the text before the tag
+ *  starts the message and the text after it starts the reasoning. Servers
+ *  that echo the prefill are detected, not doubled. */
+export function withPrefill(text, reply, preset) {
+  const prefill = reply.assistantPrefill;
+  if (!prefill) return text;
+  let head = prefill;
+  const tags = presetThinkTags(preset);
+  if (tags) {
+    const at = prefill.lastIndexOf(tags.open);
+    if (at >= 0 && at > prefill.lastIndexOf(tags.close)) {
+      head = prefill.slice(0, at);
+      const seed = prefill.slice(at + tags.open.length).trim();
+      if (seed && !String(reply.reasoning || "").startsWith(seed)) {
+        reply.reasoning = reply.reasoning ? seed + " " + reply.reasoning : seed;
+        let seeded = false;
+        if (Array.isArray(reply.parts)) reply.parts = reply.parts.map((p) => {
+          if (seeded || p.type !== "thinking") return p;
+          seeded = true;
+          return { ...p, text: seed + " " + p.text };
+        });
+      }
+    }
+  }
+  if (!head.trim()) return text;
+  return text.startsWith(head) ? text : head + text;
+}
+/** The inline think tags a preset parses, or null. Presets saved while
+ *  reasoning was switched off carry the tags only in their sampler settings. */
+export function presetThinkTags(preset) {
+  const tags = preset && preset.reasoningTags;
+  if (tags && typeof tags.open === "string" && tags.open && typeof tags.close === "string" && tags.close) return { open: tags.open, close: tags.close };
+  const r = preset && preset.studio && preset.studio.samplers && preset.studio.samplers.reasoning;
+  if (r && r.autoParse && typeof r.thinkTagOpen === "string" && r.thinkTagOpen && typeof r.thinkTagClose === "string" && r.thinkTagClose) return { open: r.thinkTagOpen, close: r.thinkTagClose };
+  return null;
+}

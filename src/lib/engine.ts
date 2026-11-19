@@ -1190,7 +1190,7 @@ export function presetToEngine(p: Preset): EnginePreset {
       ? { reasoning: S.reasoning.effort === 'med' ? 'medium' : S.reasoning.effort }
       : {}),
     // inline-thinking parse tags + thinking token budget (consumed engine-side)
-    ...(S?.reasoning?.enabled && S.reasoning.autoParse && S.reasoning.thinkTagOpen && S.reasoning.thinkTagClose
+    ...(S?.reasoning?.autoParse && S.reasoning.thinkTagOpen && S.reasoning.thinkTagClose
       ? { reasoningTags: { open: S.reasoning.thinkTagOpen, close: S.reasoning.thinkTagClose } }
       : {}),
     ...(S?.reasoning?.enabled && S.reasoning.budget > 0 ? { thinkingBudget: S.reasoning.budget } : {}),
